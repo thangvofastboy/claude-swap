@@ -157,3 +157,31 @@ test('/profile dispatches advanced subcommands: bind, tag, notify, history, stat
     ['current'],
   ])
 })
+
+test('/profile dispatches Batch 2 subcommands: cooldown, doctor, statusline, temp, untemp', async ($, on) => {
+  const calls: string[][] = []
+  on('process.run', async (_$, { argv }) => {
+    calls.push(argv.slice(2))
+    return ok('OK')
+  })
+  on('ui.status', () => ({ value: undefined }))
+
+  await $.command.run({ command: 'profile', args: 'cooldown' })
+  await $.command.run({ command: 'profile', args: 'doctor' })
+  await $.command.run({ command: 'profile', args: 'statusline' })
+  await $.command.run({ command: 'profile', args: 'temp work 30m' })
+  await $.command.run({ command: 'profile', args: 'untemp' })
+
+  expect(calls).toEqual([
+    ['cooldown'],
+    ['current'],
+    ['doctor'],
+    ['current'],
+    ['statusline'],
+    ['current'],
+    ['temp', 'work', '30m'],
+    ['current'],
+    ['untemp'],
+    ['current'],
+  ])
+})

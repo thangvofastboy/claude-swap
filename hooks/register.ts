@@ -20,9 +20,15 @@ const SUBCOMMANDS = new Set([
   'import-enc',
   'history',
   'stats',
+  'cooldown',
+  'doctor',
+  'statusline',
+  'prompt',
+  'temp',
+  'untemp',
 ])
 const USAGE =
-  'Dùng: /profile | /profile <tên> | /profile usage | /profile auto [on|off|threshold <%>|order <ds>|pool <tag>|check] | /profile bind [tên] | /profile unbind | /profile tag <tên> <tag> | /profile tags | /profile history [n] | /profile stats | /profile notify [on|off] | /profile export <file> --password <pw> | /profile import-enc <file> --password <pw>'
+  'Dùng: /profile | /profile <tên> | /profile usage | /profile auto [on|off|threshold <%>|order <ds>|pool <tag>|safeguard|return|primary|check] | /profile cooldown | /profile doctor | /profile temp <tên> [thời_gian] | /profile untemp | /profile bind [tên] | /profile unbind | /profile tag <tên> <tag> | /profile tags | /profile history [n] | /profile stats | /profile notify [on|off] | /profile export <file> --password <pw> | /profile import-enc <file> --password <pw>'
 
 // "" → list, "work" → swap work, "save work" → save work, "import ~/a b" → import "~/a b", "auto ..." → auto ...
 function toArgv(args: string): string[] | undefined {
@@ -62,7 +68,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'profile',
-      description: 'Đổi tài khoản Claude ngay trong session: /profile [tên | usage | auto | bind | tag | history | stats]',
+      description: 'Đổi tài khoản Claude ngay trong session: /profile [tên | usage | auto | cooldown | doctor | temp | bind | history]',
     })
 
     try {
@@ -89,7 +95,7 @@ export const register: Register = on => {
     try {
       const ran = await runSwap($, ['auto', 'check'])
       const out = `${ran.stdout}${ran.stderr}`.trim()
-      if (out.includes('[auto-swap]')) {
+      if (out.includes('[auto-swap]') || out.includes('quay về')) {
         await refreshStatus($)
       }
     } catch {}

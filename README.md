@@ -31,6 +31,11 @@ Plugin chạy trực tiếp trên môi trường **Node.js** sẵn có của Cla
 | 📋 **Danh sách trực quan** | Icon 🟢 Active / ⚪ Inactive, email 👤, hiển thị nhanh quota và màu sắc nổi bật trên terminal. |
 | 📊 **Usage từng profile** | Quota 5 giờ, 7 ngày và theo model (Opus, Sonnet…). Thanh màu theo mức: 🟢 < 50% · 🟡 < 80% · 🟠 < 95% · 🔴 ≥ 95%, kèm ⚠ từ 80%. |
 | 🤖 **Tự động chuyển profile** | Tự động switch khi vượt ngưỡng token hoặc bị rate limit (ưu tiên account còn nhiều token, reset sớm hơn hoặc theo danh sách cài đặt). |
+| ⏱️ **Đếm ngược Cooldown & Auto-Return** | Theo dõi đồng hồ đếm ngược reset quota 5h và tự động quay về tài khoản chính khi đã hồi phục. |
+| 🩺 **Khám sức khỏe Profile Doctor** | Chẩn đoán toàn diện OAuth token, thời hạn `expiresAt`, lỗi cú pháp JSON và tình trạng rate limit. |
+| 🚨 **Bảo vệ hạn mức 7 ngày** | Tự động ngăn chặn switch vào các tài khoản có quota 7 ngày chạm ngưỡng nguy hiểm (mặc định 85%). |
+| 💻 **Tích hợp Shell Prompt & Tmux** | Hiển thị active profile & usage % cực nhanh (<5ms) trên prompt Starship, Zsh, Bash hoặc thanh Tmux. |
+| ⏳ **Mượn profile tạm thời (Temp Swap)** | Mượn tạm profile thứ hai trong thời gian định trước (vd `30m`, `1h`) và tự động hoàn trả khi hết giờ. |
 | 📁 **Gắn profile theo dự án** | Tự động kích hoạt đúng profile khi mở thư mục dự án tương ứng thông qua file `.claude-profile`. |
 | 🔔 **Thông báo hệ thống** | Nhận thông báo desktop banner (macOS / Linux / Windows) ngay khi hệ thống tự động đổi profile. |
 | 🏷️ **Tag & Pool chuyển đổi** | Gắn nhãn phân loại (vd: `work`, `hobby`) và giới hạn phạm vi tự động switch theo nhóm cụ thể. |
@@ -85,7 +90,16 @@ claude --plugin-dir /path/to/claude-swap
 | `/profile auto order <ds>` | Cài đặt thứ tự ưu tiên các account sẽ switch (vd: `work,personal`) |
 | `/profile auto order default` | Chuyển về quy tắc tự động (nhiều token hơn + reset sớm hơn) |
 | `/profile auto pool <tag\|all>` | Giới hạn auto-switch chỉ chọn các profile có tag chỉ định |
+| `/profile auto safeguard [on\|off\|<%>]` | Bật/tắt bảo vệ hạn mức 7 ngày (mặc định: `85%`) |
+| `/profile auto return [on\|off]` | Bật/tắt tự động quay về profile chính khi hồi phục token |
+| `/profile auto primary <tên>` | Chỉ định profile chính để auto-return quay về |
 | `/profile auto check` | Kiểm tra quota và switch ngay nếu vượt ngưỡng |
+| `/profile cooldown` | Xem đồng hồ đếm ngược reset quota 5 giờ của tất cả profiles |
+| `/profile doctor` | Quét chẩn đoán sức khỏe, hạn token OAuth và kết nối các profile |
+| `/profile temp <tên> [thời_gian]` | Mượn tạm profile trong một khoảng thời gian (vd: `30m`, `1h`, `2h30m`) |
+| `/profile untemp` | Hủy chế độ mượn tạm và quay lại profile ban đầu ngay lập tức |
+| `/profile statusline` | Xuất chuỗi trạng thái rút gọn cho shell prompt (vd: `[Claude: 🟢 work (32%)]`) |
+| `/profile prompt [starship\|zsh\|bash\|tmux]` | Hướng dẫn và snippet cấu hình shell prompt |
 | `/profile bind [tên]` | Liên kết thư mục hiện tại với profile (lưu vào `.claude-profile`) |
 | `/profile unbind` | Gỡ liên kết profile khỏi thư mục hiện tại |
 | `/profile notify [on\|off]` | Bật / tắt thông báo desktop banner khi tự động switch |
