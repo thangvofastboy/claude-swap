@@ -9,6 +9,7 @@ import {
   deleteProfile,
   listProfiles,
   currentProfile,
+  setCurrent,
   profileEmail,
   importProfiles,
   parseLimits,
@@ -480,6 +481,46 @@ describe('swap.js core functionality', () => {
 
     // CLI doctor command should run cleanly
     assert.equal(await runCli(['doctor'], tmpHome), 0)
+  })
+
+  test('7-day exhaustion safeguard prevents auto-switching to near-limit profile', async () => {
+    login(tmpHome, 'cur', 'tok-cur')
+    saveProfile(tmpHome, 'cur_profile')
+    login(tmpHome, 'cand_high_7d', 'tok-cand1')
+    saveProfile(tmpHome, 'cand_high_7d')
+    login(tmpHome, 'cand_safe', 'tok-cand2')
+    saveProfile(tmpHome, 'cand_safe')
+
+    const cache = {
+      'cur_profile|cur@example.com': {
+        limits: [['5 giờ', 98, '20:00']],
+      },
+      'cand_high_7d|cand_high_7d@example.com': {
+        limits: [
+          ['5 giờ', 10, '20:00'],
+          ['7 ngày', 90, 'Thứ 6'],
+        ],
+      },
+      'cand_safe|cand_safe@example.com': {
+        limits: [
+          ['5 giờ', 30, '20:00'],
+          ['7 ngày', 40, 'Thứ 6'],
+        ],
+      },
+    }
+
+    // CLI safeguard commands
+    assert.equal(await runCli(['auto', 'safeguard', '85'], tmpHome), 0)
+    assert.equal(await runCli(['auto', 'safeguard'], tmpHome), 0)
+
+    setCurrent(tmpHome, 'cur_profile')
+
+    const res = await autoCheckAndSwap(tmpHome, {
+      cache,
+      config: { enabled: true, threshold: 90, safeguardThreshold: 85 },
+    })
+    assert.equal(res.swapped, true)
+    assert.equal(res.to, 'cand_safe')
   })
 })
 

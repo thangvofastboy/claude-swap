@@ -891,6 +891,12 @@ export function loadAutoSwitchConfig(home) {
         pool: typeof parsed.pool === 'string' && parsed.pool !== 'all' ? parsed.pool : null,
         autoReturn: parsed.autoReturn === true,
         primaryProfile: typeof parsed.primaryProfile === 'string' ? parsed.primaryProfile : null,
+        safeguardThreshold:
+          typeof parsed.safeguardThreshold === 'number'
+            ? parsed.safeguardThreshold
+            : parsed.safeguardThreshold === null || parsed.safeguardThreshold === false
+            ? null
+            : 85,
       }
     }
   } catch {}
@@ -901,6 +907,7 @@ export function loadAutoSwitchConfig(home) {
     pool: null,
     autoReturn: false,
     primaryProfile: null,
+    safeguardThreshold: 85,
   }
 }
 
@@ -1146,6 +1153,13 @@ export function findNextProfile(home, options = {}) {
       continue
     }
 
+    const sevenDay = limits.find(l => l[0] === '7 ngày')
+    const raw7d = sevenDay ? Number(sevenDay[1]) : 0
+    const util7d = raw7d <= 1 && raw7d > 0 ? raw7d * 100 : raw7d
+    if (config.safeguardThreshold && util7d >= config.safeguardThreshold) {
+      continue
+    }
+
     const resetTime = parseResetTime(hit, fiveHour)
     candidates.push({ name, util, resetTime })
   }
@@ -1233,16 +1247,26 @@ export async function autoCheckAndSwap(home, options = {}) {
   const rawUtil = fiveHour ? Number(fiveHour[1]) : 0
   const util = rawUtil <= 1 && rawUtil > 0 ? rawUtil * 100 : rawUtil
 
+  const sevenDay = limits.find(l => l[0] === '7 ngày')
+  const raw7d = sevenDay ? Number(sevenDay[1]) : 0
+  const util7d = raw7d <= 1 && raw7d > 0 ? raw7d * 100 : raw7d
+  const isSafeguardTriggered = Boolean(config.safeguardThreshold && util7d >= config.safeguardThreshold)
+
   const isRateLimited = Boolean(hit.retry_at && hit.retry_at > Date.now() / 1000)
-  if (isRateLimited || util >= config.threshold) {
+  if (isRateLimited || util >= config.threshold || isSafeguardTriggered) {
     const next = findNextProfile(home, { config, cache })
     if (next && next !== cur) {
+      const reasonText = isRateLimited
+        ? 'Rate limited'
+        : isSafeguardTriggered
+        ? `Mức dùng 7 ngày ${util7d}% >= ngưỡng bảo vệ ${config.safeguardThreshold}%`
+        : `Mức dùng ${util}% >= ngưỡng ${config.threshold}%`
       swapProfile(home, next, {
         type: 'auto',
-        reason: isRateLimited ? 'Rate limited' : `Mức dùng ${util}% >= ngưỡng ${config.threshold}%`,
+        reason: reasonText,
         cwd: process.cwd(),
       })
-      sendNotification(home, 'claude-swap', `Đã chuyển sang '${next}' (mức dùng: ${util}% >= ngưỡng ${config.threshold}%)`)
+      sendNotification(home, 'claude-swap', `Đã chuyển sang '${next}' (${reasonText})`)
       return {
         swapped: true,
         from: cur,
@@ -1250,6 +1274,7 @@ export async function autoCheckAndSwap(home, options = {}) {
         util,
         threshold: config.threshold,
         rateLimited: isRateLimited,
+        safeguardTriggered: isSafeguardTriggered,
       }
     }
     return {
@@ -1691,7 +1716,35 @@ export async function runCli(argv, home = os.homedir()) {
           return 0
         }
 
-        console.error(`Lệnh auto không hợp lệ: ${sub}. Dùng: /profile auto [on|off|threshold <%>|order <ds>|pool <tag|all>|return [on|off]|primary <tên>|check]`)
+        if (sub === 'safeguard') {
+          const val = filteredArgv[2]
+          if (!val) {
+            console.log(`Bảo vệ hạn mức 7 ngày: ${cfg.safeguardThreshold ? `🟢 BẬT (${cfg.safeguardThreshold}%)` : '⚪ TẮT'}`)
+            return 0
+          }
+          if (val === 'on') {
+            cfg.safeguardThreshold = 85
+            saveAutoSwitchConfig(home, cfg)
+            console.log('Đã BẬT bảo vệ hạn mức 7 ngày (ngưỡng: 85%).')
+            return 0
+          }
+          if (val === 'off' || val === 'none') {
+            cfg.safeguardThreshold = null
+            saveAutoSwitchConfig(home, cfg)
+            console.log('Đã TẮT bảo vệ hạn mức 7 ngày.')
+            return 0
+          }
+          const num = parseInt(val, 10)
+          if (isNaN(num) || num < 1 || num > 100) {
+            throw new SwapError('Ngưỡng bảo vệ 7 ngày không hợp lệ. Vui lòng nhập số từ 1 đến 100.')
+          }
+          cfg.safeguardThreshold = num
+          saveAutoSwitchConfig(home, cfg)
+          console.log(`Đã đặt ngưỡng bảo vệ hạn mức 7 ngày: ${num}%.`)
+          return 0
+        }
+
+        console.error(`Lệnh auto không hợp lệ: ${sub}. Dùng: /profile auto [on|off|threshold <%>|order <ds>|pool <tag|all>|safeguard [on|off|<%>]|return [on|off]|primary <tên>|check]`)
         return 1
       }
       case 'bind': {
