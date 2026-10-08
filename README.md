@@ -80,7 +80,7 @@ python3 claude_swap.py --foreground   # gắn với terminal, xem log khi debug
 ### ⌨️ CLI
 
 ```bash
-python3 claude_swap.py list                    # danh sách trực quan (icon 🟢/⚪, email 👤, quota cache)
+python3 claude_swap.py list [--refresh]        # danh sách trực quan (icon 🟢/⚪, email 👤, chart usage)
 python3 claude_swap.py current
 python3 claude_swap.py new <tên> [--force]     # tạo profile mới từ tài khoản đang đăng nhập
 python3 claude_swap.py save <tên> [--force]    # lưu tài khoản đang đăng nhập
@@ -93,8 +93,8 @@ python3 claude_swap.py folder                  # mở thư mục lưu profile
 
 Ví dụ hiển thị khi chạy `list` hoặc `/profile`:
 ```text
-🟢 work (Active)  👤 work@company.com  [5h 32% · 7d 64%]
-⚪ personal       👤 user@gmail.com    [5h 85% ⚠ · 7d 40%]
+🟢 work (Active)  👤 work@company.com  5h [███░░░░░] 32%   7d [█████░░░] 64%
+⚪ personal       👤 user@gmail.com    5h [███████░] 85% ⚠   7d [███░░░░░] 40%
 ⚪ dev
 ```
 
@@ -111,7 +111,7 @@ Cài (gõ trong terminal đang chạy `claude`; trả lời `y` để thêm mark
 
 | Lệnh | Việc làm |
 | --- | --- |
-| `/profile` | liệt kê profile kèm icon 🟢/⚪, email 👤, và quota cache |
+| `/profile` | liệt kê profile kèm icon 🟢/⚪, email 👤, và chart usage |
 | `/profile <tên>` | chuyển sang profile `<tên>` |
 | `/profile usage` | quota 5 giờ / 7 ngày / theo model của mọi profile |
 | `/profile new <tên> [--force]` | tạo profile mới từ tài khoản đang đăng nhập |

@@ -563,6 +563,42 @@ def usage_report(home: Path, fetch=fetch_usage, force: bool = False) -> str:
     return "\n".join(lines)
 
 
+def _chart_bar(pct: float, width: int = 8, color: bool = False) -> str:
+    filled = round(max(0.0, min(pct, 100.0)) / 100 * width)
+    empty = width - filled
+    if not color:
+        return f"[{'█' * filled}{'░' * empty}]"
+    if pct >= 95:
+        c = "\033[1;31m"
+    elif pct >= WARN_PCT:
+        c = "\033[1;38;5;208m"
+    elif pct >= 50:
+        c = "\033[1;33m"
+    else:
+        c = "\033[1;32m"
+    return f"\033[90m[\033[0m{c}{'█' * filled}\033[0m\033[90m{'░' * empty}]\033[0m"
+
+
+def _format_limit_chart(label: str, pct: float, color: bool = False) -> str:
+    lbl = label.replace("5 giờ", "5h").replace("7 ngày", "7d")
+    pct_val = max(0.0, min(float(pct), 100.0))
+    pct_int = int(round(pct_val))
+    bar_str = _chart_bar(pct_val, width=8, color=color)
+    warn = " ⚠" if pct_int >= WARN_PCT else ""
+    if not color:
+        return f"{lbl} {bar_str} {pct_int}%{warn}"
+    if pct_int >= 95:
+        c = "\033[1;31m"
+    elif pct_int >= WARN_PCT:
+        c = "\033[1;38;5;208m"
+    elif pct_int >= 50:
+        c = "\033[1;33m"
+    else:
+        c = "\033[1;32m"
+    warn_colored = "\033[1;31m ⚠\033[0m" if pct_int >= WARN_PCT else ""
+    return f"\033[36m{lbl}\033[0m {bar_str} {c}{pct_int}%\033[0m{warn_colored}"
+
+
 def profile_list_report(home: Path, color: bool | None = None) -> str:
     profiles = list_profiles(home)
     if not profiles:
@@ -584,14 +620,12 @@ def profile_list_report(home: Path, color: bool | None = None) -> str:
         hit = cache.get(key) if isinstance(cache.get(key), dict) else {}
         cached_limits = hit.get("limits")
         if cached_limits:
-            summary_parts = []
-            for lim in cached_limits[:2]:
-                lbl = lim[0].replace("5 giờ", "5h").replace("7 ngày", "7d")
-                pct = int(lim[1])
-                warn = " ⚠" if pct >= WARN_PCT else ""
-                summary_parts.append(f"{lbl} {pct}%{warn}")
-            if summary_parts:
-                summary = f"  [{' · '.join(summary_parts)}]"
+            charts = [_format_limit_chart(lim[0], float(lim[1]), color=color) for lim in cached_limits[:2]]
+            if charts:
+                summary = "  " + "   ".join(charts)
+        elif hit.get("note"):
+            note = hit["note"]
+            summary = f"  \033[90m({note})\033[0m" if color else f"  ({note})"
 
         email_str = f"  👤 {email}" if email else ""
 
@@ -599,8 +633,7 @@ def profile_list_report(home: Path, color: bool | None = None) -> str:
             name_colored = f"\033[1;32m{n}\033[0m" if active else f"\033[1m{n}\033[0m"
             act_colored = "\033[32m (Active)\033[0m" if active else ""
             email_colored = f"  \033[90m👤 {email}\033[0m" if email else ""
-            summary_colored = f"  \033[36m{summary.strip()}\033[0m" if summary else ""
-            lines.append(f"{icon} {name_colored}{act_colored}{email_colored}{summary_colored}")
+            lines.append(f"{icon} {name_colored}{act_colored}{email_colored}{summary}")
         else:
             lines.append(f"{icon} {n}{active_str}{email_str}{summary}")
     return "\n".join(lines)
@@ -611,7 +644,8 @@ def profile_list_report(home: Path, color: bool | None = None) -> str:
 def run_cli(argv: list[str], home: Path) -> int:
     ap = argparse.ArgumentParser(prog="claude_swap", description="Claude CLI Hot Profile Switcher")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("list")
+    p_list = sub.add_parser("list")
+    p_list.add_argument("--refresh", action="store_true", help="tải lại usage mới nhất")
     sub.add_parser("current")
     sub.add_parser("usage").add_argument("--refresh", action="store_true",
                                          help=f"bỏ qua số liệu đã lưu (<{USAGE_TTL // 60} phút)")
@@ -628,6 +662,8 @@ def run_cli(argv: list[str], home: Path) -> int:
     a = ap.parse_args(argv)
     try:
         if a.cmd == "list":
+            if getattr(a, "refresh", False):
+                usage_rows(home, force=True)
             print(profile_list_report(home))
         elif a.cmd == "current":
             print(current_profile(home) or "")

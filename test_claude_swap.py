@@ -513,3 +513,37 @@ def test_main_routes_gui_flags(monkeypatch):
         monkeypatch.setattr(cs.sys, "argv", ["x", *argv])
         cs.main()
     assert seen == [(False, False), (True, False), (False, True), (True, True)]
+
+
+def test_chart_bar_and_format_limit_chart():
+    assert cs._chart_bar(0, width=8, color=False) == "[░░░░░░░░]"
+    assert cs._chart_bar(50, width=8, color=False) == "[████░░░░]"
+    assert cs._chart_bar(100, width=8, color=False) == "[████████]"
+    # Colored output
+    colored = cs._chart_bar(85, width=8, color=True)
+    assert "█" in colored and "░" in colored and "\033[" in colored
+
+    fmt_plain = cs._format_limit_chart("5 giờ", 37.5, color=False)
+    assert "5h [███░░░░░] 38%" in fmt_plain
+    fmt_warn = cs._format_limit_chart("7 ngày", 85.0, color=False)
+    assert "7d [███████░] 85% ⚠" in fmt_warn
+
+
+def test_profile_list_report_with_cached_limits(tmp_path):
+    login(tmp_path, "a", "tok-a")
+    cs.save_profile(tmp_path, "A", force=True)
+    cs.swap_profile(tmp_path, "A")
+    cache = {
+        "A|a@example.com": {
+            "limits": [
+                ["5 giờ", 25.0, "15:00"],
+                ["7 ngày", 90.0, "13/10 09:00"],
+            ]
+        }
+    }
+    (cs.profiles_dir(tmp_path) / ".usage-cache.json").write_text(json.dumps(cache))
+    out = cs.profile_list_report(tmp_path, color=False)
+    assert "🟢 A (Active)" in out
+    assert "5h [██░░░░░░] 25%" in out
+    assert "7d [███████░] 90% ⚠" in out
+
