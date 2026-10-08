@@ -1,6 +1,6 @@
 {
   "name": "profile-swap",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "/profile: hot-swap Claude Code accounts and check their usage without leaving the session",
   "author": { "name": "thangvofastboy" },
   "repository": "https://github.com/thangvofastboy/claude-swap"
