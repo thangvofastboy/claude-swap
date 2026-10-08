@@ -307,5 +307,29 @@ describe('swap.js core functionality', () => {
     // acc_same_util_reset_earlier has 40% and earlier reset than acc_same_util_reset_later
     assert.equal(currentProfile(tmpHome), 'acc_same_util_reset_earlier')
   })
+
+  test('project profile binding: bind, unbind, getBoundProfile and CLI', async () => {
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'work')
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'personal')
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-proj-'))
+    const subDir = path.join(projectDir, 'src', 'deep')
+    fs.mkdirSync(subDir, { recursive: true })
+
+    try {
+      // Bind projectDir to 'work'
+      assert.equal(await runCli(['bind', 'work', projectDir], tmpHome), 0)
+
+      // Subdirectory detects parent project binding
+      assert.equal(await runCli(['bind', 'get', subDir], tmpHome), 0)
+
+      // Unbind
+      assert.equal(await runCli(['unbind', projectDir], tmpHome), 0)
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true })
+    }
+  })
 })
 

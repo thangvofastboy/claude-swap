@@ -887,6 +887,92 @@ export async function autoCheckAndSwap(home, options = {}) {
   }
 }
 
+// ---------------------------------------------------------------- project-binding
+
+export function projectBindingsFile(home) {
+  return path.join(profilesDir(home), '.project-bindings.json')
+}
+
+export function loadProjectBindings(home) {
+  const f = projectBindingsFile(home)
+  try {
+    return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf-8')) : {}
+  } catch {
+    return {}
+  }
+}
+
+export function saveProjectBindings(home, bindings) {
+  const f = projectBindingsFile(home)
+  atomicWrite(f, JSON.stringify(bindings, null, 2))
+}
+
+export function bindProfile(home, projectDir, name) {
+  if (!name) throw new SwapError('Thiếu tên profile để gán.')
+  if (!profileExists(home, name)) {
+    throw new SwapError(`Profile '${name}' không tồn tại.`)
+  }
+  const resolvedDir = path.resolve(projectDir || process.cwd())
+  if (!fs.existsSync(resolvedDir) || !fs.statSync(resolvedDir).isDirectory()) {
+    throw new SwapError(`Thư mục dự án không hợp lệ: ${resolvedDir}`)
+  }
+
+  // 1. Write local .claude-profile in project directory
+  try {
+    fs.writeFileSync(path.join(resolvedDir, '.claude-profile'), name.trim() + '\n', 'utf-8')
+  } catch {}
+
+  // 2. Save in global registry
+  const bindings = loadProjectBindings(home)
+  bindings[resolvedDir] = name.trim()
+  saveProjectBindings(home, bindings)
+  return { dir: resolvedDir, profile: name.trim() }
+}
+
+export function unbindProfile(home, projectDir) {
+  const resolvedDir = path.resolve(projectDir || process.cwd())
+  const marker = path.join(resolvedDir, '.claude-profile')
+  if (fs.existsSync(marker)) {
+    try { fs.unlinkSync(marker) } catch {}
+  }
+  const bindings = loadProjectBindings(home)
+  if (bindings[resolvedDir]) {
+    delete bindings[resolvedDir]
+    saveProjectBindings(home, bindings)
+  }
+  return { dir: resolvedDir }
+}
+
+export function getBoundProfile(home, startDir = process.cwd()) {
+  let cur = path.resolve(startDir)
+  const bindings = loadProjectBindings(home)
+
+  while (true) {
+    const marker = path.join(cur, '.claude-profile')
+    if (fs.existsSync(marker)) {
+      try {
+        const name = fs.readFileSync(marker, 'utf-8').trim()
+        if (name && profileExists(home, name)) {
+          return { profile: name, source: 'local', dir: cur }
+        }
+      } catch {}
+    }
+
+    if (bindings[cur]) {
+      const name = bindings[cur]
+      if (name && profileExists(home, name)) {
+        return { profile: name, source: 'global', dir: cur }
+      }
+    }
+
+    const parent = path.dirname(cur)
+    if (parent === cur) break
+    cur = parent
+  }
+
+  return null
+}
+
 // ---------------------------------------------------------------- cli
 
 export async function runCli(argv, home = os.homedir()) {
@@ -1048,6 +1134,31 @@ export async function runCli(argv, home = os.homedir()) {
 
         console.error(`Lệnh auto không hợp lệ: ${sub}. Dùng: /profile auto [on|off|threshold <%>|order <danh sách>|check]`)
         return 1
+      }
+      case 'bind': {
+        const sub = filteredArgv[1]
+        if (sub === 'get') {
+          const targetDir = filteredArgv[2] || process.cwd()
+          const bound = getBoundProfile(home, targetDir)
+          if (bound) {
+            console.log(`Thư mục '${targetDir}' đang liên kết với profile: ${bound.profile} (${bound.source})`)
+          } else {
+            console.log(`Thư mục '${targetDir}' chưa liên kết với profile nào.`)
+          }
+          return 0
+        }
+        const profileName = sub || currentProfile(home)
+        const targetDir = filteredArgv[2] || process.cwd()
+        if (!profileName) throw new SwapError('Thiếu tên profile để liên kết.')
+        const res = bindProfile(home, targetDir, profileName)
+        console.log(`Đã liên kết thư mục '${res.dir}' với profile '${res.profile}'.`)
+        return 0
+      }
+      case 'unbind': {
+        const targetDir = filteredArgv[1] || process.cwd()
+        const res = unbindProfile(home, targetDir)
+        console.log(`Đã gỡ liên kết profile cho thư mục '${res.dir}'.`)
+        return 0
       }
       default:
         console.error(`Lệnh không hợp lệ: ${cmd}`)
