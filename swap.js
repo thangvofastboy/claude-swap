@@ -1681,9 +1681,9 @@ export function notificationConfigFile(home) {
 export function loadNotificationConfig(home) {
   const f = notificationConfigFile(home)
   try {
-    return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf-8')) : { enabled: true }
+    return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf-8')) : { enabled: false }
   } catch {
-    return { enabled: true }
+    return { enabled: false }
   }
 }
 
@@ -1693,6 +1693,13 @@ export function saveNotificationConfig(home, config) {
 }
 
 export function sendNotification(home, title, message) {
+  if (
+    process.env.NODE_ENV === 'test' ||
+    process.env.CLAUDE_SWAP_SILENT === '1' ||
+    (home && (home.includes('test-') || home.includes(os.tmpdir())))
+  ) {
+    return
+  }
   const config = loadNotificationConfig(home)
   if (!config.enabled) return
 
@@ -2719,6 +2726,14 @@ export function postHttpJson(targetUrl, payload) {
 }
 
 export async function sendWebhookNotification(home = os.homedir(), payload) {
+  if (
+    payload?.event !== 'test' &&
+    (process.env.NODE_ENV === 'test' ||
+      process.env.CLAUDE_SWAP_SILENT === '1' ||
+      (home && (home.includes('test-') || home.includes(os.tmpdir()))))
+  ) {
+    return
+  }
   const cfg = loadWebhookConfig(home)
   const results = []
   const text = payload.text || `[claude-swap] ${payload.event || 'Swap Alert'}: ${payload.profile || 'Profile'} (${payload.reason || 'No reason'})`

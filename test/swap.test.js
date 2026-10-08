@@ -1,3 +1,6 @@
+process.env.NODE_ENV = 'test'
+process.env.CLAUDE_SWAP_SILENT = '1'
+
 import { test, describe, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -57,6 +60,7 @@ import {
   loadLanguage,
   setLanguage,
   languageFile,
+  loadNotificationConfig,
   disableProfile,
   enableProfile,
   isProfileDisabled,
@@ -411,8 +415,10 @@ describe('swap.js core functionality', () => {
 
   test('notification config toggle and CLI', async () => {
     assert.equal(await runCli(['notify'], tmpHome), 0)
-    assert.equal(await runCli(['notify', 'off'], tmpHome), 0)
     assert.equal(await runCli(['notify', 'on'], tmpHome), 0)
+    assert.equal(loadNotificationConfig(tmpHome).enabled, true)
+    assert.equal(await runCli(['notify', 'off'], tmpHome), 0)
+    assert.equal(loadNotificationConfig(tmpHome).enabled, false)
   })
 
   test('profile tagging, untagging and pool filtering in auto-switch', async () => {
