@@ -2118,8 +2118,7 @@ export function recordUsageSnapshot(home, profileName, util5h, util7d = null) {
   atomicWrite(f, JSON.stringify(history, null, 2))
 }
 
-export function calculateForecast(home, profileName, threshold = 95) {
-  const history = loadUsageHistory(home)
+export function calculateForecast(home, profileName, threshold = 95, history = loadUsageHistory(home)) {
   const entries = history[profileName] || []
   if (entries.length < 2) {
     return {
@@ -4003,7 +4002,7 @@ export async function runCli(argv, home = os.homedir()) {
       case 'web':
       case 'dashboard': {
         const sub = filteredArgv[1]
-        const { startWebDashboard, stopWebDashboard, runningDashboard, openBrowser } = await import('./web.js')
+        const { startWebDashboard, stopWebDashboard, runningDashboard, openBrowser, dashboardUrl } = await import('./web.js')
         if (sub === 'stop') {
           const stopped = stopWebDashboard(home)
           console.log(stopped
@@ -4018,15 +4017,15 @@ export async function runCli(argv, home = os.homedir()) {
         }
         const isDaemon = filteredArgv.includes('--daemon')
         const noOpen = filteredArgv.includes('--no-open')
-        const announce = p =>
+        const announce = state =>
           console.log(lang === 'en'
-            ? `🌐 Web Dashboard running in background at: http://127.0.0.1:${p}`
-            : `🌐 Web Dashboard đang chạy ngầm tại: http://127.0.0.1:${p}`)
+            ? `🌐 Web Dashboard running in background at: ${dashboardUrl(state)}`
+            : `🌐 Web Dashboard đang chạy ngầm tại: ${dashboardUrl(state)}`)
 
         const running = runningDashboard(home)
         if (running && !filteredArgv.includes('--server')) {
-          announce(running.port ?? port)
-          if (!noOpen) openBrowser(`http://127.0.0.1:${running.port ?? port}`)
+          announce({ port, ...running })
+          if (!noOpen) openBrowser(dashboardUrl({ port, ...running }))
           return 0
         }
 
@@ -4040,15 +4039,15 @@ export async function runCli(argv, home = os.homedir()) {
             Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100)
             state = runningDashboard(home)
           }
-          announce(state?.port ?? port)
+          announce({ port, ...state })
           return 0
         }
 
         // the background child opens the browser itself once it knows its port
         const serverInst = await startWebDashboard(home, { port, open: !noOpen })
         console.log(lang === 'en'
-          ? `🌐 Web Dashboard active at: ${serverInst.url}\n(Press Ctrl+C to stop)`
-          : `🌐 Web Dashboard đang hoạt động tại: ${serverInst.url}\n(Nhấn Ctrl+C để dừng)`)
+          ? `🌐 Web Dashboard active at: ${dashboardUrl(serverInst)}\n(Press Ctrl+C to stop)`
+          : `🌐 Web Dashboard đang hoạt động tại: ${dashboardUrl(serverInst)}\n(Nhấn Ctrl+C để dừng)`)
         return new Promise(() => {})
       }
       case 'balance': {

@@ -2,6 +2,9 @@ import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { execFile } from 'node:child_process'
+import crypto from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import {
   listProfiles,
   currentProfile,
@@ -35,14 +38,65 @@ import {
   maskEmail,
   quotaSnapshot,
   spawnDetached,
+  loadSwapHistory,
+  loadUsageHistory,
+  calculateForecast,
 } from './swap.js'
 
 const HOST = '127.0.0.1'
 const LOCAL_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]'])
 const MAX_BODY = 1024 * 1024
+const SWAP_JS = fileURLToPath(new URL('./swap.js', import.meta.url))
+// subcommands the "All features" tab may run; interactive ones (run, pick, web) stay CLI-only
+const WEB_CLI = new Set([
+  'list', 'current', 'usage', 'swap', 'new', 'save', 'delete', 'import', 'folder', 'version', 'upgrade',
+  'alias', 'unalias', 'aliases', 'tag', 'untag', 'tags', 'disable', 'enable', 'disabled',
+  'auto', 'balance', 'forecast', 'cooldown', 'doctor', 'cleanup', 'temp', 'untemp',
+  'bind', 'unbind', 'bind-branch', 'unbind-branch', 'branch-bindings',
+  'affinity', 'unaffinity', 'affinities', 'notify', 'budget', 'webhook', 'mask', 'share',
+  'export', 'import-enc', 'sync', 'history', 'stats', 'statusline', 'prompt', 'completion', 'lang',
+])
+
+// Runs `node swap.js <args>` like the /profile hook does; a password goes on stdin, never argv
+export function runSwapCli(home, args, password = '') {
+  if (!Array.isArray(args) || args.length === 0 || args.length > 12 || !WEB_CLI.has(args[0])) {
+    return Promise.resolve({ code: 1, output: `Lệnh không được phép: ${String(args?.[0])}` })
+  }
+  if (args.some(a => typeof a !== 'string' || a.length > 2048 || a.startsWith('--password'))) {
+    return Promise.resolve({ code: 1, output: 'Tham số không hợp lệ.' })
+  }
+  const argv = [SWAP_JS, ...args, '--no-color']
+  if (password) argv.push('--password-stdin')
+  const env = { ...process.env }
+  if (home !== os.homedir()) {
+    // a caller-supplied home (tests) must never reach the real config
+    env.HOME = home
+    env.USERPROFILE = home
+    delete env.CLAUDE_CONFIG_DIR
+  }
+  return new Promise(resolve => {
+    const child = execFile(process.execPath, argv, { env, timeout: 180000, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+      resolve({ code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, output: `${stdout}${stderr}`.trim() })
+    })
+    child.stdin.on('error', () => {}) // EPIPE when the child exits before reading stdin
+    child.stdin.end(password ? `${password}\n` : '')
+  })
+}
 
 export function webPidFile(home = os.homedir()) {
   return path.join(profilesDir(home), '.web.pid')
+}
+
+// The token rides in the #fragment: browsers never send it to the server, so another local user
+// who can reach 127.0.0.1 cannot read it from GET / (the API demands it in a header)
+export function dashboardUrl(state) {
+  return `http://${HOST}:${state.port}${state.token ? `/#${state.token}` : ''}`
+}
+
+function hasToken(req, token) {
+  const got = Buffer.from(String(req.headers['x-dashboard-token'] || ''))
+  const want = Buffer.from(token)
+  return got.length === want.length && crypto.timingSafeEqual(got, want)
 }
 
 export function openBrowser(url) {
@@ -109,10 +163,12 @@ export function getDashboardData(home = os.homedir()) {
     }
   })
 
+  const auto = loadAutoSwitchConfig(home)
+  const usageHistory = loadUsageHistory(home)
   return {
     current: cur,
     profiles: profileCards,
-    auto: loadAutoSwitchConfig(home),
+    auto,
     balance: loadBalanceConfig(home),
     webhook: loadWebhookConfig(home),
     budget: loadBudgetConfig(home),
@@ -121,6 +177,9 @@ export function getDashboardData(home = os.homedir()) {
     branchBindings: loadBranchBindings(home),
     affinities: listModelAffinities(home),
     aliases,
+    swapHistory: loadSwapHistory(home),
+    usageHistory,
+    forecast: Object.fromEntries(profiles.map(n => [n, calculateForecast(home, n, auto.threshold || 95, usageHistory)])),
   }
 }
 
@@ -152,7 +211,7 @@ export function renderDashboardHtml() {
     .brand { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 1.25rem; color: #fff; }
     .brand-badge { background: #1e293b; color: #60a5fa; font-size: 0.75rem; padding: 2px 8px; border-radius: 999px; border: 1px solid #3b82f644; }
     nav { display: flex; gap: 8px; }
-    .tab-btn { background: transparent; border: none; color: var(--text-muted); padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.95rem; font-weight: 500; transition: all 0.2s; display: flex; align-items: center; gap: 6px; }
+    .tab-btn { background: transparent; border: none; color: var(--text-muted); padding: 8px 14px; white-space: nowrap; border-radius: 6px; cursor: pointer; font-size: 0.95rem; font-weight: 500; transition: all 0.2s; display: flex; align-items: center; gap: 6px; }
     .tab-btn:hover { color: #fff; background: #1e293b; }
     .tab-btn.active { color: #fff; background: var(--accent); }
     .header-actions { display: flex; gap: 10px; align-items: center; }
@@ -252,6 +311,42 @@ export function renderDashboardHtml() {
     #toast { position: fixed; bottom: 24px; right: 24px; background: #1e293b; color: #fff; border: 1px solid var(--accent); padding: 12px 20px; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); display: none; z-index: 999; animation: slideUp 0.2s ease; }
     @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
 
+
+    /* Stats & charts (categorical slots validated against #111827) */
+    :root { --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767; --grid: #1f2937; }
+    .chart-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 20px; margin-bottom: 20px; }
+    .chart-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+    .chart-title { font-size: 1.05rem; font-weight: 700; color: #fff; }
+    .chart-sub { font-size: 0.8rem; color: var(--text-muted); }
+    .chart-wrap { position: relative; width: 100%; }
+    .chart-wrap svg { width: 100%; height: auto; display: block; }
+    .chart-wrap text { fill: var(--text-muted); font-size: 11px; }
+    .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.82rem; color: #d1d5db; }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+    .viz-tip { position: absolute; pointer-events: none; background: #0f172a; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 0.8rem; color: #fff; display: none; white-space: nowrap; z-index: 5; box-shadow: 0 6px 18px rgba(0,0,0,0.5); }
+    .viz-tip i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; margin-right: 6px; }
+    .empty-state { color: #64748b; font-size: 0.9rem; padding: 28px 0; text-align: center; }
+    .chart-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 20px; }
+    .chart-grid2 .chart-card { margin-bottom: 0; }
+    .tbl-wrap { overflow-x: auto; }
+
+    /* All features */
+    .feat-intro { font-size: 0.88rem; color: var(--text-muted); margin-bottom: 16px; }
+    .feat-out { background: #020617; border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-bottom: 20px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.82rem; color: #e5e7eb; white-space: pre-wrap; max-height: 320px; overflow: auto; position: sticky; top: 70px; z-index: 4; }
+    .feat-out.err { border-color: var(--danger); }
+    .quick-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 22px; }
+    .feat-group { margin-bottom: 26px; }
+    .feat-group h3 { font-size: 1.05rem; color: #fff; margin-bottom: 12px; }
+    .feat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+    .feat-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+    .feat-card .ft { font-weight: 600; color: #fff; font-size: 0.92rem; }
+    .feat-card .fd { font-size: 0.78rem; color: var(--text-muted); }
+    .feat-card .fc { font-family: monospace; font-size: 0.75rem; color: #38bdf8; }
+    .feat-card .form-control { padding: 7px 10px; font-size: 0.85rem; }
+    .feat-card label.flag { font-size: 0.82rem; color: #d1d5db; display: flex; gap: 6px; align-items: center; }
+    @media (max-width: 720px) { .chart-grid2 { grid-template-columns: 1fr; } header { flex-wrap: wrap; gap: 10px; } nav { flex-wrap: wrap; } }
+
     footer { background: #0f172a; border-top: 1px solid var(--card-border); padding: 16px; text-align: center; font-size: 0.82rem; color: var(--text-muted); }
   </style>
 </head>
@@ -264,8 +359,10 @@ export function renderDashboardHtml() {
     </div>
     <nav>
       <button class="tab-btn active" onclick="switchTab('dashboard')">📊 Profiles</button>
-      <button class="tab-btn" onclick="switchTab('settings')">⚙️ Cấu Hình Plugin</button>
-      <button class="tab-btn" onclick="switchTab('docs')">📖 Hướng Dẫn & Chú Thích</button>
+      <button class="tab-btn" onclick="switchTab('stats')">📈 Thống kê</button>
+      <button class="tab-btn" onclick="switchTab('features')">🧰 Tính năng</button>
+      <button class="tab-btn" onclick="switchTab('settings')">⚙️ Cấu hình</button>
+      <button class="tab-btn" onclick="switchTab('docs')">📖 Hướng dẫn</button>
     </nav>
     <div class="header-actions">
       <button class="btn btn-secondary btn-sm" onclick="toggleLanguage()" id="langBtn">🌐 Tiếng Việt</button>
@@ -301,6 +398,70 @@ export function renderDashboardHtml() {
       <div class="profiles-grid" id="profiles-container">
         <!-- Rendered by JS -->
       </div>
+    </section>
+
+
+    <!-- TAB: STATS -->
+    <section id="tab-stats" class="tab-content">
+      <div class="stats-row" id="stats-tiles"></div>
+
+      <div class="chart-card">
+        <div class="chart-head">
+          <div>
+            <div class="chart-title" id="usage-title">Mức dùng quota theo thời gian</div>
+            <div class="chart-sub">Mỗi điểm là một lần đo quota (tối đa 50 lần gần nhất mỗi profile)</div>
+          </div>
+          <select id="usage-window" class="form-control" style="width:auto;" onchange="statsKey=''; renderStats()">
+            <option value="util5h">Hạn mức 5 giờ</option>
+            <option value="util7d">Hạn mức 7 ngày</option>
+          </select>
+        </div>
+        <div class="legend" id="usage-legend"></div>
+        <div class="chart-wrap" id="usage-chart"></div>
+      </div>
+
+      <div class="chart-grid2">
+        <div class="chart-card">
+          <div class="chart-head">
+            <div>
+              <div class="chart-title">Số lần chuyển profile mỗi ngày</div>
+              <div class="chart-sub">14 ngày gần nhất, theo kiểu chuyển</div>
+            </div>
+          </div>
+          <div class="legend" id="daily-legend"></div>
+          <div class="chart-wrap" id="daily-chart"></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-head">
+            <div>
+              <div class="chart-title">Profile được chuyển đến nhiều nhất</div>
+              <div class="chart-sub">Trong lịch sử đã lưu (tối đa 100 lần gần nhất)</div>
+            </div>
+          </div>
+          <div class="chart-wrap" id="dest-chart"></div>
+        </div>
+      </div>
+
+      <div class="chart-card" style="margin-top:20px;">
+        <div class="chart-head"><div class="chart-title">📈 Dự báo cạn quota 5 giờ</div></div>
+        <div class="tbl-wrap"><table class="cmd-table" id="forecast-table"></table></div>
+      </div>
+
+      <div class="chart-card">
+        <div class="chart-head"><div class="chart-title">📜 Lịch sử chuyển profile gần nhất</div></div>
+        <div class="tbl-wrap"><table class="cmd-table" id="history-table"></table></div>
+      </div>
+    </section>
+
+    <!-- TAB: ALL FEATURES -->
+    <section id="tab-features" class="tab-content">
+      <p class="feat-intro">Mọi lệnh <span class="cmd-code">/profile</span> đều có ở đây. Điền vào ô rồi bấm chạy, kết quả hiện ở khung bên dưới. Auto-switch, cân bằng tải, webhook và che email chỉnh ở tab ⚙️ Cấu hình. Mật khẩu sao lưu được chuyển qua stdin và không lưu ở đâu cả.</p>
+      <pre class="feat-out" id="cli-output">Kết quả lệnh sẽ hiện ở đây.</pre>
+      <div class="feat-group">
+        <h3>👀 Xem nhanh</h3>
+        <div class="quick-row" id="quick-row"></div>
+      </div>
+      <div id="features-container"></div>
     </section>
 
     <!-- TAB 2: SETTINGS -->
@@ -547,6 +708,23 @@ export function renderDashboardHtml() {
 
   <script>
     let appData = {};
+    let TOKEN = '';
+    try {
+      if (location.hash.length > 1) {
+        sessionStorage.setItem('cs-token', location.hash.slice(1));
+        history.replaceState(null, '', location.pathname);
+      }
+      TOKEN = sessionStorage.getItem('cs-token') || '';
+    } catch (e) {
+      TOKEN = location.hash.slice(1);
+    }
+    async function api(url, opts) {
+      opts = opts || {};
+      opts.headers = Object.assign({}, opts.headers, { 'X-Dashboard-Token': TOKEN });
+      const res = await fetch(url, opts);
+      if (res.status === 401) throw new Error('phiên đã hết hạn, hãy mở lại bằng /profile web');
+      return res;
+    }
 
     function esc(v) {
       return String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -568,10 +746,12 @@ export function renderDashboardHtml() {
 
     async function loadData() {
       try {
-        const res = await fetch('/api/data');
+        const res = await api('/api/data');
         appData = await res.json();
         renderDashboard();
         renderSettings();
+        renderStats();
+        renderFeatures();
       } catch (err) {
         showToast('Lỗi tải dữ liệu: ' + err.message);
       }
@@ -664,6 +844,353 @@ export function renderDashboardHtml() {
       });
     }
 
+
+    // ------------------------------------------------------------ stats & charts
+    const SERIES = ['var(--s1)', 'var(--s2)', 'var(--s3)', 'var(--s4)', 'var(--s5)', 'var(--s6)', 'var(--s7)', 'var(--s8)'];
+    const TYPE_META = [['manual', 'Thủ công', SERIES[0]], ['auto', 'Tự động', SERIES[1]], ['project', 'Theo dự án', SERIES[2]]];
+    let statsKey = '';
+
+    function pad2(n) { return String(n).padStart(2, '0'); }
+    function fmtTime(t) { const d = new Date(t); return pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()); }
+    function dayKey(t) { const d = new Date(t); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
+    // color follows the profile (its position in the full list), never its rank in a chart
+    function profileColor(name) { const i = (appData.profiles || []).findIndex(p => p.name === name); return i >= 0 && i < SERIES.length ? SERIES[i] : '#64748b'; }
+    function tile(label, value, sub) {
+      return '<div class="stat-card"><span class="stat-label">' + esc(label) + '</span><div class="stat-value">' + esc(value) + '</div>' + (sub ? '<span class="chart-sub">' + esc(sub) + '</span>' : '') + '</div>';
+    }
+    function legendHtml(items) { return items.map(it => '<span><i style="background:' + it[1] + '"></i>' + esc(it[0]) + '</span>').join(''); }
+
+    function attachTip(wrap, svg, onMove) {
+      const tip = document.createElement('div');
+      tip.className = 'viz-tip';
+      wrap.appendChild(tip);
+      svg.addEventListener('mousemove', ev => {
+        const r = svg.getBoundingClientRect();
+        const vb = svg.viewBox.baseVal;
+        const x = (ev.clientX - r.left) * vb.width / r.width;
+        const html = onMove(x);
+        if (!html) { tip.style.display = 'none'; return; }
+        tip.innerHTML = html;
+        tip.style.display = 'block';
+        const left = ev.clientX - r.left + 14;
+        tip.style.left = Math.min(left, wrap.clientWidth - tip.offsetWidth - 4) + 'px';
+        tip.style.top = Math.max(0, ev.clientY - r.top - tip.offsetHeight - 10) + 'px';
+      });
+      svg.addEventListener('mouseleave', () => { tip.style.display = 'none'; onMove(null); });
+    }
+
+    function renderUsageChart() {
+      const field = document.getElementById('usage-window').value;
+      const hist = appData.usageHistory || {};
+      const series = (appData.profiles || []).map(p => ({
+        name: p.name,
+        color: profileColor(p.name),
+        pts: (hist[p.name] || []).filter(e => typeof e[field] === 'number' && !isNaN(e[field])).map(e => ({ t: e.timestamp, v: e[field] }))
+      })).filter(s => s.pts.length);
+      const wrap = document.getElementById('usage-chart');
+      const legend = document.getElementById('usage-legend');
+      if (!series.length) {
+        legend.innerHTML = '';
+        wrap.innerHTML = '<div class="empty-state">Chưa có lần đo quota nào. Dữ liệu sẽ dồn dần mỗi khi plugin kiểm tra quota (khoảng 5 phút một lần khi bạn dùng Claude Code).</div>';
+        return;
+      }
+      legend.innerHTML = series.length > 1 ? legendHtml(series.map(s => [s.name, s.color])) : '';
+      const W = 860, H = 280, L = 40, R = 110, T = 14, B = 30;
+      let t0 = Infinity, t1 = -Infinity;
+      series.forEach(s => s.pts.forEach(p => { t0 = Math.min(t0, p.t); t1 = Math.max(t1, p.t); }));
+      if (t1 - t0 < 60000) { t0 -= 1800000; t1 += 1800000; }
+      const X = t => L + (t - t0) / (t1 - t0) * (W - L - R);
+      const Y = v => T + (1 - Math.min(100, Math.max(0, v)) / 100) * (H - T - B);
+      let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Mức dùng quota theo thời gian">';
+      [0, 25, 50, 75, 100].forEach(v => {
+        svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(v) + '" y2="' + Y(v) + '" stroke="var(--grid)" stroke-width="1"/>';
+        svg += '<text x="' + (L - 6) + '" y="' + (Y(v) + 4) + '" text-anchor="end">' + v + '%</text>';
+      });
+      for (let i = 0; i < 4; i++) {
+        const t = t0 + (t1 - t0) * i / 3;
+        svg += '<text x="' + X(t) + '" y="' + (H - 8) + '" text-anchor="' + (i === 0 ? 'start' : i === 3 ? 'end' : 'middle') + '">' + fmtTime(t) + '</text>';
+      }
+      const limit = field === 'util5h' ? (appData.auto.threshold || 95) : (appData.auto.safeguardThreshold || 85);
+      svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(limit) + '" y2="' + Y(limit) + '" stroke="#94a3b8" stroke-width="1" stroke-dasharray="4 4"/>';
+      svg += '<text x="' + (W - R + 6) + '" y="' + (Y(limit) + 4) + '">' + (field === 'util5h' ? 'ngưỡng ' : 'safeguard ') + limit + '%</text>';
+      series.forEach(s => {
+        const d = s.pts.map((p, i) => (i ? 'L' : 'M') + X(p.t).toFixed(1) + ' ' + Y(p.v).toFixed(1)).join(' ');
+        svg += '<path d="' + d + '" fill="none" stroke="' + s.color + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+        if (s.pts.length < 12) s.pts.forEach(p => { svg += '<circle cx="' + X(p.t) + '" cy="' + Y(p.v) + '" r="4" fill="' + s.color + '" stroke="var(--card-bg)" stroke-width="2"/>'; });
+      });
+      if (series.length <= 4) {
+        const ends = series.map(s => { const p = s.pts[s.pts.length - 1]; return { s, x: X(p.t), y: Y(p.v), v: p.v }; }).sort((a, b) => a.y - b.y);
+        for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 14) ends[i].y = ends[i - 1].y + 14;
+        ends.forEach(e => { svg += '<text x="' + (W - R + 6) + '" y="' + (e.y + 4) + '" style="fill:#e5e7eb">' + esc(e.s.name) + ' ' + Math.round(e.v) + '%</text>'; });
+      }
+      svg += '<line id="usage-cross" x1="0" x2="0" y1="' + T + '" y2="' + (H - B) + '" stroke="#94a3b8" stroke-width="1" visibility="hidden"/>';
+      svg += '<rect x="' + L + '" y="' + T + '" width="' + (W - L - R) + '" height="' + (H - T - B) + '" fill="transparent"/>';
+      svg += '</svg>';
+      wrap.innerHTML = svg;
+      const el = wrap.querySelector('svg');
+      const cross = wrap.querySelector('#usage-cross');
+      attachTip(wrap, el, x => {
+        if (x === null || x < L || x > W - R) { cross.setAttribute('visibility', 'hidden'); return ''; }
+        const t = t0 + (x - L) / (W - L - R) * (t1 - t0);
+        let best = null;
+        series.forEach(s => s.pts.forEach(p => { if (!best || Math.abs(p.t - t) < Math.abs(best.t - t)) best = p; }));
+        cross.setAttribute('x1', X(best.t)); cross.setAttribute('x2', X(best.t)); cross.setAttribute('visibility', 'visible');
+        const rows = series.map(s => {
+          const near = s.pts.reduce((a, p) => Math.abs(p.t - best.t) < Math.abs(a.t - best.t) ? p : a);
+          return Math.abs(near.t - best.t) <= 600000 ? '<div><i style="background:' + s.color + '"></i>' + esc(s.name) + ': <b>' + Math.round(near.v) + '%</b></div>' : '';
+        }).join('');
+        return '<div style="color:#94a3b8;margin-bottom:4px;">' + fmtTime(best.t) + '</div>' + rows;
+      });
+    }
+
+    function renderDailyChart(hist) {
+      const days = [];
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      for (let i = 13; i >= 0; i--) { const d = new Date(today); d.setDate(d.getDate() - i); days.push({ key: dayKey(d), label: pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1), manual: 0, auto: 0, project: 0 }); }
+      const byKey = Object.fromEntries(days.map(d => [d.key, d]));
+      hist.forEach(h => { const d = byKey[dayKey(h.timestamp)]; if (d) d[h.type === 'auto' || h.type === 'project' ? h.type : 'manual']++; });
+      const wrap = document.getElementById('daily-chart');
+      document.getElementById('daily-legend').innerHTML = legendHtml(TYPE_META.map(m => [m[1], m[2]]));
+      const max = Math.max(0, ...days.map(d => d.manual + d.auto + d.project));
+      if (!max) { wrap.innerHTML = '<div class="empty-state">Chưa có lần chuyển profile nào trong 14 ngày qua.</div>'; return; }
+      const W = 480, H = 240, L = 30, R = 8, T = 10, B = 26;
+      const step = Math.max(1, Math.ceil(max / 4));
+      const top = step * 4;
+      const bw = (W - L - R) / days.length;
+      const Y = v => T + (1 - v / top) * (H - T - B);
+      let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Số lần chuyển profile mỗi ngày">';
+      for (let v = 0; v <= top; v += step) {
+        svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(v) + '" y2="' + Y(v) + '" stroke="var(--grid)"/>';
+        svg += '<text x="' + (L - 6) + '" y="' + (Y(v) + 4) + '" text-anchor="end">' + v + '</text>';
+      }
+      days.forEach((d, i) => {
+        const x = L + i * bw + bw * 0.2, w = bw * 0.6;
+        let acc = 0;
+        TYPE_META.forEach(m => {
+          const v = d[m[0]];
+          if (!v) return;
+          const y0 = Y(acc), y1 = Y(acc + v);
+          svg += '<rect x="' + x + '" y="' + y1 + '" width="' + w + '" height="' + Math.max(1, y0 - y1 - (acc ? 2 : 0)) + '" rx="2" fill="' + m[2] + '"/>';
+          acc += v;
+        });
+        if (i % 2 === 1 || days.length <= 7) svg += '<text x="' + (x + w / 2) + '" y="' + (H - 8) + '" text-anchor="middle">' + d.label + '</text>';
+      });
+      svg += '<rect x="' + L + '" y="' + T + '" width="' + (W - L - R) + '" height="' + (H - T - B) + '" fill="transparent"/></svg>';
+      wrap.innerHTML = svg;
+      attachTip(wrap, wrap.querySelector('svg'), x => {
+        if (x === null) return '';
+        const i = Math.floor((x - L) / bw);
+        const d = days[i];
+        if (!d) return '';
+        return '<div style="color:#94a3b8;margin-bottom:4px;">' + d.label + '</div>' + TYPE_META.map(m => '<div><i style="background:' + m[2] + '"></i>' + m[1] + ': <b>' + d[m[0]] + '</b></div>').join('');
+      });
+    }
+
+    function renderDestChart(hist) {
+      const counts = {};
+      hist.forEach(h => { if (h.to) counts[h.to] = (counts[h.to] || 0) + 1; });
+      const rows = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 8);
+      const wrap = document.getElementById('dest-chart');
+      if (!rows.length) { wrap.innerHTML = '<div class="empty-state">Chưa có dữ liệu.</div>'; return; }
+      const max = rows[0][1];
+      wrap.innerHTML = rows.map(r =>
+        '<div style="display:grid;grid-template-columns:120px 1fr 40px;gap:10px;align-items:center;margin:8px 0;font-size:0.85rem;" title="' + esc(r[0]) + ': ' + r[1] + ' lần">' +
+        '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e5e7eb;">' + esc(r[0]) + '</span>' +
+        '<div style="background:var(--grid);height:12px;border-radius:4px;"><div style="width:' + (r[1] / max * 100) + '%;height:100%;border-radius:4px;background:' + SERIES[0] + ';"></div></div>' +
+        '<span style="color:#e5e7eb;text-align:right;">' + r[1] + '</span></div>'
+      ).join('');
+    }
+
+    function renderStats() {
+      const hist = appData.swapHistory || [];
+      const key = JSON.stringify([hist, appData.usageHistory, appData.forecast, appData.auto, (appData.profiles || []).map(p => p.name)]);
+      if (key === statsKey) return; // unchanged: keep hover state and avoid redraw flicker on the 5s poll
+      statsKey = key;
+
+      const counts = { manual: 0, auto: 0, project: 0 };
+      const dest = {};
+      const weekAgo = Date.now() - 7 * 86400000;
+      let week = 0;
+      hist.forEach(h => {
+        counts[h.type === 'auto' || h.type === 'project' ? h.type : 'manual']++;
+        if (h.to) dest[h.to] = (dest[h.to] || 0) + 1;
+        if (new Date(h.timestamp).getTime() >= weekAgo) week++;
+      });
+      const top = Object.entries(dest).sort((a, b) => b[1] - a[1])[0];
+      document.getElementById('stats-tiles').innerHTML =
+        tile('Tổng lượt chuyển', hist.length, hist.length >= 100 ? '100 lần gần nhất' : '') +
+        tile('7 ngày qua', week) +
+        tile('Thủ công / Tự động / Dự án', counts.manual + ' / ' + counts.auto + ' / ' + counts.project) +
+        tile('Hay dùng nhất', top ? top[0] : '-', top ? top[1] + ' lần' : '');
+
+      renderUsageChart();
+      renderDailyChart(hist);
+      renderDestChart(hist);
+
+      const fc = appData.forecast || {};
+      const names = Object.keys(fc);
+      document.getElementById('forecast-table').innerHTML = names.length
+        ? '<thead><tr><th>Profile</th><th>Đang dùng</th><th>Tốc độ</th><th>Chạm ngưỡng</th></tr></thead><tbody>' + names.map(n => {
+            const f = fc[n];
+            if (!f.hasData) return '<tr><td>' + esc(n) + '</td><td colspan="3" style="color:#64748b;">' + esc(f.message) + '</td></tr>';
+            const eta = f.trend === 'increasing'
+              ? (f.minutesUntilThreshold <= 30 ? '🔴 ' : f.minutesUntilThreshold <= 60 ? '🟠 ' : '🟡 ') + '~' + f.minutesUntilThreshold + ' phút (' + fmtTime(f.estimatedTimestamp) + ')'
+              : '🟢 Ổn định';
+            return '<tr><td>' + esc(n) + '</td><td>' + Math.round(f.currentUtil) + '%</td><td>' + (f.burnRatePerHour > 0 ? '+' + f.burnRatePerHour + '%/giờ' : '0') + '</td><td>' + eta + '</td></tr>';
+          }).join('') + '</tbody>'
+        : '<tbody><tr><td class="empty-state">Chưa có profile nào.</td></tr></tbody>';
+
+      const typeLabel = { auto: '🤖 Tự động', project: '📁 Dự án' };
+      document.getElementById('history-table').innerHTML = hist.length
+        ? '<thead><tr><th>Thời gian</th><th>Kiểu</th><th>Từ</th><th>Sang</th><th>Lý do</th></tr></thead><tbody>' + hist.slice(0, 20).map(h =>
+            '<tr><td>' + fmtTime(h.timestamp) + '</td><td>' + (typeLabel[h.type] || '👤 Thủ công') + '</td><td>' + esc(h.from) + '</td><td>' + esc(h.to) + '</td><td style="color:#94a3b8;">' + esc(h.reason) + '</td></tr>'
+          ).join('') + '</tbody>'
+        : '<tbody><tr><td class="empty-state">Chưa có lịch sử chuyển profile.</td></tr></tbody>';
+    }
+
+    // ------------------------------------------------------------ all features (runs whitelisted swap.js subcommands)
+    // field: [kind, label, extra]; kind = profile | text | number | password | flag | choice
+    const FEATURES = [
+      ['👤 Profile & tài khoản', [
+        ['Chuyển profile', ['swap'], [['profile', 'Profile']]],
+        ['Tạo profile từ tài khoản đang đăng nhập', ['new'], [['text', 'Tên profile mới'], ['flag', 'Ghi đè nếu đã có', '--force']]],
+        ['Lưu tài khoản hiện tại vào profile', ['save'], [['profile', 'Profile'], ['flag', 'Ghi đè', '--force']]],
+        ['Xóa profile', ['delete'], [['profile', 'Profile']], true],
+        ['Đặt alias', ['alias'], [['text', 'Alias (vd: w)'], ['profile', 'Profile']]],
+        ['Xóa alias', ['unalias'], [['text', 'Alias']]],
+        ['Gắn tag', ['tag'], [['profile', 'Profile'], ['text', 'Tag (vd: corp)']]],
+        ['Gỡ tag', ['untag'], [['profile', 'Profile'], ['text', 'Tag']]],
+        ['Cho nghỉ auto-switch', ['disable'], [['profile', 'Profile']]],
+        ['Cho đi làm lại', ['enable'], [['profile', 'Profile']]],
+        ['Nhập profile từ thư mục khác', ['import'], [['text', 'Đường dẫn thư mục'], ['flag', 'Ghi đè profile trùng tên', '--force']]],
+      ]],
+      ['🤖 Tự động & quota', [
+        ['Thứ tự ưu tiên auto-switch', ['auto', 'order'], [['text', 'Danh sách, vd: work,personal']]],
+        ['Kiểm tra quota và đổi nếu cần', ['auto', 'check'], []],
+        ['Cân bằng tải: sang profile kế tiếp', ['balance', 'next'], []],
+        ['Mượn tạm profile', ['temp'], [['profile', 'Profile'], ['text', 'Thời gian (vd: 30m, 1h)', '1h']]],
+        ['Trả profile đang mượn', ['untemp'], []],
+        ['Trạng thái mượn tạm', ['temp'], []],
+        ['Dọn profile hỏng', ['cleanup', '--force'], [], true],
+      ]],
+      ['📁 Dự án, nhánh Git & model', [
+        ['Gắn profile cho thư mục', ['bind'], [['profile', 'Profile'], ['text', 'Đường dẫn thư mục dự án']]],
+        ['Gỡ gắn thư mục', ['unbind'], [['text', 'Đường dẫn thư mục dự án']]],
+        ['Thư mục đang gắn profile nào?', ['bind', 'get'], [['text', 'Đường dẫn thư mục dự án']]],
+        ['Gắn profile theo nhánh Git', ['bind-branch'], [['text', 'Mẫu nhánh (vd: feat/*)'], ['profile', 'Profile'], ['text', 'Đường dẫn repo']]],
+        ['Gỡ gắn nhánh Git', ['unbind-branch'], [['text', 'Mẫu nhánh (bỏ trống = tất cả)', '', true]]],
+        ['Gán profile cho model', ['affinity'], [['choice', 'Model', ['opus', 'sonnet', 'haiku']], ['profile', 'Profile']]],
+        ['Chuyển theo model', ['affinity', 'apply'], [['choice', 'Model', ['opus', 'sonnet', 'haiku']]]],
+        ['Gỡ gán model', ['unaffinity'], [['choice', 'Model', ['opus', 'sonnet', 'haiku']]]],
+      ]],
+      ['🔔 Thông báo & ngân sách', [
+        ['Thông báo desktop khi đổi profile', ['notify'], [['choice', 'Trạng thái', ['on', 'off']]]],
+        ['Đặt webhook', ['webhook', 'set'], [['choice', 'Loại', ['telegram', 'discord', 'slack', 'generic']], ['text', 'URL']]],
+        ['Gỡ webhook', ['webhook', 'unset'], [['choice', 'Loại', ['telegram', 'discord', 'slack', 'generic']]]],
+        ['Gửi thử webhook', ['webhook', 'test'], []],
+        ['Đặt ngân sách tháng', ['budget', 'set'], [['profile', 'Profile'], ['number', 'Số tiền']]],
+        ['Xóa ngân sách', ['budget', 'unset'], [['profile', 'Profile']]],
+      ]],
+      ['🔐 Sao lưu & đồng bộ', [
+        ['Xuất bản sao lưu mã hóa', ['export'], [['text', 'Đường dẫn đầy đủ, vd: /home/ban/backup.enc'], ['password', 'Mật khẩu']]],
+        ['Khôi phục từ file mã hóa', ['import-enc'], [['text', 'Đường dẫn đầy đủ tới file .enc'], ['password', 'Mật khẩu'], ['flag', 'Ghi đè profile trùng tên', '--force']]],
+        ['Chọn nơi đồng bộ', ['sync', 'setup'], [['text', 'Đường dẫn đầy đủ, vd: /mnt/drive/claude-sync.enc']]],
+        ['Trạng thái đồng bộ', ['sync'], []],
+        ['Đẩy bản đồng bộ', ['sync', 'push'], [['password', 'Mật khẩu']]],
+        ['Kéo bản đồng bộ', ['sync', 'pull'], [['password', 'Mật khẩu'], ['flag', 'Ghi đè profile trùng tên', '--force']]],
+        ['Xuất cấu hình không chứa token', ['share'], [['text', 'Đường dẫn đầy đủ (bỏ trống = in ra)', '', true]]],
+      ]],
+      ['💻 Shell & công cụ', [
+        ['Snippet cho shell prompt', ['prompt'], [['choice', 'Shell', ['starship', 'zsh', 'bash', 'tmux', 'powershell']]]],
+        ['Script Tab completion', ['completion'], [['choice', 'Shell', ['bash', 'zsh', 'fish']]]],
+        ['Lịch sử chuyển profile', ['history'], [['number', 'Số dòng', '20']]],
+        ['Cập nhật plugin', ['upgrade'], []],
+        ['Mở thư mục profile', ['folder'], []],
+      ]],
+    ];
+    const QUICK = [['📋 Danh sách', ['list']], ['🟢 Đang dùng', ['current']], ['📊 Usage', ['usage']], ['🔄 Usage (làm mới)', ['usage', '--refresh']],
+      ['📈 Dự báo', ['forecast']], ['⏱️ Cooldown', ['cooldown']], ['🩺 Doctor', ['doctor']], ['🧹 Cleanup (chỉ quét)', ['cleanup']],
+      ['📊 Thống kê', ['stats']], ['🔤 Aliases', ['aliases']], ['🏷️ Tags', ['tags']], ['🚫 Đang nghỉ', ['disabled']],
+      ['🌿 Nhánh Git', ['branch-bindings']], ['🧠 Model', ['affinities']], ['💰 Ngân sách', ['budget']], ['🔔 Webhook', ['webhook']],
+      ['⚖️ Cân bằng tải', ['balance']], ['🤖 Auto', ['auto']], ['🛡️ Che email', ['mask']], ['💻 Statusline', ['statusline']], ['ℹ️ Phiên bản', ['version']]];
+    let featuresBuilt = false;
+    let featureProfiles = '';
+
+    function fieldHtml(id, f) {
+      const kind = f[0], label = esc(f[1]);
+      if (kind === 'flag') return '<label class="flag"><input type="checkbox" id="' + id + '"> ' + label + '</label>';
+      if (kind === 'profile') return '<select id="' + id + '" class="form-control feat-profile" aria-label="' + label + '"></select>';
+      if (kind === 'choice') return '<select id="' + id + '" class="form-control" aria-label="' + label + '">' + f[2].map(o => '<option>' + esc(o) + '</option>').join('') + '</select>';
+      const type = kind === 'password' ? 'password' : kind === 'number' ? 'number' : 'text';
+      return '<input id="' + id + '" type="' + type + '" class="form-control" placeholder="' + label + '" aria-label="' + label + '" value="' + esc(f[2] || '') + '"' + (type === 'password' ? ' autocomplete="off"' : '') + '>';
+    }
+
+    function renderFeatures() {
+      if (!featuresBuilt) {
+        featuresBuilt = true;
+        document.getElementById('quick-row').innerHTML = QUICK.map((q, i) => '<button class="btn btn-secondary btn-sm" onclick="runQuick(' + i + ')">' + esc(q[0]) + '</button>').join('');
+        document.getElementById('features-container').innerHTML = FEATURES.map((g, gi) =>
+          '<div class="feat-group"><h3>' + esc(g[0]) + '</h3><div class="feat-grid">' + g[1].map((c, ci) => {
+            const id = 'f' + gi + '-' + ci;
+            return '<div class="feat-card"><div class="ft">' + esc(c[0]) + '</div><div class="fc">/profile ' + esc(c[1].join(' ')) + '</div>' +
+              c[2].map((f, fi) => fieldHtml(id + '-' + fi, f)).join('') +
+              '<div><button class="btn btn-sm' + (c[3] ? ' btn-danger' : '') + '" onclick="runFeature(' + gi + ',' + ci + ')">▶ Chạy</button></div></div>';
+          }).join('') + '</div></div>'
+        ).join('');
+      }
+      // refill profile pickers only when the list changes, so a choice in progress survives the 5s poll
+      const names = (appData.profiles || []).map(p => p.name);
+      if (names.join('|') === featureProfiles) return;
+      featureProfiles = names.join('|');
+      document.querySelectorAll('.feat-profile').forEach(sel => {
+        const keep = sel.value;
+        sel.innerHTML = names.map(n => '<option value="' + esc(n) + '">' + esc(n) + '</option>').join('');
+        if (names.includes(keep)) sel.value = keep;
+        else if (appData.current && names.includes(appData.current)) sel.value = appData.current;
+      });
+    }
+
+    async function runCli(args, password) {
+      const out = document.getElementById('cli-output');
+      out.classList.remove('err');
+      out.textContent = '⏳ /profile ' + args.join(' ') + ' ...';
+      out.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      try {
+        const res = await api('/api/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'cli', args, password: password || '' })
+        });
+        const data = await res.json();
+        out.textContent = '$ /profile ' + args.join(' ') + String.fromCharCode(10) + (data.output || data.error || '(không có output)');
+        if (!data.ok) out.classList.add('err');
+        loadData();
+      } catch (err) {
+        out.textContent = 'Lỗi: ' + err.message;
+        out.classList.add('err');
+      }
+    }
+
+    function runQuick(i) { runCli(QUICK[i][1]); }
+
+    function runFeature(gi, ci) {
+      const c = FEATURES[gi][1][ci];
+      const args = c[1].slice();
+      let password = '';
+      for (let fi = 0; fi < c[2].length; fi++) {
+        const f = c[2][fi];
+        const el = document.getElementById('f' + gi + '-' + ci + '-' + fi);
+        if (f[0] === 'flag') { if (el.checked) args.push(f[2]); continue; }
+        const v = el.value.trim();
+        if (f[0] === 'password') { password = el.value; if (!password) return showToast('Cần nhập ' + f[1]); continue; }
+        if (!v) { if (f[3]) continue; return showToast('Cần nhập: ' + f[1]); }
+        args.push(v);
+      }
+      if (c[3] && !confirm('Chạy "/profile ' + args.join(' ') + '"? Thao tác này không hoàn tác được.')) return;
+      runCli(args, password);
+      c[2].forEach((f, fi) => { if (f[0] === 'password') document.getElementById('f' + gi + '-' + ci + '-' + fi).value = ''; });
+    }
+
     function renderSettings() {
       document.getElementById('cfg-auto-enabled').checked = Boolean(appData.auto.enabled);
       document.getElementById('cfg-auto-threshold').value = appData.auto.threshold || 95;
@@ -690,7 +1217,7 @@ export function renderDashboardHtml() {
 
     async function doSwap(name) {
       try {
-        const res = await fetch('/api/action', {
+        const res = await api('/api/action', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'swap', profile: name })
@@ -710,7 +1237,7 @@ export function renderDashboardHtml() {
     async function toggleDisable(name, isCurrentlyDisabled) {
       try {
         const action = isCurrentlyDisabled ? 'enable' : 'disable';
-        await fetch('/api/action', {
+        await api('/api/action', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action, profile: name })
@@ -725,7 +1252,7 @@ export function renderDashboardHtml() {
     async function doDelete(name) {
       if (!confirm('Bạn có chắc chắn muốn xóa profile ' + name + '?')) return;
       try {
-        await fetch('/api/action', {
+        await api('/api/action', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'delete', profile: name })
@@ -762,7 +1289,7 @@ export function renderDashboardHtml() {
       };
 
       try {
-        const res = await fetch('/api/action', {
+        const res = await api('/api/action', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
@@ -781,7 +1308,7 @@ export function renderDashboardHtml() {
 
     async function sendTestWebhook() {
       try {
-        const res = await fetch('/api/action', {
+        const res = await api('/api/action', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'test_webhook' })
@@ -809,7 +1336,7 @@ export function renderDashboardHtml() {
       if (!name) return alert('Vui lòng nhập tên profile');
 
       try {
-        const res = await fetch('/api/action', {
+        const res = await api('/api/action', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'add_profile', name, token })
@@ -831,7 +1358,7 @@ export function renderDashboardHtml() {
 
     function toggleLanguage() {
       const next = appData.language === 'vi' ? 'en' : 'vi';
-      fetch('/api/action', {
+      api('/api/action', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'save_lang', language: next })
@@ -864,6 +1391,7 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
   const pf = webPidFile(home)
 
   let port = initialPort
+  const token = crypto.randomBytes(24).toString('hex')
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${HOST}:${port}`)
 
@@ -878,6 +1406,12 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
       res.end(renderDashboardHtml())
+      return
+    }
+
+    if (url.pathname.startsWith('/api/') && !hasToken(req, token)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Missing or invalid dashboard token' }))
       return
     }
 
@@ -970,6 +1504,12 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
               res.end(JSON.stringify({ ok: true }))
               return
             }
+            case 'cli': {
+              const r = await runSwapCli(home, body.args, typeof body.password === 'string' ? body.password : '')
+              res.writeHead(200, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ ok: r.code === 0, output: r.output }))
+              return
+            }
             case 'test_webhook': {
               await testWebhook(home)
               res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -1013,16 +1553,17 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
     }
   }
 
-  atomicWrite(pf, JSON.stringify({ pid: process.pid, port }))
+  atomicWrite(pf, JSON.stringify({ pid: process.pid, port, token }))
   const targetUrl = `http://${HOST}:${port}`
 
   if (shouldOpen) {
-    openBrowser(targetUrl)
+    openBrowser(dashboardUrl({ port, token }))
   }
 
   return {
     server,
     port,
+    token,
     url: targetUrl,
     close: () => {
       server.close()

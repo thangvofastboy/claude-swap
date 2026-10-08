@@ -1,8 +1,12 @@
 <div align="center">
 
+**Tiếng Việt** · [English](README.en.md)
+
 # 🔀 claude-swap
 
-**Chuyển đổi nóng giữa nhiều tài khoản Claude Code — không thoát session, không mất ngữ cảnh.**
+**Một Claude Code, nhiều tài khoản, không ai phải thoát session.**
+
+*Vì cái cảnh "You've reached your usage limit" lúc 2 giờ sáng, khi code đang chạy dở, không nên xảy ra với ai.*
 
 ![Node.js](https://img.shields.io/badge/Node.js-18%2B-339933?logo=node.js&logoColor=white)
 ![Platform](https://img.shields.io/badge/Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-1f2937)
@@ -14,228 +18,242 @@
 [Tính năng](#-tính-năng) ·
 [Cài đặt](#-cài-đặt) ·
 [Bắt đầu nhanh](#-bắt-đầu-nhanh) ·
-[Web Dashboard](#-web-dashboard--cấu-hình-trực-quan) ·
-[Bảng lệnh đầy đủ](#-bảng-lệnh-profile) ·
-[Session song song](#-chạy-session-song-song-cách-ly) ·
-[Cách hoạt động](#-cách-hoạt-động) ·
-[Đa ngôn ngữ](#-đa-ngôn-ngữ-vi--en) ·
+[Web Dashboard](#-web-dashboard) ·
+[Bảng lệnh](#-bảng-lệnh-profile) ·
+[Session song song](#-chạy-session-song-song) ·
+[Bên trong có gì](#-bên-trong-có-gì) ·
+[Đa ngôn ngữ](#-đa-ngôn-ngữ) ·
 [Phát triển & Test](#️-phát-triển--kiểm-thử)
 
 </div>
 
 ---
 
-Tài khoản cá nhân, công ty, tài khoản dự phòng, dự án khách hàng… mỗi tài khoản một profile, đổi qua lại ngay trong Claude Code mà không cần thoát session hay làm gián đoạn luồng suy nghĩ.
+Bạn có tài khoản công ty, tài khoản cá nhân, tài khoản "dự phòng", và một tài khoản nữa mà chính bạn cũng không nhớ lập ra để làm gì. Mỗi lần đổi là một lần `/logout`, `/login`, mở trình duyệt, chờ redirect, và quên mất mình đang nghĩ gì.
 
-Plugin chạy trực tiếp trên môi trường **Node.js** sẵn có của Claude Code: **không cần Python, không cần cài thêm bất kỳ thư viện ngoài nào (100% zero-dependencies)**.
+**claude-swap** biến mỗi tài khoản thành một *profile*. Đổi bằng một lệnh, ngay trong session đang chạy. Ngữ cảnh còn nguyên, cuộc hội thoại còn nguyên, chỉ có tài khoản là khác.
+
+Plugin chạy bằng chính **Node.js** mà Claude Code đã mang theo: **không cần Python, không `npm install`, đúng 0 dependency.** `node_modules` của dự án này nặng đúng 0 byte, và chúng tôi tự hào về điều đó.
 
 ---
 
 ## ✨ Tính năng
 
-| Nhóm | Chi tiết tính năng |
+| Nhóm | Nó làm gì cho bạn |
 | --- | --- |
-| 🌐 **Web Dashboard UI** | Bảng điều khiển web hiện đại (`/profile web`), 1-click switch, cấu hình trực tiếp plugin trên trình duyệt và trang tài liệu hướng dẫn chuyên sâu. |
-| 💾 **Quản lý Profile** | Tạo, lưu, chuyển đổi, xóa profile. Hỗ trợ `/profile new <tên>`, `/profile save <tên>`, `/profile delete <tên>`. |
-| 🔤 **Profile Aliases** | Đặt tên viết tắt ngắn gọn (vd: `w` ➔ `work-company`) để chuyển cực nhanh bằng `/profile w`. |
-| 🎛️ **Interactive Picker** | Gõ `/profile pick` để chọn profile bằng phím mũi tên `↑` `↓` trực quan ngay trong terminal. |
-| ⚖️ **Smart Load Balancing** | Chủ động phân bổ lưu lượng quota qua thuật toán `least-used` (ưu tiên còn nhiều token nhất) hoặc `round-robin` với `/profile balance`. |
-| 🔔 **Notification Webhooks**| Gửi thông báo tức thì đến Telegram, Discord, Slack hoặc Generic Webhook khi chạm ngưỡng hoặc đổi account (`/profile webhook`). |
-| 💰 **Budget & Cost Tracker** | Thiết lập trần ngân sách chi tiêu tối đa hàng tháng theo từng tài khoản (`/profile budget`). |
-| 🛡️ **Masking & Safe Share** | Tự động che mờ email cá nhân (`us***@domain.com`) và xuất file cấu hình an toàn không chứa token (`/profile mask`, `/profile share`). |
-| ⌨️ **Shell Auto-Completion** | Tự động sinh mã gợi ý lệnh qua phím `Tab` cho Bash, Zsh, Fish (`/profile completion`). |
-| 🚀 **Parallel Sessions** | Chạy session Claude Code độc lập song song (`/profile run <tên>`) với môi trường cách ly hoàn toàn. |
-| 🔑 **Setup-Token & API Key** | Đăng ký trực tiếp profile từ token không cần browser với `/profile add-token <tok\|->` (hỗ trợ đọc bảo mật từ `stdin`). |
-| 🚫 **Disable / Enable Auto** | Tạm loại trừ profile khỏi auto-switch (`/profile disable <tên>`) mà không cần xóa tài khoản. |
-| 🌿 **Git Branch Binding** | Tự động chuyển profile theo mẫu nhánh Git (vd: `work-*` ➔ công ty, `feat/*` ➔ dev). |
-| 📁 **Gắn profile thư mục** | Tự động kích hoạt đúng profile khi mở thư mục dự án tương ứng qua file `.claude-profile`. |
-| 📈 **Quota & Forecast** | Dự báo tốc độ tiêu thụ % token/giờ và thời điểm ước tính cạn hạn mức (`/profile forecast`). |
-| ⏱️ **Cooldown & Auto-Return** | Đồng hồ đếm ngược reset quota 5h và tự động quay về profile chính khi hồi phục token. |
-| 🤖 **Tự động chuyển profile** | Tự động switch khi chạm ngưỡng % token hoặc rate limit (ưu tiên quota dồi dào, reset sớm nhất). |
-| 🚨 **Safeguard 7 ngày** | Tự động bảo vệ hạn mức dài hạn, ngăn chặn switch vào các tài khoản sắp cạn quota 7 ngày (mặc định: 85%). |
-| 🧠 **Model-Affinity** | Gán profile chuyên dụng theo từng dòng model AI (Opus, Sonnet, Haiku) với `/profile affinity`. |
-| 🩺 **Profile Doctor & Cleanup**| Quét chẩn đoán sức khỏe, token hết hạn, profile trùng lặp tài khoản (`/profile doctor`, `/profile cleanup`). |
-| ☁️ **Đồng bộ mã hóa (Sync)** | Đẩy/kéo bản sao lưu mã hóa AES-256 an toàn đa thiết bị (`/profile sync push` / `pull`). |
-| 💻 **Shell Prompt & Tmux** | Hiển thị active profile & usage % cực nhanh (<5ms) trên prompt Starship, Zsh, Bash hoặc thanh Tmux. |
-| ⏳ **Mượn profile tạm (Temp)** | Mượn tạm profile thứ hai trong thời gian định trước (vd: `30m`, `1h`) và tự động hoàn trả khi hết giờ. |
-| 📊 **JSON Output Mode** | Hỗ trợ cờ `--json` trên `/profile list`, `/profile current`, `/profile disabled` phục vụ viết script/CI. |
-| 🌐 **Bilingual (vi / en)** | Đổi ngôn ngữ mượt mà giữa Tiếng Việt và Tiếng Anh chỉ với một lệnh `/profile lang [vi\|en]`. |
-| ⚡ **Zero Token Cost** | Mọi lệnh `/profile` là plugin hook xử lý tức thì ở local, **không tốn lượt hỏi hay token model**. |
+| 🌐 **Web Dashboard** | `/profile web` mở một trang điều khiển trên trình duyệt: bấm một cái là đổi tài khoản, kéo thanh trượt để chỉnh cấu hình, có cả trang hướng dẫn. Dành cho những ngày không muốn gõ lệnh. |
+| 💾 **Quản lý Profile** | Tạo, lưu, đổi, xóa: `/profile new`, `save`, `delete`. Bộ tứ cơ bản. |
+| 🔤 **Alias** | Lười gõ `work-company-production-2`? Đặt `w` rồi `/profile w`. |
+| 🎛️ **Picker tương tác** | `/profile pick` cho chọn bằng phím `↑` `↓`, dành cho người không nhớ nổi tên profile của mình. |
+| ⚖️ **Cân bằng tải** | Chia đều công việc cho các tài khoản theo `least-used` (ai còn nhiều quota thì làm) hoặc `round-robin` (lần lượt từng người). Không tài khoản nào phải gánh team. |
+| 🔔 **Webhook** | Báo qua Telegram, Discord, Slack hoặc webhook bất kỳ khi chạm ngưỡng hay đổi tài khoản. Điện thoại rung là biết quota sắp hết. |
+| 💰 **Ngân sách** | Đặt trần chi tiêu hàng tháng cho từng profile (`/profile budget`). Ví tiền sẽ cảm ơn bạn. |
+| 🛡️ **Che email & chia sẻ an toàn** | Email hiện thành `us***@domain.com` khi bạn share màn hình, và xuất cấu hình không kèm token (`/profile mask`, `/profile share`). |
+| ⌨️ **Tab completion** | Sinh script gợi ý lệnh cho Bash, Zsh, Fish (`/profile completion`). Gõ nửa chữ rồi bấm Tab. |
+| 🚀 **Session song song** | `/profile run <tên>` chạy thêm một Claude Code tách biệt với tài khoản khác. Hai Claude, hai tài khoản, không ai giẫm chân ai. |
+| 🔑 **Setup-token & API key** | Tạo profile thẳng từ token, không cần trình duyệt (`/profile add-token`), đọc được cả từ `stdin` để token không nằm trong lịch sử shell. |
+| 🚫 **Cho nghỉ phép** | `/profile disable <tên>` tạm loại một profile khỏi auto-switch mà không cần xóa. |
+| 🌿 **Theo nhánh Git** | Nhánh `work-*` dùng tài khoản công ty, `feat/*` dùng tài khoản dev, tự động. Chẳng còn cảnh lỡ tay dùng tài khoản công ty cho side project. |
+| 📁 **Theo thư mục** | Mở dự án nào thì tự bật đúng profile của dự án đó (file `.claude-profile`). |
+| 📈 **Dự báo** | Đo tốc độ tiêu thụ %/giờ và đoán khi nào cạn (`/profile forecast`). Cái gì cũng tính được, trừ deadline. |
+| ⏱️ **Cooldown & tự quay về** | Đếm ngược tới lúc quota 5 giờ reset, rồi tự đưa bạn về profile chính khi tài khoản đó hồi sức. |
+| 🤖 **Tự đổi tài khoản** | Chạm ngưỡng % hoặc dính rate limit thì tự nhảy sang tài khoản còn nhiều quota nhất hoặc reset sớm nhất. Bạn chỉ việc code tiếp. |
+| 🚨 **Bảo vệ hạn mức 7 ngày** | Không nhảy vào tài khoản đã dùng gần hết quota tuần (mặc định 85%). |
+| 🧠 **Model affinity** | Opus chạy tài khoản này, Sonnet chạy tài khoản kia (`/profile affinity`). |
+| 🩺 **Doctor & Cleanup** | Khám token hết hạn, profile trùng tài khoản, file hỏng (`/profile doctor`, `/profile cleanup`). Thầy thuốc cho credentials. |
+| ☁️ **Sync mã hóa** | Đẩy và kéo bản sao lưu mã hóa AES-256 giữa các máy (`/profile sync push` / `pull`). |
+| 💻 **Shell prompt & Tmux** | Hiện profile đang dùng kèm % usage trên Starship, Zsh, Bash, Tmux, chạy dưới 5ms. |
+| ⏳ **Mượn tạm** | Mượn một profile trong `30m` hay `1h` rồi tự trả. Như mượn sạc của đồng nghiệp, nhưng lần này có người nhắc trả. |
+| 📊 **JSON** | `--json` cho `list`, `current`, `disabled`, để script và CI đọc được. |
+| 🌐 **Song ngữ** | Tiếng Việt hoặc tiếng Anh, `/profile lang [vi\|en]`. |
+| ⚡ **Không tốn token** | Mọi lệnh `/profile` chạy local qua plugin hook, **không gửi gì cho model và không tốn lượt nào**. |
 
 ---
 
 ## 📦 Cài đặt
 
-Cài đặt trực tiếp bên trong session Claude Code:
+Gõ ngay trong Claude Code:
 
 ```bash
 /plugin install profile-swap --marketplace thangvofastboy/claude-swap
 ```
 
-*(Nhấn `y` khi Claude hỏi xác nhận thêm marketplace, sau đó chọn phạm vi cài đặt).*
+*(Claude hỏi có thêm marketplace không thì bấm `y`, rồi chọn phạm vi cài đặt.)*
 
-Chạy thử trực tiếp từ source mà không cần cài đặt:
+Muốn thử thẳng từ source mà chưa cài:
 
 ```bash
 claude --plugin-dir /path/to/claude-swap
 ```
 
+Đã cài rồi và muốn bản mới nhất: `/profile upgrade`, rồi khởi động lại Claude Code.
+
 ---
 
 ## 🚀 Bắt đầu nhanh
 
-1. Đăng nhập Claude Code bằng tài khoản đầu tiên (`claude` → `/login`), lưu thành profile:
+Bốn bước, chưa kịp nguội ly cà phê:
+
+1. Đăng nhập tài khoản thứ nhất (`claude` → `/login`), rồi lưu lại:
    ```text
    /profile new work
    ```
-2. Đăng xuất hoặc `/login` sang tài khoản thứ hai (vd: tài khoản cá nhân):
+2. `/login` sang tài khoản thứ hai, lưu tiếp:
    ```text
    /profile new personal
    ```
-3. Xem danh sách profile hoặc mở Web Dashboard:
+3. Xem mình đang có gì:
    ```text
-   /profile list    # Hiển thị danh sách profile kèm thanh usage %
-   /profile web     # Mở giao diện Web Dashboard trực quan
+   /profile list    # danh sách kèm thanh usage %
+   /profile web     # hoặc mở dashboard
    ```
-4. Chuyển đổi giữa các profile bất kỳ lúc nào:
+4. Đổi qua lại thoải mái:
    ```text
    /profile work
    ```
 
+Vậy là xong. Không còn phải nhớ mật khẩu nào là của tài khoản nào.
+
 ---
 
-## 🌐 Web Dashboard & Cấu hình Trực quan
+## 🌐 Web Dashboard
 
-Khởi chạy giao diện Web Dashboard trực quan và hiện đại ngay trên trình duyệt máy tính:
+Cho những ngày mắt cần thứ gì đó đẹp hơn terminal:
 
 ```bash
-/profile web              # Mở Dashboard tại http://localhost:3737
-/profile web --port 8080  # Tùy chỉnh cổng port
-/profile web stop         # Dừng web dashboard chạy ngầm
+/profile web              # mở dashboard tại http://127.0.0.1:3737
+/profile web --port 8080  # đổi cổng
+/profile web stop         # tắt dashboard đang chạy ngầm
 ```
 
-- **Giao diện hiện đại & Dark Mode:** Xem tình trạng tất cả các profile, thẻ đo % quota 5h & 7d theo thời gian thực và đồng hồ đếm ngược reset cooldown trực quan.
-- **1-Click Profile Switch:** Chuyển đổi sang bất kỳ profile nào chỉ bằng 1 cú nhấp chuột.
-- **Cấu hình Plugin trực tiếp:** Tùy chỉnh thanh trượt Auto-Switch Threshold %, Safeguard 7 ngày, Load Balancer, Webhooks, Ngân sách (Budget), và Chế độ che mờ bảo mật (Masking).
-- **Trang hướng dẫn chi tiết (Documentation Tab):** Tích hợp sẵn trang tra cứu và giải thích sâu toàn bộ tính năng, bảng lệnh, và mẹo sử dụng.
+- **Nhìn một cái là thấy hết:** quota 5h và 7d của từng tài khoản, đồng hồ đếm ngược tới lúc reset, có dark mode.
+- **Đổi tài khoản bằng một cú nhấp.**
+- **📈 Tab Thống kê:** biểu đồ mức dùng quota 5h/7d theo thời gian cho từng tài khoản, số lần đổi profile mỗi ngày (thủ công / tự động / theo dự án), tài khoản được dùng nhiều nhất, bảng dự báo lúc cạn quota và lịch sử đổi gần đây. Biểu đồ tự vẽ bằng SVG, vẫn 0 dependency.
+- **🧰 Tab Tính năng:** mọi lệnh `/profile` đều có form riêng: alias, tag, gắn thư mục và nhánh Git, model affinity, mượn tạm, ngân sách, webhook, sao lưu / đồng bộ mã hóa, snippet cho shell… Điền rồi bấm ▶, kết quả hiện ngay bên dưới. Mật khẩu sao lưu đi qua stdin, không nằm trên dòng lệnh.
+- **Chỉnh cấu hình bằng chuột:** ngưỡng auto-switch, safeguard 7 ngày, cân bằng tải, webhook, ngân sách, che email.
+- **Có sẵn trang hướng dẫn** để bạn khỏi phải quay lại README này.
+
+Dashboard chỉ lắng nghe trên `127.0.0.1`, từ chối request lạ, và mỗi lần khởi động lại tạo một token bí mật mới. Token nằm sau dấu `#` trong link mà `/profile web` in ra, nên chỉ trình duyệt của bạn biết. Hàng xóm cùng Wi-Fi hay user khác trên cùng máy đều không đổi tài khoản giùm bạn được. Lỡ đóng tab thì chạy lại `/profile web` để lấy link.
 
 ---
 
 ## 📋 Bảng lệnh `/profile`
 
-### 📌 Quản lý & Chuyển đổi Profile
+Phần này nghiêm túc hơn một chút, vì gõ sai lệnh thì không vui.
+
+### 📌 Quản lý & chuyển đổi
 
 | Lệnh | Mô tả |
 | --- | --- |
-| `/profile` | Hiển thị bảng hướng dẫn sử dụng đầy đủ các lệnh |
-| `/profile list [--json]` | Liệt kê các profile kèm icon 🟢/⚪, email 👤, nhãn 🏷️ và thanh usage |
-| `/profile current [--json]` | Hiển thị tên profile đang kích hoạt (active) |
-| `/profile <tên\|alias>` | Chuyển sang profile hoặc bí danh (alias) `<tên>` |
-| `/profile pick` | Chọn profile tương tác bằng phím mũi tên `↑` `↓` ngay trong terminal |
-| `/profile alias <tên> <p>` | Đặt bí danh viết tắt cho profile (vd: `/profile alias w work`) |
-| `/profile unalias <tên>` | Xóa bí danh đã đặt |
-| `/profile aliases` | Xem danh sách các bí danh đang có |
-| `/profile new <tên> [--force]` | Tạo profile mới từ tài khoản hiện tại |
+| `/profile` | Hiện bảng hướng dẫn đầy đủ |
+| `/profile list [--json]` | Liệt kê profile kèm icon 🟢/⚪, email 👤, nhãn 🏷️ và thanh usage |
+| `/profile current [--json]` | Profile đang dùng là profile nào |
+| `/profile <tên\|alias>` | Chuyển sang profile hoặc alias `<tên>` |
+| `/profile pick` | Chọn profile bằng phím `↑` `↓` |
+| `/profile alias <tên> <p>` | Đặt alias (vd: `/profile alias w work`) |
+| `/profile unalias <tên>` | Xóa alias |
+| `/profile aliases` | Xem các alias đang có |
+| `/profile new <tên> [--force]` | Tạo profile mới từ tài khoản đang đăng nhập |
 | `/profile save <tên> [--force]`| Lưu thông tin đăng nhập hiện tại vào profile |
-| `/profile delete <tên>` | Xóa profile và dọn dẹp các tài nguyên liên quan |
-| `/profile folder` | Mở thư mục chứa file cấu hình profile trên máy |
-| `/profile lang [vi\|en]` | Xem hoặc đổi ngôn ngữ hiển thị (Tiếng Việt / English) |
-| `/profile version` | Xem phiên bản hiện tại của plugin |
+| `/profile delete <tên>` | Xóa profile và dọn những thứ liên quan |
+| `/profile folder` | Mở thư mục chứa profile |
+| `/profile lang [vi\|en]` | Xem hoặc đổi ngôn ngữ |
+| `/profile version` | Xem phiên bản plugin |
 
-### 🚀 Giao diện Web, Cân bằng tải & Tiện ích Nâng cao
-
-| Lệnh | Mô tả |
-| --- | --- |
-| `/profile web [--port <p>]` | Mở Web Dashboard trực quan và cấu hình plugin trên trình duyệt |
-| `/profile web stop` | Dừng Web Dashboard đang chạy ngầm |
-| `/profile balance [on\|off]` | Bật / tắt cân bằng tải: khi bật, auto-switch chọn profile kế tiếp theo `mode` (thay cho `auto order`) |
-| `/profile balance mode <least-used\|round-robin>` | Chọn thuật toán cân bằng tải (ưu tiên token nhiều nhất hoặc luân phiên) |
-| `/profile balance pool <tag\|all>` | Giới hạn cân bằng tải trong nhóm có tag |
-| `/profile balance next` | Chuyển ngay sang profile tiếp theo theo thuật toán cân bằng |
-| `/profile webhook [status]` | Xem trạng thái các Webhook cảnh báo từ xa |
-| `/profile webhook set <telegram\|discord\|slack\|generic> <url>` | Thiết lập đường dẫn Webhook |
-| `/profile webhook unset <type>` | Gỡ bỏ Webhook |
-| `/profile webhook test` | Gửi thử thông báo kiểm tra kết nối Webhook |
-| `/profile budget [status]` | Xem danh sách hạn mức ngân sách hàng tháng |
-| `/profile budget set <tên> <số_tiền>` | Đặt hạn mức chi tiêu hàng tháng cho profile |
-| `/profile budget unset <tên>` | Xóa hạn mức ngân sách |
-| `/profile mask [on\|off]` | Bật / tắt che mờ email tài khoản trong list & dashboard |
-| `/profile share [file.json]` | Xuất gói cấu hình an toàn (không chứa token/credentials) |
-| `/profile completion [bash\|zsh\|fish]` | Sinh mã tự động gợi ý phím Tab cho shell |
-
-### ⚡ Session Song Song & Token Trực Tiếp
+### 🚀 Web, cân bằng tải & tiện ích
 
 | Lệnh | Mô tả |
 | --- | --- |
-| `/profile run <tên> [-- cmd]` | Chạy session Claude Code độc lập song song cho profile chỉ định |
-| `/profile add-token <tok> [tên]` | Tạo profile trực tiếp từ setup-token hoặc API key |
-| `echo $TOK \| node swap.js add-token - [tên]` | Nhập token an toàn từ `stdin` không lưu vào history shell |
-| `/profile upgrade` | Cập nhật plugin lên bản mới nhất từ marketplace |
-| `/profile disable <tên>` | Tạm dừng đưa profile vào vòng xoay auto-switch |
-| `/profile enable <tên>` | Bật lại profile vào vòng xoay auto-switch |
-| `/profile disabled [--json]` | Xem danh sách các profile đang bị tạm dừng auto |
+| `/profile web [--port <p>]` | Mở Web Dashboard |
+| `/profile web stop` | Tắt Web Dashboard |
+| `/profile balance [on\|off]` | Bật / tắt cân bằng tải. Khi bật, auto-switch chọn profile kế tiếp theo `mode` (thay cho `auto order`) |
+| `/profile balance mode <least-used\|round-robin>` | Chọn kiểu chia việc: ai còn nhiều quota nhất, hay lần lượt từng người |
+| `/profile balance pool <tag\|all>` | Chỉ cân bằng trong nhóm có tag |
+| `/profile balance next` | Chuyển ngay sang profile kế tiếp theo thuật toán |
+| `/profile webhook [status]` | Xem trạng thái webhook |
+| `/profile webhook set <telegram\|discord\|slack\|generic> <url>` | Cài webhook |
+| `/profile webhook unset <type>` | Gỡ webhook |
+| `/profile webhook test` | Gửi thử một tin |
+| `/profile budget [status]` | Xem ngân sách hàng tháng |
+| `/profile budget set <tên> <số_tiền>` | Đặt ngân sách cho profile |
+| `/profile budget unset <tên>` | Xóa ngân sách |
+| `/profile mask [on\|off]` | Bật / tắt che email trong list và dashboard |
+| `/profile share [file.json]` | Xuất cấu hình không chứa token |
+| `/profile completion [bash\|zsh\|fish]` | Sinh script Tab completion |
 
-### 🤖 Tự động chuyển đổi (Auto-Switch) & Quota
-
-| Lệnh | Mô tả |
-| --- | --- |
-| `/profile usage` | Xem chi tiết quota 5h, 7d và từng model (Opus, Sonnet, Haiku...) |
-| `/profile auto` | Xem trạng thái tính năng tự động chuyển profile |
-| `/profile auto on` / `off` | Bật / tắt tự động chuyển khi vượt ngưỡng token |
-| `/profile auto threshold <%>` | Đặt ngưỡng % mức dùng để kích hoạt chuyển (mặc định: `95%`) |
-| `/profile auto order <ds>` | Cài đặt danh sách ưu tiên switch (vd: `work,personal,backup`) |
-| `/profile auto pool <tag\|all>`| Giới hạn auto-switch chỉ chọn trong nhóm profile có tag |
-| `/profile auto safeguard [on\|off\|<%>]` | Bật/tắt bảo vệ hạn mức 7 ngày (mặc định: `85%`) |
-| `/profile auto return [on\|off]` | Tự động quay về profile chính khi token đã hồi phục |
-| `/profile auto primary <tên>` | Đặt profile chính để auto-return quay về |
-| `/profile auto check` | Kiểm tra quota tức thì và chuyển ngay nếu chạm ngưỡng |
-| `/profile forecast` | Dự báo tốc độ tiêu thụ %/h và thời điểm cạn hạn mức quota |
-| `/profile cooldown` | Đồng hồ đếm ngược thời gian reset quota 5h của các tài khoản |
-| `/profile doctor` | Quét kiểm tra sức khỏe token OAuth, cú pháp và kết nối |
-| `/profile cleanup [--force]` | Quét phát hiện profile trùng lặp email/UUID, token hỏng |
-
-### 📁 Dự án, Nhánh Git, Tag & Model Affinity
+### ⚡ Session song song & token
 
 | Lệnh | Mô tả |
 | --- | --- |
-| `/profile bind [tên]` | Liên kết thư mục dự án hiện tại với profile (file `.claude-profile`) |
-| `/profile unbind` | Gỡ liên kết profile khỏi thư mục hiện tại |
-| `/profile bind-branch <pat> [tên]` | Liên kết profile theo mẫu nhánh Git (vd: `feat/*`, `hotfix-*`) |
-| `/profile unbind-branch [pat]`| Gỡ liên kết nhánh Git |
-| `/profile branch-bindings` | Xem danh sách liên kết nhánh Git |
-| `/profile tag <tên> <tag>` | Gắn thẻ nhãn phân loại cho profile (vd: `/profile tag work corp`) |
-| `/profile untag <tên> <tag>` | Gỡ thẻ nhãn khỏi profile |
-| `/profile tags` | Xem danh sách các thẻ nhãn và profiles thuộc về |
-| `/profile affinity <model> <tên>` | Gán profile chuyên dụng cho model (vd: `opus`, `sonnet`) |
-| `/profile affinity apply <model>` | Áp dụng chuyển sang profile đã gán cho model |
-| `/profile unaffinity <model>` | Gỡ gán model affinity |
-| `/profile affinities` | Xem danh sách gán model affinity |
+| `/profile run <tên> [-- cmd]` | Chạy một session Claude Code tách biệt cho profile |
+| `/profile add-token <tok> [tên]` | Tạo profile từ setup-token hoặc API key |
+| `echo $TOK \| node swap.js add-token - [tên]` | Đưa token qua `stdin` để nó không nằm trong lịch sử shell |
+| `/profile upgrade` | Cập nhật plugin lên bản mới nhất |
+| `/profile disable <tên>` | Cho profile nghỉ, không tham gia auto-switch |
+| `/profile enable <tên>` | Gọi profile đi làm lại |
+| `/profile disabled [--json]` | Xem ai đang nghỉ |
 
-### ⏳ Mượn tạm & Đồng bộ (Sync)
+### 🤖 Tự đổi tài khoản & quota
 
 | Lệnh | Mô tả |
 | --- | --- |
-| `/profile temp <tên> [tg]` | Mượn tạm profile trong thời gian định trước (vd: `30m`, `1h`) |
-| `/profile untemp` | Hủy mượn tạm và quay về profile gốc ngay lập tức |
-| `/profile statusline` | Chuỗi trạng thái rút gọn cho shell prompt (vd: `[Claude: 🟢 work (32%)]`) |
-| `/profile prompt [shell]` | Hướng dẫn cấu hình prompt (`starship`, `zsh`, `bash`, `tmux`, `powershell`) |
-| `/profile notify [on\|off]` | Bật / tắt thông báo desktop banner khi đổi profile |
-| `/profile history [n]` | Xem lịch sử các lần chuyển đổi gần nhất (mặc định 10 lần) |
-| `/profile stats` | Thống kê số lần chuyển đổi thủ công, tự động và theo dự án |
-| `/profile sync setup <path>` | Cài đặt đường dẫn kho lưu trữ đồng bộ mã hóa |
-| `/profile sync push` | Đẩy bản sao lưu mã hóa lên kho đồng bộ |
-| `/profile sync pull` | Kéo và giải mã bản sao lưu từ kho đồng bộ |
-| `/profile export <file>` | Xuất file sao lưu mã hóa AES-256-GCM |
-| `/profile import-enc <file>` | Khôi phục profiles từ file mã hóa |
-| `/profile import <thư_mục> [--force]` | Nhập các profile thô từ thư mục khác |
+| `/profile usage` | Chi tiết quota 5h, 7d và từng model (Opus, Sonnet, Haiku…) |
+| `/profile auto` | Trạng thái auto-switch |
+| `/profile auto on` / `off` | Bật / tắt tự đổi khi vượt ngưỡng |
+| `/profile auto threshold <%>` | Ngưỡng % để đổi (mặc định `95%`) |
+| `/profile auto order <ds>` | Thứ tự ưu tiên (vd: `work,personal,backup`) |
+| `/profile auto pool <tag\|all>`| Chỉ đổi trong nhóm có tag |
+| `/profile auto safeguard [on\|off\|<%>]` | Bảo vệ hạn mức 7 ngày (mặc định `85%`) |
+| `/profile auto return [on\|off]` | Tự quay về profile chính khi nó hồi quota |
+| `/profile auto primary <tên>` | Đặt profile chính |
+| `/profile auto check` | Kiểm tra quota ngay và đổi nếu cần |
+| `/profile forecast` | Dự báo tốc độ tiêu thụ và lúc cạn quota |
+| `/profile cooldown` | Đếm ngược tới lúc quota 5h reset |
+| `/profile doctor` | Khám token OAuth, file cấu hình và kết nối |
+| `/profile cleanup [--force]` | Tìm profile trùng email/UUID và token hỏng |
 
-> 🔑 **Mật khẩu sao lưu** không bao giờ được lưu xuống đĩa. Truyền bằng `--password-stdin` (an toàn nhất: `echo "$PW" | node swap.js export f.enc --password-stdin`), biến môi trường `CLAUDE_SWAP_PASSWORD`, hoặc `--password <pw>` (sẽ nằm trong lịch sử shell / transcript).
+### 📁 Dự án, nhánh Git, tag & model
+
+| Lệnh | Mô tả |
+| --- | --- |
+| `/profile bind [tên]` | Gắn profile cho thư mục hiện tại (file `.claude-profile`) |
+| `/profile unbind` | Gỡ gắn thư mục |
+| `/profile bind-branch <pat> [tên]` | Gắn profile theo mẫu nhánh Git (vd: `feat/*`, `hotfix-*`) |
+| `/profile unbind-branch [pat]`| Gỡ gắn nhánh |
+| `/profile branch-bindings` | Xem các nhánh đã gắn |
+| `/profile tag <tên> <tag>` | Gắn tag (vd: `/profile tag work corp`) |
+| `/profile untag <tên> <tag>` | Gỡ tag |
+| `/profile tags` | Xem tag nào có những profile nào |
+| `/profile affinity <model> <tên>` | Gán profile riêng cho model (vd: `opus`, `sonnet`) |
+| `/profile affinity apply <model>` | Chuyển sang profile đã gán cho model đó |
+| `/profile unaffinity <model>` | Gỡ gán model |
+| `/profile affinities` | Xem các gán model |
+
+### ⏳ Mượn tạm, lịch sử & sao lưu
+
+| Lệnh | Mô tả |
+| --- | --- |
+| `/profile temp <tên> [tg]` | Mượn tạm profile trong một khoảng thời gian (vd: `30m`, `1h`) |
+| `/profile untemp` | Trả ngay, quay về profile gốc |
+| `/profile statusline` | Chuỗi trạng thái cho shell prompt (vd: `[Claude: 🟢 work (32%)]`) |
+| `/profile prompt [shell]` | Snippet cấu hình cho `starship`, `zsh`, `bash`, `tmux`, `powershell` |
+| `/profile notify [on\|off]` | Bật / tắt thông báo desktop khi đổi profile (mặc định tắt) |
+| `/profile history [n]` | Lịch sử đổi profile gần đây (mặc định 10 lần) |
+| `/profile stats` | Thống kê số lần đổi tay, đổi tự động và theo dự án |
+| `/profile sync setup <path>` | Chọn nơi chứa bản đồng bộ mã hóa |
+| `/profile sync push` | Đẩy bản sao lưu mã hóa lên |
+| `/profile sync pull` | Kéo về và giải mã |
+| `/profile export <file>` | Xuất file sao lưu AES-256-GCM |
+| `/profile import-enc <file>` | Khôi phục từ file mã hóa |
+| `/profile import <thư_mục> [--force]` | Nhập profile thô từ thư mục khác |
+
+> 🔑 **Mật khẩu sao lưu không bao giờ được ghi xuống đĩa.** Đưa nó vào bằng `--password-stdin` (an toàn nhất: `echo "$PW" | node swap.js export f.enc --password-stdin`), biến môi trường `CLAUDE_SWAP_PASSWORD`, hoặc `--password <pw>` (cách này để lại mật khẩu trong lịch sử shell, nên chỉ dùng khi bạn tin cái lịch sử đó).
 
 ---
 
-## 🖥️ Minh họa giao diện
+## 🖥️ Trông nó thế nào
 
-### Khi chạy `/profile list`:
+### `/profile list`:
 
 ```text
 🟢 work (Active)  👤 work@company.com  5h [███░░░░░] 32%   7d [█████░░░] 64%
@@ -243,14 +261,14 @@ Khởi chạy giao diện Web Dashboard trực quan và hiện đại ngay trên
 ⚪ dev-account
 ```
 
-*Thanh màu trực quan theo mức sử dụng:*
-- 🟢 `< 50%`: Quota an toàn
-- 🟡 `< 80%`: Mức dùng trung bình
-- 🟠 `< 95%`: Sắp đầy
-- 🔴 `≥ 95%`: Chạm ngưỡng nguy hiểm
-- Cảnh báo ⚠️ tự động bật từ mức `80%`.
+*Màu thanh usage, như đèn giao thông:*
+- 🟢 `< 50%`: thoải mái
+- 🟡 `< 80%`: bắt đầu để ý
+- 🟠 `< 95%`: liệu mà tiết kiệm
+- 🔴 `≥ 95%`: auto-switch đang xỏ giày
+- Từ `80%` trở lên sẽ có thêm ⚠️ cho chắc.
 
-### Chạy CLI ngoài terminal thông thường:
+### Gọi từ terminal thường, ngoài Claude Code:
 
 ```bash
 node swap.js list
@@ -262,82 +280,86 @@ node swap.js web
 
 ---
 
-## 🔀 Chạy session song song cách ly
+## 🔀 Chạy session song song
 
-Bạn có thể chạy nhiều session Claude Code song song cùng lúc với các tài khoản khác nhau mà không sợ đè token hay xung đột phiên làm việc:
+Hai tài khoản, hai cửa sổ, cùng lúc. Không giành token của nhau:
 
 ```bash
-# Khởi chạy một session Claude Code riêng biệt cho profile work
+# Mở một Claude Code riêng cho profile work
 node swap.js run work
 
-# Hoặc truyền lệnh tùy ý chạy trong môi trường của profile work
-node swap.js run work -- claude --model claude-3-7-sonnet
+# Hoặc chạy lệnh tùy ý trong môi trường của profile work
+node swap.js run work -- claude --model sonnet
 ```
 
-Session sẽ được lưu tách biệt tại `~/.config/claude-cli-profiles/.sessions/<tên>` với biến môi trường `CLAUDE_CONFIG_DIR`, bảo đảm an toàn dữ liệu và vệ sinh credential tuyệt đối.
+Mỗi session sống ở `~/.config/claude-cli-profiles/.sessions/<tên>` và dùng `CLAUDE_CONFIG_DIR` riêng. Khi session kết thúc, token đã được refresh sẽ được đồng bộ ngược về profile. Nếu bên trong session có ai đó đăng nhập sang tài khoản khác, plugin sẽ không chép nhầm tài khoản đó vào profile.
 
 ---
 
-## 🧠 Cách hoạt động
+## 🧠 Bên trong có gì
 
-Profile được lưu tại `~/.config/claude-cli-profiles/<tên>.json` (phân quyền riêng tư `0600`, thư mục `0700`):
+Mỗi profile là một file `~/.config/claude-cli-profiles/<tên>.json` (quyền `0600`, thư mục `0700`, người ngoài không đọc được), gồm:
 
-- Các khóa xác thực trong `~/.claude.json` (`oauthAccount`, `primaryApiKey`, `customApiKeyResponses`).
-- Token OAuth trong `~/.claude/.credentials.json` (hoặc Keychain trên macOS).
+- Các khóa đăng nhập trong `~/.claude.json`: `oauthAccount`, `primaryApiKey`, `customApiKeyResponses`.
+- Token OAuth trong `~/.claude/.credentials.json`, hoặc Keychain trên macOS.
 
-**Khi đổi profile:**
-- Plugin chỉ trích xuất và hoán đổi các khóa xác thực đăng nhập, **giữ nguyên toàn bộ cấu hình dự án, cài đặt cá nhân và lịch sử session** trong `~/.claude.json`.
-- Tự động sao lưu token mới nhất của profile hiện tại trước khi chuyển đổi (nếu token vừa được Claude Code tự động refresh).
-- Ghi nguyên tử (atomic write qua file tạm) và tự tạo bản backup `.bak` chống mất mát dữ liệu khi mất điện hoặc crash đột ngột.
+**Khi bạn đổi profile:**
+- Plugin chỉ thay đúng mấy khóa đăng nhập. **Cấu hình dự án, cài đặt và lịch sử trong `~/.claude.json` giữ nguyên.** Như thay chìa khóa xe, không ai tháo luôn cả cái xe.
+- Trước khi đổi, plugin lưu lại token mới nhất của profile hiện tại, phòng khi Claude Code vừa âm thầm refresh nó.
+- Mọi file được ghi qua file tạm rồi mới đổi tên (atomic write), kèm bản `.bak`. Mất điện giữa chừng cũng không mất profile.
+- Nếu bạn đặt `CLAUDE_CONFIG_DIR`, plugin làm việc với thư mục đó thay cho `~/.claude`.
+- Trên macOS, token được đưa vào Keychain qua `stdin` chứ không nằm trên dòng lệnh, nên `ps` không nhìn thấy.
 
 ---
 
-## 🌐 Đa ngôn ngữ (vi / en)
+## 🌐 Đa ngôn ngữ
 
-`claude-swap` hỗ trợ đầy đủ song ngữ: **Tiếng Việt** (mặc định) và **Tiếng Anh**.
+Mặc định nói **tiếng Việt**, và nói được cả **tiếng Anh**:
 
 ```bash
-/profile lang           # Xem ngôn ngữ hiện tại
-/profile lang en        # Chuyển sang Tiếng Anh
-/profile lang vi        # Chuyển sang Tiếng Việt
+/profile lang           # đang dùng ngôn ngữ nào
+/profile lang en        # switch to English
+/profile lang vi        # về lại tiếng Việt
 ```
 
-Bạn cũng có thể ép ngôn ngữ qua biến môi trường:
+Hoặc ép bằng biến môi trường:
 ```bash
 export CLAUDE_SWAP_LANG=en
 ```
 
+(Một số thông báo hiếm gặp vẫn chỉ có tiếng Việt. Coi như học thêm ngoại ngữ.)
+
 ---
 
-## 🛠️ Phát triển & Kiểm thử
-
-Dự án có bộ test suite toàn diện kiểm tra mọi tính năng:
+## 🛠️ Phát triển & kiểm thử
 
 ```bash
-npm test                   # Chạy 47 unit tests của swap.js & web.js (node --test)
-claude plugin validate .   # Kiểm tra tính hợp lệ của manifest và hooks
-claude plugin test .       # Chạy 11 tests kiểm thử plugin hook của Claude Code
+npm test                   # 50 unit test cho swap.js & web.js (node --test)
+claude plugin validate .   # kiểm tra manifest và hooks
+claude plugin test .       # 11 test cho plugin hook
 ```
+
+Test dùng thư mục tạm và token giả, nên chạy bao nhiêu lần cũng không đụng tới tài khoản thật của bạn.
 
 ### Cấu trúc dự án:
 
 ```text
 claude-swap/
-├── swap.js               # Core engine xử lý profile, credentials, sync & usage (Node.js)
-├── web.js                # Web Dashboard Mini UI, REST API & Documentation
-├── package.json          # Cấu hình project, test script & metadata
+├── swap.js               # Toàn bộ logic: profile, credentials, sync, usage, CLI
+├── web.js                # Web Dashboard, REST API và trang hướng dẫn
+├── package.json          # Metadata và script test
 ├── hooks/
 │   ├── hooks.json        # Đăng ký hook với Claude Code
-│   ├── register.ts       # Hook session.start, prompt.submit & command.run cho /profile
-│   └── register.test.ts  # Test suite cho plugin hooks (11 tests)
+│   ├── register.ts       # session.start, prompt.submit và lệnh /profile
+│   └── register.test.ts  # Test cho plugin hook (11 test)
 ├── test/
-│   └── swap.test.js      # Unit tests cho swap.js & web.js (47 tests)
-├── LICENSE               # Giấy phép mã nguồn mở MIT
-└── .claude-plugin/       # Plugin manifest & marketplace config
+│   └── swap.test.js      # Unit test cho swap.js & web.js (50 test)
+├── LICENSE               # MIT
+└── .claude-plugin/       # Manifest plugin & marketplace
 ```
 
 ---
 
 ## 📄 License
 
-Dự án được phân phối dưới giấy phép mã nguồn mở [MIT](LICENSE).
+[MIT](LICENSE). Cứ lấy mà dùng, chỉ xin đừng dùng nó để lách điều khoản sử dụng của Anthropic.

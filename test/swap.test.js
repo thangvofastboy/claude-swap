@@ -44,6 +44,7 @@ import {
   getBoundBranchProfile,
   matchBranchPattern,
   recordUsageSnapshot,
+  getProfileTags,
   calculateForecast,
   formatForecastReport,
   interactivePickProfile,
@@ -1251,8 +1252,13 @@ describe('swap.js core functionality', () => {
     assert.match(htmlText, /claude-swap/)
     assert.match(htmlText, /Web UI/)
 
+    // the API needs the per-launch token; GET / alone must not reveal it
+    assert.ok(!htmlText.includes(dash.token))
+    assert.equal((await fetch(`${dash.url}/api/data`)).status, 401)
+    const auth = { 'X-Dashboard-Token': dash.token }
+
     // Verify GET /api/data
-    const dataRes = await fetch(`${dash.url}/api/data`)
+    const dataRes = await fetch(`${dash.url}/api/data`, { headers: auth })
     assert.equal(dataRes.status, 200)
     const json = await dataRes.json()
     assert.equal(json.profiles.length, 2)
@@ -1260,17 +1266,45 @@ describe('swap.js core functionality', () => {
     // Verify POST /api/action swap
     const actRes = await fetch(`${dash.url}/api/action`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...auth },
       body: JSON.stringify({ action: 'swap', profile: 'web_b' }),
     })
     assert.equal(actRes.status, 200)
     assert.equal(currentProfile(tmpHome), 'web_b')
     assert.match(dash.url, /^http:\/\/127\.0\.0\.1:/)
 
+    // stats tab data: the swap above is in the history, a usage snapshot shows up per profile
+    assert.match(htmlText, /id="tab-stats"/)
+    assert.match(htmlText, /id="tab-features"/)
+
+    // "All features" tab: whitelisted subcommands run in a child against this home
+    const cli = async (args, password) => (await fetch(`${dash.url}/api/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...auth },
+      body: JSON.stringify({ action: 'cli', args, password }),
+    })).json()
+    const tagged = await cli(['tag', 'web_a', 'corp'])
+    assert.equal(tagged.ok, true, tagged.output)
+    assert.deepEqual(getProfileTags(tmpHome, 'web_a'), ['corp'])
+    assert.equal((await cli(['run', 'web_a'])).ok, false) // interactive: CLI only
+    assert.equal((await cli(['export', 'x.enc', '--password', 'pw'])).ok, false) // never on argv
+    const enc = path.join(tmpHome, 'web.enc')
+    const exported = await cli(['export', enc], 'pw-web')
+    assert.equal(exported.ok, true, exported.output)
+    assert.ok(fs.existsSync(enc))
+    assert.equal((await cli(['import-enc', enc], 'wrong')).ok, false)
+    assert.equal((await cli(['swap', 'web_a'])).ok, true)
+
+    recordUsageSnapshot(tmpHome, 'web_a', 30, 50)
+    const stats = getDashboardData(tmpHome)
+    assert.equal(stats.swapHistory[0].to, 'web_a')
+    assert.equal(stats.usageHistory.web_a.length, 1)
+    assert.equal(stats.forecast.web_a.hasData, false)
+
     // CSRF: a cross-site "simple" POST (text/plain) is refused
     const csrf = await fetch(`${dash.url}/api/action`, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain' },
+      headers: { 'Content-Type': 'text/plain', ...auth },
       body: JSON.stringify({ action: 'delete', profile: 'web_a' }),
     })
     assert.equal(csrf.status, 415)
@@ -1281,7 +1315,7 @@ describe('swap.js core functionality', () => {
     fs.writeFileSync(cfgFile, JSON.stringify({ enabled: true, threshold: 95, order: ['web_a'] }))
     await fetch(`${dash.url}/api/action`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...auth },
       body: JSON.stringify({ action: 'save_config', auto: { enabled: true, threshold: 90, safeguard: 70, primary: 'web_a', pool: 'all' } }),
     })
     const saved = JSON.parse(fs.readFileSync(cfgFile, 'utf-8'))
