@@ -1179,6 +1179,117 @@ export function generatePromptSnippet(shell = 'starship') {
   throw new SwapError(`Shell '${shell}' không được hỗ trợ. Các shell hỗ trợ: starship, zsh, bash, tmux`)
 }
 
+// ---------------------------------------------------------------- ephemeral & temporary swap
+
+export function parseDuration(str) {
+  if (!str || typeof str !== 'string') {
+    throw new SwapError('Thời gian không hợp lệ. Ví dụ: 30m, 1h, 2h30m, 45s')
+  }
+  const trimmed = str.trim().toLowerCase()
+  const re = /(\d+)\s*(ms|d|ngày|h|giờ|m|phút|s|giây)/g
+  let totalMs = 0
+  let match
+  let matchedAny = false
+  while ((match = re.exec(trimmed)) !== null) {
+    matchedAny = true
+    const num = parseInt(match[1], 10)
+    const unit = match[2]
+    if (unit === 'ms') totalMs += num
+    else if (unit === 's' || unit === 'giây') totalMs += num * 1000
+    else if (unit === 'm' || unit === 'phút') totalMs += num * 60 * 1000
+    else if (unit === 'h' || unit === 'giờ') totalMs += num * 3600 * 1000
+    else if (unit === 'd' || unit === 'ngày') totalMs += num * 24 * 3600 * 1000
+  }
+  if (!matchedAny || totalMs <= 0) {
+    throw new SwapError(`Thời gian không hợp lệ: '${str}'. Ví dụ: 30m, 1h, 2h30m`)
+  }
+  return totalMs
+}
+
+export function tempProfileFile(home) {
+  return path.join(profilesDir(home), '.temp-profile.json')
+}
+
+export function loadTempProfile(home) {
+  const f = tempProfileFile(home)
+  try {
+    if (fs.existsSync(f)) {
+      const data = JSON.parse(fs.readFileSync(f, 'utf-8'))
+      if (data && typeof data === 'object' && data.tempProfile) {
+        return data
+      }
+    }
+  } catch {}
+  return null
+}
+
+export function tempSwap(home, name, durationStr) {
+  if (!profileExists(home, name)) {
+    throw new SwapError(`Profile '${name}' không tồn tại.`)
+  }
+  const durationMs = parseDuration(durationStr)
+  const orig = currentProfile(home) || ''
+  if (orig === name) {
+    throw new SwapError(`Profile '${name}' đang là profile active.`)
+  }
+  const expiresAt = Date.now() + durationMs
+
+  swapProfile(home, name, {
+    type: 'temp',
+    reason: `Tạm thời ${durationStr}`,
+  })
+
+  const state = {
+    tempProfile: name,
+    originalProfile: orig,
+    expiresAt,
+    durationMs,
+    durationStr,
+  }
+  atomicWrite(tempProfileFile(home), JSON.stringify(state, null, 2))
+  return state
+}
+
+export function cancelTempSwap(home) {
+  const state = loadTempProfile(home)
+  if (!state) {
+    throw new SwapError('Hiện tại không ở trạng thái profile tạm thời.')
+  }
+  const orig = state.originalProfile
+  if (orig && profileExists(home, orig)) {
+    swapProfile(home, orig, {
+      type: 'temp',
+      reason: 'Hủy chuyển tạm thời',
+    })
+  }
+  try {
+    fs.unlinkSync(tempProfileFile(home))
+  } catch {}
+  return { revertedTo: orig }
+}
+
+export function checkTempExpiry(home) {
+  const state = loadTempProfile(home)
+  if (!state) {
+    return { expired: false }
+  }
+  if (Date.now() >= state.expiresAt) {
+    const orig = state.originalProfile
+    if (orig && profileExists(home, orig)) {
+      swapProfile(home, orig, {
+        type: 'auto',
+        reason: 'Hết hạn profile tạm thời',
+      })
+      sendNotification(home, 'claude-swap', `Đã tự động quay về profile gốc '${orig}' do hết hạn mượn tạm.`)
+    }
+    try {
+      fs.unlinkSync(tempProfileFile(home))
+    } catch {}
+    return { expired: true, revertedTo: orig }
+  }
+  return { expired: false, remainingMs: state.expiresAt - Date.now(), state }
+}
+
 export function findNextProfile(home, options = {}) {
   const config = options.config || loadAutoSwitchConfig(home)
   const allProfiles = listProfiles(home)
@@ -1254,6 +1365,17 @@ export function findNextProfile(home, options = {}) {
 }
 
 export async function autoCheckAndSwap(home, options = {}) {
+  // Check if temp profile expired
+  const tempRes = checkTempExpiry(home)
+  if (tempRes.expired) {
+    return {
+      swapped: true,
+      from: options.currentProfile || currentProfile(home),
+      to: tempRes.revertedTo,
+      isTempRevert: true,
+    }
+  }
+
   const config = options.config || loadAutoSwitchConfig(home)
   if (!config.enabled) {
     return { swapped: false, reason: 'disabled' }
@@ -1937,6 +2059,29 @@ export async function runCli(argv, home = os.homedir()) {
       case 'prompt': {
         const shell = filteredArgv[1] || 'starship'
         console.log(generatePromptSnippet(shell))
+        return 0
+      }
+      case 'temp': {
+        const name = filteredArgv[1]
+        const dur = filteredArgv[2] || '1h'
+        if (!name) {
+          const state = loadTempProfile(home)
+          if (state) {
+            const remMin = Math.max(0, Math.round((state.expiresAt - Date.now()) / 60000))
+            console.log(`Đang mượn tạm profile '${state.tempProfile}' (gốc: '${state.originalProfile}', còn ${remMin} phút).`)
+          } else {
+            console.log('Hiện không ở chế độ profile tạm thời. Dùng: /profile temp <tên> [thời_gian]')
+          }
+          return 0
+        }
+        const res = tempSwap(home, name, dur)
+        const expTime = new Date(res.expiresAt).toLocaleTimeString('vi-VN')
+        console.log(`Đã chuyển tạm thời sang '${res.tempProfile}' trong ${dur} (hết hạn lúc ${expTime}).`)
+        return 0
+      }
+      case 'untemp': {
+        const res = cancelTempSwap(home)
+        console.log(`Đã hoàn tất profile tạm thời và quay về '${res.revertedTo}'.`)
         return 0
       }
       default:

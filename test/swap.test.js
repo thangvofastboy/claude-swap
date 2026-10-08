@@ -25,6 +25,11 @@ import {
   diagnoseProfiles,
   getStatusline,
   generatePromptSnippet,
+  parseDuration,
+  tempSwap,
+  checkTempExpiry,
+  cancelTempSwap,
+  loadTempProfile,
 } from '../swap.js'
 
 function login(home, account, token, extra = {}) {
@@ -540,6 +545,47 @@ describe('swap.js core functionality', () => {
 
     assert.equal(await runCli(['statusline'], tmpHome), 0)
     assert.equal(await runCli(['prompt', 'starship'], tmpHome), 0)
+  })
+
+  test('ephemeral and temporary profile swap with expiry', async () => {
+    assert.equal(parseDuration('30m'), 30 * 60 * 1000)
+    assert.equal(parseDuration('2h'), 2 * 3600 * 1000)
+    assert.equal(parseDuration('45s'), 45 * 1000)
+    assert.throws(() => parseDuration('invalid'), /Thời gian không hợp lệ/)
+
+    login(tmpHome, 'p_orig', 'tok-orig')
+    saveProfile(tmpHome, 'orig')
+    login(tmpHome, 'p_temp', 'tok-temp')
+    saveProfile(tmpHome, 'temp')
+
+    // Current is temp, swap back to orig first
+    swapProfile(tmpHome, 'orig')
+    assert.equal(currentProfile(tmpHome), 'orig')
+
+    // Temporary swap to 'temp' for 1 hour
+    assert.equal(await runCli(['temp', 'temp', '1h'], tmpHome), 0)
+    assert.equal(currentProfile(tmpHome), 'temp')
+
+    const tempState = loadTempProfile(tmpHome)
+    assert.equal(tempState.tempProfile, 'temp')
+    assert.equal(tempState.originalProfile, 'orig')
+
+    // Untemp CLI command to revert
+    assert.equal(await runCli(['untemp'], tmpHome), 0)
+    assert.equal(currentProfile(tmpHome), 'orig')
+    assert.equal(loadTempProfile(tmpHome), null)
+
+    // Test expiry automatic reversion
+    tempSwap(tmpHome, 'temp', '10ms')
+    assert.equal(currentProfile(tmpHome), 'temp')
+
+    // Wait 20ms to expire
+    await new Promise(r => setTimeout(r, 20))
+
+    const expRes = checkTempExpiry(tmpHome)
+    assert.equal(expRes.expired, true)
+    assert.equal(expRes.revertedTo, 'orig')
+    assert.equal(currentProfile(tmpHome), 'orig')
   })
 })
 
