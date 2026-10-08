@@ -44,7 +44,8 @@ def main():
         assert json.loads((home / ".claude.json").read_text())["oauthAccount"]["emailAddress"] == "a@example.com"
         assert "tok-a" in (home / ".claude" / ".credentials.json").read_text()
         assert (home / ".claude.json.bak").exists()
-        assert run(home, "list")[1].split() == ["A", "(Active)", "B"]
+        list_out = run(home, "list")[1]
+        assert "🟢" in list_out and "A (Active)" in list_out and "⚪" in list_out and "B" in list_out
 
         assert run(home, "delete", "A")[0] == 0
         assert run(home, "current")[1].strip() == ""

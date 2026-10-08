@@ -563,6 +563,49 @@ def usage_report(home: Path, fetch=fetch_usage, force: bool = False) -> str:
     return "\n".join(lines)
 
 
+def profile_list_report(home: Path, color: bool | None = None) -> str:
+    profiles = list_profiles(home)
+    if not profiles:
+        return "Chưa có profile nào. Tạo bằng: /profile new <tên>"
+    cur = current_profile(home)
+    cache = _load_usage_cache(home)
+    if color is None:
+        color = sys.stdout.isatty()
+    lines = []
+    for n in profiles:
+        active = (n == cur)
+        email = profile_email(home, n)
+        icon = "🟢" if active else "⚪"
+        active_str = " (Active)" if active else ""
+
+        # Check cached usage
+        summary = ""
+        key = f"{n}|{email}"
+        hit = cache.get(key) if isinstance(cache.get(key), dict) else {}
+        cached_limits = hit.get("limits")
+        if cached_limits:
+            summary_parts = []
+            for lim in cached_limits[:2]:
+                lbl = lim[0].replace("5 giờ", "5h").replace("7 ngày", "7d")
+                pct = int(lim[1])
+                warn = " ⚠" if pct >= WARN_PCT else ""
+                summary_parts.append(f"{lbl} {pct}%{warn}")
+            if summary_parts:
+                summary = f"  [{' · '.join(summary_parts)}]"
+
+        email_str = f"  👤 {email}" if email else ""
+
+        if color:
+            name_colored = f"\033[1;32m{n}\033[0m" if active else f"\033[1m{n}\033[0m"
+            act_colored = "\033[32m (Active)\033[0m" if active else ""
+            email_colored = f"  \033[90m👤 {email}\033[0m" if email else ""
+            summary_colored = f"  \033[36m{summary.strip()}\033[0m" if summary else ""
+            lines.append(f"{icon} {name_colored}{act_colored}{email_colored}{summary_colored}")
+        else:
+            lines.append(f"{icon} {n}{active_str}{email_str}{summary}")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------- cli
 
 def run_cli(argv: list[str], home: Path) -> int:
@@ -585,9 +628,7 @@ def run_cli(argv: list[str], home: Path) -> int:
     a = ap.parse_args(argv)
     try:
         if a.cmd == "list":
-            cur = current_profile(home)
-            for n in list_profiles(home):
-                print(f"{n} (Active)" if n == cur else n)
+            print(profile_list_report(home))
         elif a.cmd == "current":
             print(current_profile(home) or "")
         elif a.cmd == "usage":
@@ -1433,7 +1474,7 @@ function renderMain() {
     <div class="card ${p.active ? "active" : ""} ${p.name === sel ? "sel" : ""}" data-name="${esc(p.name)}">
       <div class="avatar">${esc(p.name[0].toUpperCase())}</div>
       <div class="who"><b>${esc(p.name)}</b><small>👤 ${esc(p.email || "—")}</small>${meter(p.name)}</div>
-      ${p.active ? '<span class="tag">ACTIVE</span>' : ""}
+      ${p.active ? '<span class="tag">🟢 ACTIVE</span>' : ""}
     </div>`).join("")
     : `<div class="empty">Chưa có profile nào.<br>Đăng nhập Claude CLI rồi bấm “Lưu hiện tại”,<br>hoặc “Nhập…” từ thư mục khác.</div>`;
   const banner = S.missing.length ? `<div class="banner">Cài thêm <b>${esc(S.missing.join(", "))}</b> để thu nhỏ xuống thanh trên cùng:` +
@@ -1460,7 +1501,7 @@ function renderMini() {
     <header class="bar"><div class="grow"><h1 style="font-size:16px">Claude Profiles</h1></div>${chip()}
       <button class="icon-btn" id="m-close" title="Đóng">${svg("close")}</button></header>
     <main>${S.profiles.length ? S.profiles.map(p => `<div class="mrow ${p.active ? "active" : ""}" data-swap="${esc(p.name)}">
-      <span class="dot"></span><b title="${esc(p.email)}">${esc(p.name)}</b>${meter(p.name, 2)}</div>`).join("") : '<div class="empty">Chưa có profile nào.</div>'}</main>
+      <span class="dot"></span><b title="${esc(p.email)}">${p.active ? '🟢 ' : '⚪ '}${esc(p.name)}</b>${meter(p.name, 2)}</div>`).join("") : '<div class="empty">Chưa có profile nào.</div>'}</main>
     <footer><div class="mini-actions">
       <button class="btn tonal" id="m-save" title="Lưu tài khoản đang đăng nhập">${svg("save")}Lưu</button>
       <button class="btn tonal" id="m-usage" title="Xem quota">${svg("chart")}Usage</button>

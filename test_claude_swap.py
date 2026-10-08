@@ -131,7 +131,8 @@ def test_cli(tmp_path, capsys):
     assert cs.run_cli(["swap", "A"], tmp_path) == 0
     capsys.readouterr()
     cs.run_cli(["list"], tmp_path)
-    assert capsys.readouterr().out.splitlines() == ["A (Active)", "B"]
+    out = capsys.readouterr().out
+    assert "🟢 A (Active)" in out and "⚪ B" in out
 
 
 def test_usage_report_uses_live_token_for_active_and_flags_expired(tmp_path):
