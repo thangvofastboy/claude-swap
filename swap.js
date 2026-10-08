@@ -229,9 +229,17 @@ export function saveProfile(home, name, force = false) {
       auth[k] = data[k]
     }
   }
+  let existingTags = []
+  if (fs.existsSync(target)) {
+    try {
+      const old = JSON.parse(fs.readFileSync(target, 'utf-8'))
+      if (Array.isArray(old.tags)) existingTags = old.tags
+    } catch {}
+  }
   const profile = {
     claude_json: auth,
     credentials: readCredentials(home),
+    tags: existingTags,
   }
   if (Object.keys(profile.claude_json).length === 0 && !profile.credentials) {
     throw new SwapError('Không thấy thông tin đăng nhập nào. Hãy /login trong Claude CLI trước.')
@@ -314,6 +322,52 @@ export function openProfilesFolder(home) {
     child_process.spawn('xdg-open', [d], { detached: true, stdio: 'ignore' }).unref()
   }
   return d
+}
+
+// ---------------------------------------------------------------- tags
+
+export function getProfileTags(home, name) {
+  try {
+    const f = profilePath(home, name)
+    if (!fs.existsSync(f)) return []
+    const data = JSON.parse(fs.readFileSync(f, 'utf-8'))
+    return Array.isArray(data.tags) ? data.tags : []
+  } catch {
+    return []
+  }
+}
+
+export function addProfileTag(home, name, tag) {
+  if (!tag) throw new SwapError('Thiếu tên tag.')
+  const f = profilePath(home, name)
+  if (!fs.existsSync(f)) throw new SwapError(`Profile '${name}' không tồn tại.`)
+  const data = JSON.parse(fs.readFileSync(f, 'utf-8'))
+  const tags = new Set(Array.isArray(data.tags) ? data.tags : [])
+  tags.add(tag.trim())
+  data.tags = Array.from(tags)
+  atomicWrite(f, JSON.stringify(data, null, 2))
+  return data.tags
+}
+
+export function removeProfileTag(home, name, tag) {
+  const f = profilePath(home, name)
+  if (!fs.existsSync(f)) throw new SwapError(`Profile '${name}' không tồn tại.`)
+  const data = JSON.parse(fs.readFileSync(f, 'utf-8'))
+  data.tags = (Array.isArray(data.tags) ? data.tags : []).filter(t => t !== tag.trim())
+  atomicWrite(f, JSON.stringify(data, null, 2))
+  return data.tags
+}
+
+export function listAllTags(home) {
+  const map = {}
+  for (const name of listProfiles(home)) {
+    const tags = getProfileTags(home, name)
+    for (const t of tags) {
+      if (!map[t]) map[t] = []
+      map[t].push(name)
+    }
+  }
+  return map
 }
 
 // ---------------------------------------------------------------- import
@@ -745,10 +799,11 @@ export function loadAutoSwitchConfig(home) {
         enabled: parsed.enabled !== false,
         threshold: typeof parsed.threshold === 'number' ? parsed.threshold : 95,
         order: Array.isArray(parsed.order) ? parsed.order : [],
+        pool: typeof parsed.pool === 'string' && parsed.pool !== 'all' ? parsed.pool : null,
       }
     }
   } catch {}
-  return { enabled: true, threshold: 95, order: [] }
+  return { enabled: true, threshold: 95, order: [], pool: null }
 }
 
 export function saveAutoSwitchConfig(home, config) {
@@ -789,6 +844,12 @@ export function findNextProfile(home, options = {}) {
 
     try {
       const profile = JSON.parse(fs.readFileSync(profilePath(home, name), 'utf-8'))
+      if (config.pool && config.pool !== 'all') {
+        const tags = Array.isArray(profile.tags) ? profile.tags : []
+        if (!tags.includes(config.pool)) {
+          continue
+        }
+      }
       const oauth = JSON.parse(profile.credentials || '{}').claudeAiOauth || {}
       if (!oauth.accessToken) continue
       if (typeof oauth.expiresAt === 'number' && oauth.expiresAt / 1000 < Date.now() / 1000) {
@@ -1170,7 +1231,21 @@ export async function runCli(argv, home = os.homedir()) {
           return 0
         }
 
-        console.error(`Lệnh auto không hợp lệ: ${sub}. Dùng: /profile auto [on|off|threshold <%>|order <danh sách>|check]`)
+        if (sub === 'pool') {
+          const val = filteredArgv[2]
+          if (!val || val === 'all' || val === 'default' || val === 'none') {
+            cfg.pool = null
+            saveAutoSwitchConfig(home, cfg)
+            console.log('Đã mở auto-switch cho tất cả các profile (không giới hạn pool).')
+            return 0
+          }
+          cfg.pool = val.trim()
+          saveAutoSwitchConfig(home, cfg)
+          console.log(`Đã đặt nhóm (pool) cho auto-switch: '${cfg.pool}'.`)
+          return 0
+        }
+
+        console.error(`Lệnh auto không hợp lệ: ${sub}. Dùng: /profile auto [on|off|threshold <%>|order <danh sách>|pool <tag|all>|check]`)
         return 1
       }
       case 'bind': {
@@ -1219,6 +1294,34 @@ export async function runCli(argv, home = os.homedir()) {
         }
         console.error(`Lệnh notify không hợp lệ: ${sub}. Dùng: /profile notify [on|off]`)
         return 1
+      }
+      case 'tag': {
+        const name = filteredArgv[1]
+        const tag = filteredArgv[2]
+        if (!name || !tag) throw new SwapError('Cú pháp: /profile tag <tên profile> <tag>')
+        const tags = addProfileTag(home, name, tag)
+        console.log(`Đã gắn tag '${tag}' cho profile '${name}'. Tags hiện tại: ${tags.join(', ')}`)
+        return 0
+      }
+      case 'untag': {
+        const name = filteredArgv[1]
+        const tag = filteredArgv[2]
+        if (!name || !tag) throw new SwapError('Cú pháp: /profile untag <tên profile> <tag>')
+        const tags = removeProfileTag(home, name, tag)
+        console.log(`Đã gỡ tag '${tag}' khỏi profile '${name}'. Tags hiện tại: ${tags.join(', ') || '(không có)'}`)
+        return 0
+      }
+      case 'tags': {
+        const map = listAllTags(home)
+        const entries = Object.entries(map)
+        if (entries.length === 0) {
+          console.log('Chưa có tag nào được tạo. Dùng: /profile tag <profile> <tag>')
+          return 0
+        }
+        for (const [tag, profiles] of entries) {
+          console.log(`🏷️ ${tag}: ${profiles.join(', ')}`)
+        }
+        return 0
       }
       default:
         console.error(`Lệnh không hợp lệ: ${cmd}`)

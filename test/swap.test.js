@@ -337,5 +337,42 @@ describe('swap.js core functionality', () => {
     assert.equal(await runCli(['notify', 'off'], tmpHome), 0)
     assert.equal(await runCli(['notify', 'on'], tmpHome), 0)
   })
+
+  test('profile tagging, untagging and pool filtering in auto-switch', async () => {
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'p_work')
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'p_personal')
+    login(tmpHome, 'c', 'tok-c')
+    saveProfile(tmpHome, 'p_other_work')
+
+    // Tag profiles
+    assert.equal(await runCli(['tag', 'p_work', 'company'], tmpHome), 0)
+    assert.equal(await runCli(['tag', 'p_other_work', 'company'], tmpHome), 0)
+    assert.equal(await runCli(['tags'], tmpHome), 0)
+
+    // Set auto pool to 'company'
+    assert.equal(await runCli(['auto', 'pool', 'company'], tmpHome), 0)
+
+    swapProfile(tmpHome, 'p_work')
+
+    // p_personal has 20% usage, p_other_work has 50% usage
+    const mockUsageData = {
+      'p_work|a@example.com': { limits: [['5 giờ', 99, '20:00']] },
+      'p_personal|b@example.com': { limits: [['5 giờ', 20, '20:00']] },
+      'p_other_work|c@example.com': { limits: [['5 giờ', 50, '20:00']] },
+    }
+    const cacheFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json')
+    fs.writeFileSync(cacheFile, JSON.stringify(mockUsageData))
+
+    // Check: should pick p_other_work because of pool=company, even though p_personal has lower usage
+    const res = await runCli(['auto', 'check'], tmpHome)
+    assert.equal(res, 0)
+    assert.equal(currentProfile(tmpHome), 'p_other_work')
+
+    // Untag
+    assert.equal(await runCli(['untag', 'p_other_work', 'company'], tmpHome), 0)
+    assert.equal(await runCli(['auto', 'pool', 'all'], tmpHome), 0)
+  })
 })
 
