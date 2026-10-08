@@ -547,19 +547,67 @@ def bar(pct: float, width: int = 20) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
-def usage_report(home: Path, fetch=fetch_usage, force: bool = False) -> str:
+def strip_ansi(text: str) -> str:
+    import re
+    return re.sub(r"\033\[[0-9;]*m", "", text)
+
+
+def _should_color(color: bool | None = None) -> bool:
+    if color is not None:
+        return color
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("CLICOLOR") == "0":
+        return False
+    return True
+
+
+def usage_report(home: Path, fetch=fetch_usage, force: bool = False, color: bool = False) -> str:
     rows = usage_rows(home, fetch, force)
     if not rows:
         return "Chưa có profile nào."
     lines = []
     for r in rows:
-        lines.append(f"{r['name']}{' (Active)' if r['active'] else ''}  {r['email']}".rstrip())
+        name = r["name"]
+        active = r["active"]
+        email = r["email"]
+        if color:
+            icon = "🟢" if active else "⚪"
+            name_colored = f"\033[1;32m{name} (Active)\033[0m" if active else f"\033[1;37m{name}\033[0m"
+            email_colored = f"  \033[38;5;248m👤 {email}\033[0m" if email else ""
+            lines.append(f"{icon} {name_colored}{email_colored}")
+        else:
+            lines.append(f"{r['name']}{' (Active)' if r['active'] else ''}  {r['email']}".rstrip())
+
         for label, pct, reset in r["limits"]:
             icon = status_icon(pct)
-            warn = " ⚠" if pct >= WARN_PCT else ""
-            lines.append(f"  {icon} {label:<12}{bar(pct)} {int(pct):>3}%{warn}" + (f"  reset {reset}" if reset else ""))
+            pct_val = max(0.0, min(float(pct), 100.0))
+            pct_int = int(round(pct_val))
+            warn = " ⚠" if pct_int >= WARN_PCT else ""
+            reset_str = f"  reset {reset}" if reset else ""
+
+            if color:
+                if pct_val >= 95:
+                    c = "\033[1;31m"
+                elif pct_val >= WARN_PCT:
+                    c = "\033[1;38;5;208m"
+                elif pct_val >= 50:
+                    c = "\033[1;33m"
+                else:
+                    c = "\033[1;32m"
+                filled = round(pct_val / 100 * 20)
+                empty = 20 - filled
+                bar_colored = f"\033[90m[\033[0m{c}{'█' * filled}\033[0m\033[38;5;240m{'░' * empty}\033[90m]\033[0m"
+                lbl_colored = f"\033[1;36m{label:<12}\033[0m"
+                pct_colored = f"{c}{pct_int:>3}%\033[0m"
+                warn_colored = "\033[1;31m ⚠\033[0m" if pct_int >= WARN_PCT else ""
+                reset_colored = f"  \033[38;5;245mreset {reset}\033[0m" if reset else ""
+                lines.append(f"  {icon} {lbl_colored} {bar_colored} {pct_colored}{warn_colored}{reset_colored}")
+            else:
+                lines.append(f"  {icon} {label:<12}{bar(pct)} {int(pct):>3}%{warn}{reset_str}")
         if r["note"]:
-            lines.append(f"  {r['note']}")
+            note_str = f"  \033[38;5;214m⚠ {r['note']}\033[0m" if color else f"  {r['note']}"
+            lines.append(note_str)
     return "\n".join(lines)
 
 
@@ -576,7 +624,7 @@ def _chart_bar(pct: float, width: int = 8, color: bool = False) -> str:
         c = "\033[1;33m"
     else:
         c = "\033[1;32m"
-    return f"\033[90m[\033[0m{c}{'█' * filled}\033[0m\033[90m{'░' * empty}]\033[0m"
+    return f"\033[90m[\033[0m{c}{'█' * filled}\033[0m\033[38;5;240m{'░' * empty}\033[90m]\033[0m"
 
 
 def _format_limit_chart(label: str, pct: float, color: bool = False) -> str:
@@ -596,7 +644,7 @@ def _format_limit_chart(label: str, pct: float, color: bool = False) -> str:
     else:
         c = "\033[1;32m"
     warn_colored = "\033[1;31m ⚠\033[0m" if pct_int >= WARN_PCT else ""
-    return f"\033[36m{lbl}\033[0m {bar_str} {c}{pct_int}%\033[0m{warn_colored}"
+    return f"\033[1;36m{lbl}\033[0m {bar_str} {c}{pct_int}%\033[0m{warn_colored}"
 
 
 def profile_list_report(home: Path, color: bool | None = None) -> str:
@@ -606,7 +654,7 @@ def profile_list_report(home: Path, color: bool | None = None) -> str:
     cur = current_profile(home)
     cache = _load_usage_cache(home)
     if color is None:
-        color = sys.stdout.isatty()
+        color = _should_color()
     lines = []
     for n in profiles:
         active = (n == cur)
@@ -625,15 +673,15 @@ def profile_list_report(home: Path, color: bool | None = None) -> str:
                 summary = "  " + "   ".join(charts)
         elif hit.get("note"):
             note = hit["note"]
-            summary = f"  \033[90m({note})\033[0m" if color else f"  ({note})"
+            summary = f"  \033[38;5;214m({note})\033[0m" if color else f"  ({note})"
 
         email_str = f"  👤 {email}" if email else ""
 
         if color:
-            name_colored = f"\033[1;32m{n}\033[0m" if active else f"\033[1m{n}\033[0m"
-            act_colored = "\033[32m (Active)\033[0m" if active else ""
-            email_colored = f"  \033[90m👤 {email}\033[0m" if email else ""
-            lines.append(f"{icon} {name_colored}{act_colored}{email_colored}{summary}")
+            name_and_active = f"{n} (Active)" if active else n
+            name_colored = f"\033[1;32m{name_and_active}\033[0m" if active else f"\033[1;37m{n}\033[0m"
+            email_colored = f"  \033[38;5;248m👤 {email}\033[0m" if email else ""
+            lines.append(f"{icon} {name_colored}{email_colored}{summary}")
         else:
             lines.append(f"{icon} {n}{active_str}{email_str}{summary}")
     return "\n".join(lines)
@@ -643,12 +691,14 @@ def profile_list_report(home: Path, color: bool | None = None) -> str:
 
 def run_cli(argv: list[str], home: Path) -> int:
     ap = argparse.ArgumentParser(prog="claude_swap", description="Claude CLI Hot Profile Switcher")
+    ap.add_argument("--no-color", action="store_true", help="tắt màu ANSI")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p_list = sub.add_parser("list")
     p_list.add_argument("--refresh", action="store_true", help="tải lại usage mới nhất")
     sub.add_parser("current")
-    sub.add_parser("usage").add_argument("--refresh", action="store_true",
-                                         help=f"bỏ qua số liệu đã lưu (<{USAGE_TTL // 60} phút)")
+    p_usage = sub.add_parser("usage")
+    p_usage.add_argument("--refresh", action="store_true",
+                         help=f"bỏ qua số liệu đã lưu (<{USAGE_TTL // 60} phút)")
     sub.add_parser("folder", help="mở thư mục chứa profile")
     imp = sub.add_parser("import", help="nhập profile từ một thư mục")
     imp.add_argument("path")
@@ -660,15 +710,16 @@ def run_cli(argv: list[str], home: Path) -> int:
     for cmd in ("swap", "delete"):
         sub.add_parser(cmd).add_argument("name")
     a = ap.parse_args(argv)
+    color = not a.no_color and _should_color()
     try:
         if a.cmd == "list":
             if getattr(a, "refresh", False):
                 usage_rows(home, force=True)
-            print(profile_list_report(home))
+            print(profile_list_report(home, color=color))
         elif a.cmd == "current":
             print(current_profile(home) or "")
         elif a.cmd == "usage":
-            print(usage_report(home, force=a.refresh))
+            print(usage_report(home, force=a.refresh, color=color))
         elif a.cmd == "folder":
             d = profiles_dir(home)
             try:

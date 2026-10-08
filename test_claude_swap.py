@@ -131,7 +131,7 @@ def test_cli(tmp_path, capsys):
     assert cs.run_cli(["swap", "A"], tmp_path) == 0
     capsys.readouterr()
     cs.run_cli(["list"], tmp_path)
-    out = capsys.readouterr().out
+    out = cs.strip_ansi(capsys.readouterr().out)
     assert "🟢 A (Active)" in out and "⚪ B" in out
 
 
