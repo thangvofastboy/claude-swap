@@ -555,8 +555,9 @@ def usage_report(home: Path, fetch=fetch_usage, force: bool = False) -> str:
     for r in rows:
         lines.append(f"{r['name']}{' (Active)' if r['active'] else ''}  {r['email']}".rstrip())
         for label, pct, reset in r["limits"]:
+            icon = status_icon(pct)
             warn = " ⚠" if pct >= WARN_PCT else ""
-            lines.append(f"  {label:<14}{bar(pct)} {int(pct):>3}%{warn}" + (f"  reset {reset}" if reset else ""))
+            lines.append(f"  {icon} {label:<12}{bar(pct)} {int(pct):>3}%{warn}" + (f"  reset {reset}" if reset else ""))
         if r["note"]:
             lines.append(f"  {r['note']}")
     return "\n".join(lines)
@@ -641,6 +642,16 @@ def status_color(pct: float) -> str:
 
 def status_text_color(pct: float) -> str:
     return next(color for limit, color in STATUS_TEXT if pct < limit)
+
+
+def status_icon(pct: float) -> str:
+    if pct < 50:
+        return "🟢"
+    elif pct < WARN_PCT:
+        return "🟡"
+    elif pct < 95:
+        return "🟠"
+    return "🔴"
 
 
 def usage_summary(row: dict) -> str:
@@ -882,7 +893,7 @@ class Api:
             rows = usage_rows(self._home, self._fetch, force)
         return [{**r, "summary": usage_summary(r),
                  "limits": [{"label": label, "pct": pct, "reset": reset, "color": status_color(pct),
-                             "text": status_text_color(pct), "warn": pct >= WARN_PCT}
+                             "text": status_text_color(pct), "icon": status_icon(pct), "warn": pct >= WARN_PCT}
                             for label, pct, reset in r["limits"]]}
                 for r in rows]
 
@@ -1194,8 +1205,8 @@ def _run_webview(home: Path, missing: list[dict], start_hidden: bool, instance: 
 PAGE = r"""<!doctype html>
 <html lang="vi"><head><meta charset="utf-8">
 <style>
-:root{--bg:#0f1a2e;--surface:#16243d;--surface2:#1d2e4d;--border:#26395a;--ink:#e6edf7;--muted:#9aa8bf;
-  --accent:#2f6bd0;--accent-h:#2557a8;--link:#8ab4f8;--good:#7ee787;--chip:#173a2a;--warn:#ec835a}
+:root{--bg:#0b1326;--surface:#111e36;--surface2:#172948;--surface3:#1e355c;--border:rgba(255,255,255,0.08);--border-hover:rgba(96,165,250,0.3);--ink:#f1f5f9;--muted:#94a3b8;
+  --accent:#3b82f6;--accent-h:#2563eb;--link:#60a5fa;--good:#34d399;--chip:#123524;--warn:#f97316;--danger:#ef4444}
 *{box-sizing:border-box;margin:0}
 html,body{height:100%}
 body{background:var(--bg);color:var(--ink);font:14px/1.4 Roboto,"Noto Sans","Segoe UI",system-ui,sans-serif;
@@ -1203,98 +1214,114 @@ body{background:var(--bg);color:var(--ink);font:14px/1.4 Roboto,"Noto Sans","Seg
 #root{display:flex;flex-direction:column;height:100%}
 button{font:inherit;color:inherit;border:0;cursor:pointer;background:none}
 svg{width:18px;height:18px;fill:currentColor;flex:none}
-.bar{display:flex;align-items:center;gap:10px;padding:14px 16px;background:var(--surface);box-shadow:0 2px 10px #0007;z-index:2}
-.bar h1{font-size:18px;font-weight:700}
+.bar{display:flex;align-items:center;gap:10px;padding:14px 16px;background:linear-gradient(180deg,#152541 0%,#0e1a2f 100%);border-bottom:1px solid var(--border);box-shadow:0 4px 16px #0008;z-index:2}
+.bar h1{font-size:18px;font-weight:700;letter-spacing:-.01em}
 .bar small{color:var(--muted);font-size:12px}
 .grow{flex:1;min-width:0}
-.chip{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;background:var(--border);
-  color:var(--muted);font-weight:700;font-size:13px;white-space:nowrap}
-.chip.on{background:var(--chip);color:var(--good)}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:999px;background:var(--surface2);
+  color:var(--muted);font-weight:700;font-size:12px;white-space:nowrap;border:1px solid var(--border)}
+.chip.on{background:rgba(16,185,129,0.12);color:var(--good);border-color:rgba(52,211,153,0.3);box-shadow:0 0 8px rgba(52,211,153,0.15)}
 .icon-btn{display:inline-flex;align-items:center;gap:6px;padding:8px 10px;border-radius:999px;color:var(--link);
-  font-weight:600;font-size:13px;transition:background .15s}
-.icon-btn:hover{background:var(--surface2)}
-.icon-btn.only{padding:8px;color:var(--muted)}.icon-btn.only:hover{color:var(--ink)}
+  font-weight:600;font-size:13px;transition:all .15s}
+.icon-btn:hover{background:var(--surface2);transform:scale(1.05)}
+.icon-btn.only{padding:8px;color:var(--muted)}.icon-btn.only:hover{color:var(--ink);background:var(--surface2)}
 .bar .icon-btn.only{color:var(--ink)}
 main{flex:1;overflow:auto;padding:14px 16px 8px}
-.section{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
-.section>span{color:var(--muted);font-size:12px;font-weight:700;letter-spacing:.08em}
-.card{display:flex;align-items:center;gap:12px;padding:12px 14px;margin-bottom:8px;border-radius:16px;
-  background:var(--surface);border:2px solid transparent;cursor:pointer;
-  transition:border-color .15s,transform .15s,box-shadow .15s}
-.card:hover{box-shadow:0 6px 18px #0006;transform:translateY(-1px)}
-.card.sel{border-color:var(--accent)}
-.avatar{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;font-weight:700;font-size:16px;
-  background:var(--border);flex:none}
-.card.active .avatar{background:var(--accent);color:#fff}
+.section{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.section>span{color:var(--muted);font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase}
+.card{display:flex;align-items:center;gap:14px;padding:13px 15px;margin-bottom:10px;border-radius:18px;
+  background:linear-gradient(135deg,#13223b 0%,#0e192c 100%);border:1px solid var(--border);cursor:pointer;
+  transition:all .18s cubic-bezier(.16,1,.3,1);box-shadow:0 3px 12px rgba(0,0,0,0.25)}
+.card:hover{box-shadow:0 8px 24px rgba(0,0,0,0.4);transform:translateY(-2px);border-color:var(--border-hover)}
+.card.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 8px 22px rgba(59,130,246,0.25)}
+.card.active{border-left:3px solid var(--good)}
+.avatar{width:42px;height:42px;border-radius:50%;display:grid;place-items:center;font-weight:800;font-size:16px;
+  background:linear-gradient(135deg,#2563eb,#1d4ed8);color:#fff;box-shadow:0 3px 10px rgba(37,99,235,0.3);flex:none}
+.card.active .avatar{background:linear-gradient(135deg,#10b981,#059669);box-shadow:0 3px 10px rgba(16,185,129,0.3)}
 .who{flex:1;min-width:0}
-.who>b{display:block;font-size:15px}
-.who small,.meter{display:block;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tag{padding:2px 8px;border-radius:999px;background:var(--chip);color:var(--good);font-size:11px;font-weight:700;letter-spacing:.04em;white-space:nowrap}
+.who>b{display:block;font-size:15px;color:var(--ink);margin-bottom:2px}
+.who small{display:block;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.meter{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}
+.mini-badge{display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;white-space:nowrap}
+.tag{padding:3px 9px;border-radius:999px;background:var(--chip);color:var(--good);font-size:11px;font-weight:800;letter-spacing:.04em;white-space:nowrap;border:1px solid rgba(52,211,153,0.3);box-shadow:0 0 8px rgba(52,211,153,0.15)}
 .empty{text-align:center;color:var(--muted);padding:40px 10px;line-height:1.7}
-footer{padding:8px 16px 14px;display:flex;flex-direction:column;gap:10px}
+footer{padding:8px 16px 14px;display:flex;flex-direction:column;gap:10px;border-top:1px solid var(--border);background:linear-gradient(180deg,#0b1326 0%,#080e1c 100%)}
 .btn{display:flex;align-items:center;justify-content:center;gap:8px;padding:12px;border-radius:999px;font-weight:600;
-  transition:background .15s,box-shadow .15s}
-.filled{background:var(--accent);color:#fff;font-size:15px;box-shadow:0 2px 8px #0006}
-.filled:hover{background:var(--accent-h);box-shadow:0 4px 14px #0008}
-.tonal{background:var(--surface2)}
-.tonal:hover{background:var(--border)}
+  transition:all .18s cubic-bezier(.16,1,.3,1)}
+.filled{background:linear-gradient(135deg,#3b82f6 0%,#2563eb 100%);color:#fff;font-size:15px;box-shadow:0 4px 14px rgba(37,99,235,0.35)}
+.filled:hover{background:linear-gradient(135deg,#60a5fa 0%,#3b82f6 100%);box-shadow:0 6px 20px rgba(37,99,235,0.45);transform:translateY(-1px)}
+.tonal{background:var(--surface2);border:1px solid var(--border)}
+.tonal:hover{background:var(--surface3);border-color:rgba(255,255,255,0.14);transform:translateY(-1px)}
 .row{display:flex;gap:8px}.row>*{flex:1}
 .switch{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:13px;cursor:pointer}
-.switch i{width:36px;height:20px;border-radius:999px;background:var(--border);position:relative;transition:background .2s;flex:none}
+.switch i{width:36px;height:20px;border-radius:999px;background:var(--surface3);position:relative;transition:background .2s;flex:none}
 .switch i::after{content:"";position:absolute;top:3px;left:3px;width:14px;height:14px;border-radius:50%;
   background:var(--muted);transition:transform .2s,background .2s}
 .switch.on i{background:var(--accent)}.switch.on i::after{transform:translateX(16px);background:#fff}
 .note{color:var(--muted);font-size:12px}
-.banner{margin:12px 16px 0;padding:12px 14px;border-radius:12px;background:var(--surface2);font-size:13px}
+.banner{margin:12px 16px 0;padding:12px 14px;border-radius:14px;background:var(--surface2);font-size:13px;border:1px solid var(--border)}
 .cmd{display:flex;align-items:center;gap:8px;margin-top:8px;padding:6px 6px 6px 12px;border-radius:8px;background:var(--bg)}
 .cmd code{flex:1;word-break:break-all;font:12px/1.5 ui-monospace,"DejaVu Sans Mono",monospace;user-select:text;-webkit-user-select:text}
 .cmd button{padding:6px 14px;border-radius:999px;background:var(--accent);color:#fff;font-weight:600;font-size:12px}
-.sheet{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;transform:translateY(100%);
-  transition:transform .25s ease;z-index:5}
+.sheet{position:fixed;inset:0;background:linear-gradient(180deg,#0c1529 0%,#070d1a 100%);display:flex;flex-direction:column;transform:translateY(100%);
+  transition:transform .28s cubic-bezier(.16,1,.3,1);z-index:5}
 .sheet.open{transform:none}
-.ucard{background:var(--surface);border-radius:16px;padding:14px 16px;margin-bottom:10px}
-.uhead{display:flex;align-items:center;gap:10px;margin-bottom:8px}
-.uhead b{font-size:15px}.uhead small{color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.lim{padding:6px 0;font-size:13px}
-.lim-top{display:flex;align-items:baseline;gap:8px;margin-bottom:5px}
-.lim-top span:first-child{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.track{height:10px;border-radius:5px;background:var(--border);overflow:hidden}
-.fill{height:100%;width:0;border-radius:5px;transition:width .6s cubic-bezier(.2,.8,.2,1)}
-.pct{font-weight:700}
-.reset{color:var(--muted);font-size:12px}
-.scrim{position:fixed;inset:0;background:#000a;display:none;align-items:center;justify-content:center;z-index:9}
+.ubody{flex:1;overflow:auto;padding:16px 18px 24px}
+.ucard{background:linear-gradient(145deg,#13223b 0%,#0e192c 100%);border-radius:20px;padding:16px 18px;margin-bottom:14px;
+  border:1px solid var(--border);box-shadow:0 8px 24px rgba(0,0,0,0.35);transition:all .18s ease}
+.ucard:hover{box-shadow:0 12px 30px rgba(0,0,0,0.45);transform:translateY(-1px);border-color:var(--border-hover)}
+.ucard.active{border-left:3px solid var(--good)}
+.uhead{display:flex;align-items:center;gap:12px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid rgba(255,255,255,0.06)}
+.uhead-avatar{width:38px;height:38px;border-radius:50%;display:grid;place-items:center;font-weight:800;font-size:15px;
+  background:linear-gradient(135deg,#3b82f6,#1d4ed8);color:#fff;box-shadow:0 3px 10px rgba(37,99,235,0.35);flex:none}
+.ucard.active .uhead-avatar{background:linear-gradient(135deg,#10b981,#059669);box-shadow:0 3px 10px rgba(16,185,129,0.35)}
+.uinfo{flex:1;min-width:0}
+.uinfo b{font-size:16px;color:var(--ink);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.uinfo small{color:var(--muted);font-size:12px;display:flex;align-items:center;gap:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lim{padding:8px 0;font-size:13px}
+.lim-top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:7px}
+.lim-label{display:inline-flex;align-items:center;gap:6px;font-weight:600;color:var(--ink)}
+.lim-label svg{width:15px;height:15px;fill:var(--link);opacity:.9}
+.lim-right{display:inline-flex;align-items:center;gap:8px}
+.reset-pill{font-size:11px;color:var(--muted);background:rgba(255,255,255,0.05);padding:2px 8px;border-radius:999px;border:1px solid rgba(255,255,255,0.06)}
+.pct-badge{display:inline-flex;align-items:center;gap:4px;font-size:12px;font-weight:800;padding:3px 9px;border-radius:999px}
+.track{height:10px;border-radius:999px;background:rgba(0,0,0,0.35);overflow:hidden;box-shadow:inset 0 1px 3px rgba(0,0,0,0.4);border:1px solid rgba(255,255,255,0.04)}
+.fill{height:100%;width:0;border-radius:999px;transition:width .7s cubic-bezier(.16,1,.3,1)}
+.unote{margin-top:12px;padding:9px 13px;border-radius:12px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.06);color:var(--muted);font-size:12px;display:flex;align-items:flex-start;gap:8px}
+.unote.warn{background:rgba(249,115,22,0.1);border-color:rgba(249,115,22,0.25);color:#fdba74}
+.scrim{position:fixed;inset:0;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;z-index:9}
 .scrim.open{display:flex}
-.dialog{width:min(340px,90vw);background:var(--surface);border-radius:24px;padding:22px;box-shadow:0 14px 44px #000b}
+.dialog{width:min(350px,90vw);background:linear-gradient(145deg,#152541,#0e1a2f);border-radius:24px;padding:24px;box-shadow:0 20px 50px rgba(0,0,0,0.6);border:1px solid var(--border)}
 .dialog h2{font-size:18px;margin-bottom:8px}
-.dialog p{color:var(--muted);font-size:14px;margin-bottom:12px;white-space:pre-line}
-.dialog input{width:100%;padding:12px;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--ink);
+.dialog p{color:var(--muted);font-size:14px;margin-bottom:14px;white-space:pre-line}
+.dialog input{width:100%;padding:12px 14px;border-radius:10px;border:1px solid var(--border);background:var(--bg);color:var(--ink);
   font:inherit;outline:none;user-select:text;-webkit-user-select:text}
-.dialog input:focus{border-color:var(--link)}
-.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
-.actions button{padding:10px 16px;border-radius:999px;font-weight:600;color:var(--link)}
+.dialog input:focus{border-color:var(--link);box-shadow:0 0 0 2px rgba(96,165,250,0.2)}
+.actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+.actions button{padding:10px 18px;border-radius:999px;font-weight:600;color:var(--link);transition:background .15s}
 .actions button:hover{background:var(--surface2)}
 .actions .danger{color:var(--warn)}
-.pick{display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:10px 12px;margin-bottom:6px;
-  border-radius:12px;background:var(--surface2);transition:background .15s}
-.pick:hover{background:var(--border)}
+.pick{display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:11px 13px;margin-bottom:8px;
+  border-radius:14px;background:var(--surface2);border:1px solid var(--border);transition:all .15s}
+.pick:hover{background:var(--surface3);border-color:var(--border-hover)}
 .pick small{flex:1;min-width:0;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tag.warn{background:#3a2a17;color:#ffd166}
+.tag.warn{background:#3a2a17;color:#ffd166;border-color:rgba(255,209,102,0.3)}
 .snack{position:fixed;left:50%;bottom:16px;transform:translate(-50%,calc(100% + 24px));width:max-content;max-width:90%;
-  background:var(--ink);color:var(--bg);padding:12px 16px;border-radius:8px;box-shadow:0 6px 20px #0009;
-  transition:transform .25s,visibility .25s;visibility:hidden;z-index:10;font-size:13px}
+  background:var(--ink);color:var(--bg);padding:12px 18px;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,0.5);
+  font-weight:600;transition:transform .25s,visibility .25s;visibility:hidden;z-index:10;font-size:13px}
 .snack.show{transform:translate(-50%,0);visibility:visible}
 body.mini .bar{padding:10px 12px}
 body.mini main{padding:8px 10px}
 body.mini footer{padding:8px 10px 12px}
-.mrow{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:12px;cursor:pointer;transition:background .15s}
-.mrow:hover{background:var(--surface2)}.mrow.active{background:var(--surface)}
+.mrow{display:flex;align-items:center;gap:10px;padding:9px 11px;margin-bottom:4px;border-radius:12px;cursor:pointer;transition:all .15s}
+.mrow:hover{background:var(--surface2)}.mrow.active{background:linear-gradient(135deg,#13223b,#0e192c);border:1px solid var(--border)}
 .dot{width:10px;height:10px;border-radius:50%;border:2px solid var(--muted);flex:none}
-.mrow.active .dot{background:var(--good);border-color:var(--good)}
+.mrow.active .dot{background:var(--good);border-color:var(--good);box-shadow:0 0 6px var(--good)}
 .mrow b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.mrow .meter{flex:none;max-width:62%}
+.mrow .meter{flex:none;max-width:65%;margin-top:0}
 .mini-actions{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
-.mini-actions .btn{padding:8px 4px;font-size:12px;flex-direction:column;gap:2px;border-radius:12px}
-::-webkit-scrollbar{width:8px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+.mini-actions .btn{padding:8px 4px;font-size:12px;flex-direction:column;gap:3px;border-radius:12px}
+::-webkit-scrollbar{width:8px}::-webkit-scrollbar-thumb{background:var(--surface3);border-radius:4px}
 </style></head>
 <body class="__MODE__">
 <div id="root"><div class="empty">Đang tải…</div></div>
@@ -1317,6 +1344,9 @@ const I = {
   open: "M19 19H5V5h7V3H5a2 2 0 00-2 2v14a2 2 0 002 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z",
   download: "M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z",
   info: "M11 7h2v2h-2zm0 4h2v6h-2zm1-9C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8z",
+  time: "M12 2a10 10 0 100 20 10 10 0 000-20zm.5 10.8l3.6 2.1-.8 1.3-4.3-2.6V6h1.5v6.8z",
+  cal: "M19 4h-1V2h-2v2H8V2H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V9h14v11z",
+  model: "M12 2a2 2 0 012 2c0 .74-.4 1.39-1 1.73V7h1a7 7 0 017 7h1a1 1 0 011 1v3a1 1 0 01-1 1h-1v1a2 2 0 01-2 2H5a2 2 0 01-2-2v-1H2a1 1 0 01-1-1v-3a1 1 0 011-1h1a7 7 0 017-7h1V5.73c-.6-.34-1-.99-1-1.73a2 2 0 012-2M7.5 13A2.5 2.5 0 005 15.5 2.5 2.5 0 007.5 18 2.5 2.5 0 0010 15.5 2.5 2.5 0 007.5 13m9 0a2.5 2.5 0 00-2.5 2.5 2.5 2.5 0 002.5 2.5 2.5 2.5 0 002.5-2.5 2.5 2.5 0 00-2.5-2.5z",
 };
 const NOTE = "Không cần khởi động lại session — Claude nhận token mới ở lần kiểm tra đăng nhập kế tiếp. Gõ /status trong Claude để chắc chắn.";
 const svg = k => `<svg viewBox="0 0 24 24"><path d="${I[k]}"/></svg>`;
@@ -1362,12 +1392,38 @@ async function refresh() {
   if (!S.profiles.some(p => p.name === sel)) sel = S.current || (S.profiles[0] || {}).name || null;
   render();
 }
+function getGradient(pct) {
+  if (pct < 50) return "linear-gradient(90deg, #10b981 0%, #34d399 100%)";
+  if (pct < 80) return "linear-gradient(90deg, #eab308 0%, #facc15 100%)";
+  if (pct < 95) return "linear-gradient(90deg, #f97316 0%, #fb923c 100%)";
+  return "linear-gradient(90deg, #ef4444 0%, #f87171 100%)";
+}
+function getBadgeBg(pct) {
+  if (pct < 50) return "rgba(16, 185, 129, 0.14)";
+  if (pct < 80) return "rgba(234, 179, 8, 0.14)";
+  if (pct < 95) return "rgba(249, 115, 22, 0.16)";
+  return "rgba(239, 68, 68, 0.2)";
+}
+function getIconForLabel(label) {
+  if (label.includes("5 giờ")) return svg("time");
+  if (label.includes("7 ngày") && !label.includes("Opus") && !label.includes("Sonnet")) return svg("cal");
+  return svg("model");
+}
+function getStatusEmoji(pct) {
+  if (pct < 50) return "🟢";
+  if (pct < 80) return "🟡";
+  if (pct < 95) return "🟠";
+  return "🔴";
+}
 const shortLabel = l => ({"5 giờ": "5h", "7 ngày": "7d"}[l] || l.replace(/^7 ngày /, ""));
-const level = l => `<span style="color:${l.text}" title="${esc(l.label)}${l.reset ? " · reset " + esc(l.reset) : ""}">` +
-  `${esc(shortLabel(l.label))} <b>${Math.floor(l.pct)}%</b>${l.warn ? " ⚠" : ""}</span>`;
-const meter = (n, max = 9) => {  // colour-coded per window; the % and ⚠ carry the meaning too
+const level = l => {
+  const ico = l.icon || getStatusEmoji(l.pct);
+  return `<span class="mini-badge" style="color:${l.text}; background:${getBadgeBg(l.pct)}; border:1px solid ${l.color}35;" title="${esc(l.label)}${l.reset ? " · reset " + esc(l.reset) : ""}">` +
+    `${ico} ${esc(shortLabel(l.label))} <b>${Math.floor(l.pct)}%</b>${l.warn ? " ⚠" : ""}</span>`;
+};
+const meter = (n, max = 9) => {
   const u = usage[n]; if (!u) return "";
-  return `<span class="meter">${u.limits.length ? u.limits.slice(0, max).map(level).join(" · ") : esc(u.summary)}</span>`;
+  return `<span class="meter">${u.limits.length ? u.limits.slice(0, max).map(level).join("") : `<span class="mini-badge" style="background:rgba(255,255,255,0.06);color:var(--muted)">${esc(u.summary)}</span>`}</span>`;
 };
 const chip = () => `<span class="chip ${S.current ? "on" : ""}">${S.current ? "● " + esc(S.current) : "○ chưa chọn"}</span>`;
 function render() { if (S) (MODE === "mini" ? renderMini : renderMain)(); }
@@ -1376,7 +1432,7 @@ function renderMain() {
   const list = S.profiles.length ? S.profiles.map(p => `
     <div class="card ${p.active ? "active" : ""} ${p.name === sel ? "sel" : ""}" data-name="${esc(p.name)}">
       <div class="avatar">${esc(p.name[0].toUpperCase())}</div>
-      <div class="who"><b>${esc(p.name)}</b><small>${esc(p.email || "—")}</small>${meter(p.name)}</div>
+      <div class="who"><b>${esc(p.name)}</b><small>👤 ${esc(p.email || "—")}</small>${meter(p.name)}</div>
       ${p.active ? '<span class="tag">ACTIVE</span>' : ""}
     </div>`).join("")
     : `<div class="empty">Chưa có profile nào.<br>Đăng nhập Claude CLI rồi bấm “Lưu hiện tại”,<br>hoặc “Nhập…” từ thư mục khác.</div>`;
@@ -1496,15 +1552,36 @@ async function loadUsage(force = false) {
 }
 function renderUsage(rows) {
   const b = document.querySelector("#sheet .ubody"); if (!b) return;
-  b.innerHTML = rows.length ? rows.map(r => `<div class="ucard">
-      <div class="uhead"><b>${esc(r.name)}</b><small>${esc(r.email)}</small>${r.active ? '<span class="tag">● ACTIVE</span>' : ""}</div>
-      ${r.limits.map(l => `<div class="lim">
-        <div class="lim-top"><span>${esc(l.label)}</span>
-          ${l.reset ? `<span class="reset" title="Thời điểm quota được làm mới">↻ ${esc(l.reset)}</span>` : ""}
-          <span class="pct" style="color:${l.text}">${Math.floor(l.pct)}%${l.warn ? " ⚠" : ""}</span></div>
-        <div class="track"><div class="fill" style="background:${l.color}" data-w="${l.pct > 0 ? Math.max(3, Math.min(l.pct, 100)) : 0}"></div></div>
-      </div>`).join("")}
-      ${r.note ? `<p class="note"><i>${esc(r.note)}</i></p>` : ""}</div>`).join("")
+  b.innerHTML = rows.length ? rows.map(r => `
+    <div class="ucard ${r.active ? 'active' : ''}">
+      <div class="uhead">
+        <div class="uhead-avatar">${esc(r.name[0].toUpperCase())}</div>
+        <div class="uinfo">
+          <b>${esc(r.name)}</b>
+          <small>👤 ${esc(r.email || "—")}</small>
+        </div>
+        ${r.active ? '<span class="tag">● ACTIVE</span>' : ""}
+      </div>
+      ${r.limits.map(l => `
+        <div class="lim">
+          <div class="lim-top">
+            <span class="lim-label">${getIconForLabel(l.label)} ${esc(l.label)}</span>
+            <div class="lim-right">
+              ${l.reset ? `<span class="reset-pill" title="Thời điểm quota được làm mới">⏳ reset ${esc(l.reset)}</span>` : ""}
+              <span class="pct-badge" style="background:${getBadgeBg(l.pct)}; color:${l.text}; border:1px solid ${l.color}40;">
+                ${l.icon || getStatusEmoji(l.pct)} ${Math.floor(l.pct)}%${l.warn ? " ⚠️" : ""}
+              </span>
+            </div>
+          </div>
+          <div class="track">
+            <div class="fill" style="background:${getGradient(l.pct)}" data-w="${l.pct > 0 ? Math.max(3, Math.min(l.pct, 100)) : 0}"></div>
+          </div>
+        </div>`).join("")}
+      ${r.note ? `<div class="unote ${r.note.includes('429') ? 'warn' : ''}">
+        <span>${r.note.includes('429') ? '⏳' : r.note.includes('hết hạn') ? '⚠️' : 'ℹ️'}</span>
+        <span>${esc(r.note)}</span>
+      </div>` : ""}
+    </div>`).join("")
     : '<div class="empty">Chưa có profile nào.</div>';
   requestAnimationFrame(() => requestAnimationFrame(() => b.querySelectorAll(".fill").forEach(f => f.style.width = f.dataset.w + "%")));
 }

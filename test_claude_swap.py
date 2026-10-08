@@ -157,8 +157,8 @@ def test_usage_report_uses_live_token_for_active_and_flags_expired(tmp_path):
     assert seen == ["tok-b-live"]
     assert "A  a@example.com\n  token đã hết hạn" in out
     assert "B (Active)  b@example.com" in out
-    assert "5 giờ         " + "█" * 8 + "░" * 12 + "  37%  reset " in out
-    assert "7 ngày        " + "█" * 2 + "░" * 18 + "  12%" in out and "Opus" not in out
+    assert "  🟢 5 giờ       " + "█" * 8 + "░" * 12 + "  37%  reset " in out
+    assert "  🟢 7 ngày      " + "█" * 2 + "░" * 18 + "  12%" in out and "Opus" not in out
 
 
 def test_parse_limits_includes_model_scoped_fable():
@@ -306,7 +306,7 @@ def test_api_profile_actions_and_errors(tmp_path):
     rows = api.usage()
     a = next(r for r in rows if r["name"] == "A")
     assert a["limits"][0] == {"label": "5 giờ", "pct": 85.0, "reset": "", "color": "#ec835a",
-                              "text": "#ffab70", "warn": True}
+                              "text": "#ffab70", "icon": "🟠", "warn": True}
     assert [cs.status_text_color(p) for p in (10, 60, 90, 100)] == ["#7ee787", "#ffd166", "#ffab70", "#ff8a80"]
     assert a["summary"] == "5h 85% ⚠"
     assert api.delete("B") == {"ok": True} and "error" in api.delete("B")
