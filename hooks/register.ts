@@ -1,8 +1,28 @@
 import type { EngineInterface, Register } from 'claude-code'
 
-const SUBCOMMANDS = new Set(['list', 'current', 'usage', 'folder', 'save', 'swap', 'delete', 'new', 'auto'])
+const SUBCOMMANDS = new Set([
+  'list',
+  'current',
+  'usage',
+  'folder',
+  'save',
+  'swap',
+  'delete',
+  'new',
+  'auto',
+  'bind',
+  'unbind',
+  'notify',
+  'tag',
+  'untag',
+  'tags',
+  'export',
+  'import-enc',
+  'history',
+  'stats',
+])
 const USAGE =
-  'Dùng: /profile | /profile <tên> | /profile usage | /profile auto [on|off|threshold <%>|order <ds>|check] | /profile folder | /profile import <thư mục> [--force] | /profile new <tên> [--force] | /profile save <tên> [--force] | /profile delete <tên>'
+  'Dùng: /profile | /profile <tên> | /profile usage | /profile auto [on|off|threshold <%>|order <ds>|pool <tag>|check] | /profile bind [tên] | /profile unbind | /profile tag <tên> <tag> | /profile tags | /profile history [n] | /profile stats | /profile notify [on|off] | /profile export <file> --password <pw> | /profile import-enc <file> --password <pw>'
 
 // "" → list, "work" → swap work, "save work" → save work, "import ~/a b" → import "~/a b", "auto ..." → auto ...
 function toArgv(args: string): string[] | undefined {
@@ -13,7 +33,6 @@ function toArgv(args: string): string[] | undefined {
     if (!path) return undefined
     return ['import', path, ...(words.includes('--force') ? ['--force'] : [])]
   }
-  if (words[0] === 'auto') return words
   if (SUBCOMMANDS.has(words[0])) return words
   if (words.length === 1) return ['swap', words[0]]
   return undefined
@@ -43,8 +62,24 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'profile',
-      description: 'Đổi tài khoản Claude ngay trong session: /profile [tên | usage | auto | new <tên> | save <tên> | delete <tên>]',
+      description: 'Đổi tài khoản Claude ngay trong session: /profile [tên | usage | auto | bind | tag | history | stats]',
     })
+
+    try {
+      const targetDir = e.cwd || process.cwd()
+      const boundRan = await runSwap($, ['bind', 'get', targetDir])
+      const boundOut = boundRan.stdout.trim()
+      const match = boundOut.match(/đang liên kết với profile:\s*([^\s(]+)/)
+      if (match && match[1]) {
+        const boundProfile = match[1]
+        const curRan = await runSwap($, ['current'])
+        const curProfile = curRan.stdout.trim()
+        if (boundProfile !== curProfile) {
+          await runSwap($, ['swap', boundProfile, '--project'])
+        }
+      }
+    } catch {}
+
     void refreshStatus($).catch(() => undefined)
 
     return next(e)

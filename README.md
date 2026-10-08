@@ -30,7 +30,12 @@ Plugin chạy trực tiếp trên môi trường **Node.js** sẵn có của Cla
 | 💾 **Tạo / chuyển / xoá** | Mỗi profile là một tài khoản Claude đã đăng nhập. Hỗ trợ `/profile new <tên>` và `/profile save <tên>`. |
 | 📋 **Danh sách trực quan** | Icon 🟢 Active / ⚪ Inactive, email 👤, hiển thị nhanh quota và màu sắc nổi bật trên terminal. |
 | 📊 **Usage từng profile** | Quota 5 giờ, 7 ngày và theo model (Opus, Sonnet…). Thanh màu theo mức: 🟢 < 50% · 🟡 < 80% · 🟠 < 95% · 🔴 ≥ 95%, kèm ⚠ từ 80%. |
-| 📥 **Nhập profile** | Từ file `*.json` lưu trước đó hoặc thư mục cấu hình Claude khác (vd `~/.claude-work`). |
+| 🤖 **Tự động chuyển profile** | Tự động switch khi vượt ngưỡng token hoặc bị rate limit (ưu tiên account còn nhiều token, reset sớm hơn hoặc theo danh sách cài đặt). |
+| 📁 **Gắn profile theo dự án** | Tự động kích hoạt đúng profile khi mở thư mục dự án tương ứng thông qua file `.claude-profile`. |
+| 🔔 **Thông báo hệ thống** | Nhận thông báo desktop banner (macOS / Linux / Windows) ngay khi hệ thống tự động đổi profile. |
+| 🏷️ **Tag & Pool chuyển đổi** | Gắn nhãn phân loại (vd: `work`, `hobby`) và giới hạn phạm vi tự động switch theo nhóm cụ thể. |
+| 🔐 **Sao lưu mã hóa AES-256** | Xuất/nhập toàn bộ profile được mã hóa an toàn với mật khẩu cá nhân (PBKDF2 + AES-256-GCM). |
+| 📜 **Lịch sử & Thống kê** | Ghi nhận nhật ký chuyển đổi và thống kê tổng số lần swap (thủ công, tự động, theo dự án). |
 | ⚡ **Không tốn token** | Lệnh `/profile` là plugin hook xử lý tức thì ở máy local, **không tốn lượt hỏi model**. |
 | 🌐 **Đa nền tảng** | Chạy tốt trên Linux, macOS (hỗ trợ Keychain) và Windows. |
 
@@ -79,11 +84,22 @@ claude --plugin-dir /path/to/claude-swap
 | `/profile auto threshold <%>` | Thiết lập ngưỡng % mức dùng để tự động switch (mặc định: `95%`) |
 | `/profile auto order <ds>` | Cài đặt thứ tự ưu tiên các account sẽ switch (vd: `work,personal`) |
 | `/profile auto order default` | Chuyển về quy tắc tự động (nhiều token hơn + reset sớm hơn) |
+| `/profile auto pool <tag\|all>` | Giới hạn auto-switch chỉ chọn các profile có tag chỉ định |
 | `/profile auto check` | Kiểm tra quota và switch ngay nếu vượt ngưỡng |
+| `/profile bind [tên]` | Liên kết thư mục hiện tại với profile (lưu vào `.claude-profile`) |
+| `/profile unbind` | Gỡ liên kết profile khỏi thư mục hiện tại |
+| `/profile notify [on\|off]` | Bật / tắt thông báo desktop banner khi tự động switch |
+| `/profile tag <tên> <tag>` | Gắn tag cho profile (vd: `/profile tag work company`) |
+| `/profile untag <tên> <tag>` | Gỡ tag khỏi profile |
+| `/profile tags` | Xem danh sách tất cả các tag và profile thuộc về |
+| `/profile history [n]` | Xem nhật ký các lần chuyển profile gần nhất (mặc định 10 lần) |
+| `/profile stats` | Thống kê số lần đổi profile thủ công, tự động và theo dự án |
+| `/profile export <file> --password <pw>` | Xuất bản sao lưu profiles mã hóa AES-256-GCM |
+| `/profile import-enc <file> --password <pw> [--force]` | Khôi phục profiles từ file mã hóa |
 | `/profile new <tên> [--force]` | Tạo profile mới từ tài khoản hiện tại |
 | `/profile save <tên> [--force]` | Lưu thông tin đăng nhập hiện tại vào profile |
 | `/profile delete <tên>` | Xoá profile |
-| `/profile import <thư mục> [--force]` | Nhập các profile từ thư mục khác |
+| `/profile import <thư mục> [--force]` | Nhập các profile thô từ thư mục khác |
 | `/profile folder` | Mở thư mục chứa file cấu hình profile |
 
 Ví dụ hiển thị khi gõ `/profile`:
@@ -100,6 +116,8 @@ Bạn cũng có thể chạy CLI trực tiếp ngoài terminal nếu muốn:
 node swap.js list
 node swap.js swap work
 node swap.js usage
+node swap.js history
+node swap.js stats
 ```
 
 ## 🧠 Cách hoạt động

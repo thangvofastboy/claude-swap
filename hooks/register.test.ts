@@ -93,3 +93,67 @@ test('prompt.submit automatically checks and switches profile if limit exceeded'
   expect(calls).toEqual([['auto', 'check'], ['current']])
   expect(statuses).toEqual(['● personal'])
 })
+
+test('session.start automatically switches to bound profile if different from current', async ($, on) => {
+  const calls: string[][] = []
+  const statuses: (string | undefined)[] = []
+  on('process.run', async (_$, { argv }) => {
+    calls.push(argv.slice(2))
+    if (argv[2] === 'bind' && argv[3] === 'get') {
+      return ok("Thư mục '/proj' đang liên kết với profile: work (local)\n")
+    }
+    if (argv[2] === 'current') {
+      return ok('personal\n')
+    }
+    if (argv[2] === 'swap') {
+      return ok("Đã chuyển sang 'work'.\n")
+    }
+    return ok('')
+  })
+  on('ui.status', (_$, { text }) => {
+    statuses.push(text)
+    return { value: undefined }
+  })
+  on('command.register', () => ({ value: undefined }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+
+  await $.session.start({ cwd: '/proj' })
+
+  expect(calls).toEqual([
+    ['bind', 'get', '/proj'],
+    ['current'],
+    ['swap', 'work', '--project'],
+    ['current'],
+  ])
+})
+
+test('/profile dispatches advanced subcommands: bind, tag, notify, history, stats, export', async ($, on) => {
+  const calls: string[][] = []
+  on('process.run', async (_$, { argv }) => {
+    calls.push(argv.slice(2))
+    return ok('OK')
+  })
+  on('ui.status', () => ({ value: undefined }))
+
+  await $.command.run({ command: 'profile', args: 'bind work' })
+  await $.command.run({ command: 'profile', args: 'tag work company' })
+  await $.command.run({ command: 'profile', args: 'notify on' })
+  await $.command.run({ command: 'profile', args: 'history 5' })
+  await $.command.run({ command: 'profile', args: 'stats' })
+  await $.command.run({ command: 'profile', args: 'export backup.enc --password 123' })
+
+  expect(calls).toEqual([
+    ['bind', 'work'],
+    ['current'],
+    ['tag', 'work', 'company'],
+    ['current'],
+    ['notify', 'on'],
+    ['current'],
+    ['history', '5'],
+    ['current'],
+    ['stats'],
+    ['current'],
+    ['export', 'backup.enc', '--password', '123'],
+    ['current'],
+  ])
+})
