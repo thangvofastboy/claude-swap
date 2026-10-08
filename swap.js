@@ -111,6 +111,11 @@ export function checkName(name) {
   return name
 }
 
+// Node's JSON.parse errors quote the input ("sk-ant-…" is not valid JSON): never echo them for secret files
+function safeError(err) {
+  return err instanceof SyntaxError ? 'JSON không hợp lệ' : err.message
+}
+
 export function profilePath(home, name) {
   return path.join(profilesDir(home), `${checkName(name)}.json`)
 }
@@ -168,11 +173,8 @@ export function spawnClaudeSync(bin, args, options = {}) {
 
 export function backup(filePath) {
   if (fs.existsSync(filePath)) {
-    const bak = `${filePath}.bak`
-    fs.copyFileSync(filePath, bak)
-    try {
-      fs.chmodSync(bak, 0o600)
-    } catch {}
+    // atomicWrite creates it 0600 from the start; copy+chmod left a window where it had the source's mode
+    atomicWrite(`${filePath}.bak`, fs.readFileSync(filePath, 'utf-8'))
   }
 }
 
@@ -281,7 +283,7 @@ export function loadClaudeJson(home) {
   try {
     return JSON.parse(fs.readFileSync(p, 'utf-8'))
   } catch (err) {
-    throw new SwapError(`${p} bị hỏng JSON: ${err.message}`)
+    throw new SwapError(`${p} bị hỏng JSON: ${safeError(err)}`)
   }
 }
 
@@ -406,7 +408,7 @@ export function swapProfile(home, name, options = {}) {
       throw new Error('thiếu trường claude_json')
     }
   } catch (err) {
-    throw new SwapError(`File profile '${resolved}' bị hỏng: ${err.message}`)
+    throw new SwapError(`File profile '${resolved}' bị hỏng: ${safeError(err)}`)
   }
 
   const cj = claudeJson(home)
@@ -1230,7 +1232,7 @@ export function diagnoseProfiles(home) {
       }
     } catch (err) {
       report.status = 'error'
-      report.issues.push(`File cấu hình bị hỏng hoặc không đúng chuẩn: ${err.message}`)
+      report.issues.push(`File cấu hình bị hỏng hoặc không đúng chuẩn: ${safeError(err)}`)
       results.push(report)
       continue
     }
@@ -1893,7 +1895,7 @@ export function importEncryptedProfiles(home, sourcePath, password, overwrite = 
       throw new Error('Định dạng không khớp')
     }
   } catch (err) {
-    throw new SwapError(`File sao lưu không hợp lệ: ${err.message}`)
+    throw new SwapError(`File sao lưu không hợp lệ: ${safeError(err)}`)
   }
 
   let payload

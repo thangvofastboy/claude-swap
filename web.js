@@ -36,6 +36,7 @@ import {
   isMaskingEnabled,
   setMasking,
   maskEmail,
+  maskUrl,
   quotaSnapshot,
   spawnDetached,
   loadSwapHistory,
@@ -46,6 +47,7 @@ import {
 const HOST = '127.0.0.1'
 const LOCAL_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]'])
 const MAX_BODY = 1024 * 1024
+const WEBHOOK_TYPES = ['telegram', 'discord', 'slack', 'generic']
 const SWAP_JS = fileURLToPath(new URL('./swap.js', import.meta.url))
 // subcommands the "All features" tab may run; interactive ones (run, pick, web) stay CLI-only
 const WEB_CLI = new Set([
@@ -170,7 +172,8 @@ export function getDashboardData(home = os.homedir()) {
     profiles: profileCards,
     auto,
     balance: loadBalanceConfig(home),
-    webhook: loadWebhookConfig(home),
+    // webhook URLs carry their own secret (bot token, signing path): the browser only sees the origin
+    webhook: Object.fromEntries(Object.entries(loadWebhookConfig(home)).map(([k, v]) => [k, v ? maskUrl(v) : null])),
     budget: loadBudgetConfig(home),
     masking,
     language: loadLanguage(home),
@@ -455,7 +458,7 @@ export function renderDashboardHtml() {
 
     <!-- TAB: ALL FEATURES -->
     <section id="tab-features" class="tab-content">
-      <p class="feat-intro">Mọi lệnh <span class="cmd-code">/profile</span> đều có ở đây. Điền vào ô rồi bấm chạy, kết quả hiện ở khung bên dưới. Auto-switch, cân bằng tải, webhook và che email chỉnh ở tab ⚙️ Cấu hình. Mật khẩu sao lưu được chuyển qua stdin và không lưu ở đâu cả.</p>
+      <p class="feat-intro">Mọi lệnh <span class="cmd-code">/profile</span> đều có ở đây. Điền vào ô rồi bấm chạy, kết quả hiện ở khung bên dưới. Auto-switch, cân bằng tải, che email và đặt URL webhook chỉnh ở tab ⚙️ Cấu hình (URL webhook là bí mật nên không đi qua dòng lệnh). Mật khẩu sao lưu được chuyển qua stdin và không lưu ở đâu cả.</p>
       <pre class="feat-out" id="cli-output">Kết quả lệnh sẽ hiện ở đây.</pre>
       <div class="feat-group">
         <h3>👀 Xem nhanh</h3>
@@ -543,7 +546,7 @@ export function renderDashboardHtml() {
         <!-- Webhook -->
         <div class="settings-section">
           <div class="section-title">🔔 Webhook Cảnh Báo Từ Xa (Telegram / Discord / Slack)</div>
-          <div class="section-desc">Gửi thông báo tức thì đến điện thoại khi chạm ngưỡng hạn ngạch hoặc đổi tài khoản.</div>
+          <div class="section-desc">Gửi thông báo tức thì đến điện thoại khi chạm ngưỡng hạn ngạch hoặc đổi tài khoản. URL webhook chứa khóa bí mật nên dashboard không bao giờ hiện lại nó: ô trống nghĩa là giữ nguyên, muốn gỡ thì dùng "Gỡ webhook" ở tab 🧰 Tính năng.</div>
           <div class="form-grid">
             <div class="form-group">
               <label class="form-label">Telegram Webhook URL</label>
@@ -556,6 +559,10 @@ export function renderDashboardHtml() {
             <div class="form-group">
               <label class="form-label">Slack Webhook URL</label>
               <input type="text" id="cfg-webhook-slack" class="form-control" placeholder="https://hooks.slack.com/services/...">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Generic Webhook URL</label>
+              <input type="text" id="cfg-webhook-generic" class="form-control" placeholder="https://example.com/hook">
             </div>
           </div>
           <div style="margin-top: 14px;">
@@ -1085,7 +1092,6 @@ export function renderDashboardHtml() {
       ]],
       ['🔔 Thông báo & ngân sách', [
         ['Thông báo desktop khi đổi profile', ['notify'], [['choice', 'Trạng thái', ['on', 'off']]]],
-        ['Đặt webhook', ['webhook', 'set'], [['choice', 'Loại', ['telegram', 'discord', 'slack', 'generic']], ['text', 'URL']]],
         ['Gỡ webhook', ['webhook', 'unset'], [['choice', 'Loại', ['telegram', 'discord', 'slack', 'generic']]]],
         ['Gửi thử webhook', ['webhook', 'test'], []],
         ['Đặt ngân sách tháng', ['budget', 'set'], [['profile', 'Profile'], ['number', 'Số tiền']]],
@@ -1108,11 +1114,57 @@ export function renderDashboardHtml() {
         ['Mở thư mục profile', ['folder'], []],
       ]],
     ];
-    const QUICK = [['📋 Danh sách', ['list']], ['🟢 Đang dùng', ['current']], ['📊 Usage', ['usage']], ['🔄 Usage (làm mới)', ['usage', '--refresh']],
-      ['📈 Dự báo', ['forecast']], ['⏱️ Cooldown', ['cooldown']], ['🩺 Doctor', ['doctor']], ['🧹 Cleanup (chỉ quét)', ['cleanup']],
-      ['📊 Thống kê', ['stats']], ['🔤 Aliases', ['aliases']], ['🏷️ Tags', ['tags']], ['🚫 Đang nghỉ', ['disabled']],
-      ['🌿 Nhánh Git', ['branch-bindings']], ['🧠 Model', ['affinities']], ['💰 Ngân sách', ['budget']], ['🔔 Webhook', ['webhook']],
-      ['⚖️ Cân bằng tải', ['balance']], ['🤖 Auto', ['auto']], ['🛡️ Che email', ['mask']], ['💻 Statusline', ['statusline']], ['ℹ️ Phiên bản', ['version']]];
+    // one plain-language (and slightly cheeky) line per card, keyed by its title
+    const QUIPS = {
+      'Chuyển profile': 'Đổi tài khoản trong một nốt nhạc. Claude còn không biết mình vừa đổi chủ.',
+      'Tạo profile từ tài khoản đang đăng nhập': 'Chụp ảnh tài khoản đang dùng rồi cất vào ngăn kéo. Lần sau lôi ra là xài.',
+      'Lưu tài khoản hiện tại vào profile': 'Cập nhật profile bằng tài khoản đang đăng nhập, rất hợp sau khi vừa /login lại.',
+      'Xóa profile': 'Chia tay dứt khoát: không thùng rác, không tái hợp.',
+      'Đặt alias': 'Đặt biệt danh cho profile. Gõ "w" nhanh hơn "work-company-production-2" nhiều.',
+      'Xóa alias': 'Biệt danh hết thời thì xóa. Profile gốc vẫn bình an vô sự.',
+      'Gắn tag': 'Dán nhãn để phân nhóm, rồi cho auto-switch hay cân bằng tải chỉ chạy trong nhóm đó.',
+      'Gỡ tag': 'Bóc nhãn ra. Profile không giận đâu.',
+      'Cho nghỉ auto-switch': 'Cho profile nghỉ phép: auto-switch sẽ không gọi nó dậy, nhưng bạn vẫn đổi tay được.',
+      'Cho đi làm lại': 'Hết phép rồi, quay lại vòng xoay auto-switch thôi.',
+      'Nhập profile từ thư mục khác': 'Dọn nhà cho profile từ thư mục khác (hoặc máy cũ) về đây.',
+      'Thứ tự ưu tiên auto-switch': 'Xếp hàng xem ai lên thay khi profile hiện tại hết quota. Có trước có sau.',
+      'Kiểm tra quota và đổi nếu cần': 'Khỏi chờ tới prompt kế tiếp: bấm là kiểm tra, chạm ngưỡng là đổi ngay.',
+      'Cân bằng tải: sang profile kế tiếp': 'Chuyền bóng cho đồng đội theo thuật toán cân bằng. Không ai phải gánh team.',
+      'Mượn tạm profile': 'Mượn có hẹn giờ trả. Hết giờ tự trả, khỏi sợ mang tiếng quên.',
+      'Trả profile đang mượn': 'Trả sớm cho giữ uy tín, quay về profile gốc ngay.',
+      'Trạng thái mượn tạm': 'Đang mượn của ai, còn bao nhiêu phút nữa phải trả?',
+      'Dọn profile hỏng': 'Đổ rác: xóa thật những profile hỏng. Không hoàn tác được, nên chạy "Cleanup (chỉ quét)" trước.',
+      'Gắn profile cho thư mục': 'Mở dự án này là tự dùng đúng tài khoản. Hết cảnh side project ăn quota công ty.',
+      'Gỡ gắn thư mục': 'Thư mục này được tự do, dùng tài khoản nào cũng được.',
+      'Thư mục đang gắn profile nào?': 'Hỏi nhanh: thư mục này đang theo phe nào?',
+      'Gắn profile theo nhánh Git': 'feat/* dùng tài khoản dev, work-* dùng tài khoản công ty. Checkout nhánh là đổi luôn.',
+      'Gỡ gắn nhánh Git': 'Cởi trói cho nhánh. Bỏ trống ô mẫu là gỡ hết.',
+      'Gán profile cho model': 'Opus ăn quota như tằm ăn dâu? Cho nó một tài khoản riêng.',
+      'Chuyển theo model': 'Sắp dùng model nào thì nhảy sang tài khoản đã gán cho model đó.',
+      'Gỡ gán model': 'Model này về lại làm việc chung với mọi người.',
+      'Thông báo desktop khi đổi profile': 'Bật để màn hình báo mỗi lần đổi tài khoản. Mặc định tắt cho đỡ phiền.',
+      'Gỡ webhook': 'Tắt tiếng một kênh báo, yên tĩnh trở lại.',
+      'Gửi thử webhook': 'Bắn một tin thử cho chắc đường dây thông suốt.',
+      'Đặt ngân sách tháng': 'Đặt trần chi tiêu cho từng profile. Ví tiền sẽ cảm ơn bạn.',
+      'Xóa ngân sách': 'Gỡ trần chi tiêu. Sống thoáng nhưng tự chịu trách nhiệm.',
+      'Xuất bản sao lưu mã hóa': 'Nhét hết profile vào két AES-256. Quên mật khẩu là chịu, không ai mở hộ được.',
+      'Khôi phục từ file mã hóa': 'Mở két, mang profile về. Đúng mật khẩu mới mở được.',
+      'Chọn nơi đồng bộ': 'Chọn chỗ đặt két (thư mục Dropbox, ổ mạng…) để máy khác cùng lấy được.',
+      'Trạng thái đồng bộ': 'Lần đẩy, lần kéo gần nhất là khi nào.',
+      'Đẩy bản đồng bộ': 'Gửi két lên chỗ đồng bộ. Mật khẩu đi qua stdin và không được lưu lại.',
+      'Kéo bản đồng bộ': 'Mang két về máy này rồi mở ra.',
+      'Xuất cấu hình không chứa token': 'Chia sẻ cấu hình cho đồng đội mà không kèm chìa khóa nhà.',
+      'Snippet cho shell prompt': 'Cho prompt biết bạn đang ở tài khoản nào: Starship, zsh, bash, tmux, PowerShell đều có.',
+      'Script Tab completion': 'Gõ nửa chữ, bấm Tab, phần còn lại để shell lo.',
+      'Lịch sử chuyển profile': 'Nhật ký đổi tài khoản: ai, khi nào, vì sao.',
+      'Cập nhật plugin': 'Kéo bản mới nhất về. Nhớ khởi động lại Claude Code để bản mới có hiệu lực.',
+      'Mở thư mục profile': 'Mở thư mục chứa profile. Ngó thì được, đừng sửa tay.',
+    };
+    const QUICK = [['📋 Danh sách', ['list'], 'Điểm danh cả đội, kèm thanh quota.'], ['🟢 Đang dùng', ['current'], 'Mình đang là ai?'], ['📊 Usage', ['usage'], 'Quota 5h, 7d và từng model (lấy từ cache).'], ['🔄 Usage (làm mới)', ['usage', '--refresh'], 'Hỏi lại server số mới nhất. Đừng spam, server cũng biết mệt.'],
+      ['📈 Dự báo', ['forecast'], 'Bói xem bao giờ cạn quota, dựa trên tốc độ tiêu thụ thật.'], ['⏱️ Cooldown', ['cooldown'], 'Đếm ngược tới lúc quota 5h hồi sức.'], ['🩺 Doctor', ['doctor'], 'Khám tổng quát: token, file cấu hình, kết nối.'], ['🧹 Cleanup (chỉ quét)', ['cleanup'], 'Tìm profile trùng hoặc hỏng. Chỉ nhìn, không xóa.'],
+      ['📊 Thống kê', ['stats'], 'Đổi tay bao nhiêu lần, tự động bao nhiêu lần.'], ['🔤 Aliases', ['aliases'], 'Danh bạ biệt danh.'], ['🏷️ Tags', ['tags'], 'Ai thuộc nhóm nào.'], ['🚫 Đang nghỉ', ['disabled'], 'Danh sách profile đang nghỉ phép.'],
+      ['🌿 Nhánh Git', ['branch-bindings'], 'Nhánh nào đi với tài khoản nào.'], ['🧠 Model', ['affinities'], 'Model nào đi với tài khoản nào.'], ['💰 Ngân sách', ['budget'], 'Trần chi tiêu hiện tại.'], ['🔔 Webhook', ['webhook'], 'Kênh báo nào đang bật.'],
+      ['⚖️ Cân bằng tải', ['balance'], 'Đang chia việc theo kiểu nào.'], ['🤖 Auto', ['auto'], 'Auto-switch đang cấu hình ra sao.'], ['🛡️ Che email', ['mask'], 'Email đang được che hay đang lộ mặt.'], ['💻 Statusline', ['statusline'], 'Chuỗi trạng thái gọn để nhét vào prompt.'], ['ℹ️ Phiên bản', ['version'], 'Đang chạy bản nào.']];
     let featuresBuilt = false;
     let featureProfiles = '';
 
@@ -1128,11 +1180,11 @@ export function renderDashboardHtml() {
     function renderFeatures() {
       if (!featuresBuilt) {
         featuresBuilt = true;
-        document.getElementById('quick-row').innerHTML = QUICK.map((q, i) => '<button class="btn btn-secondary btn-sm" onclick="runQuick(' + i + ')">' + esc(q[0]) + '</button>').join('');
+        document.getElementById('quick-row').innerHTML = QUICK.map((q, i) => '<button class="btn btn-secondary btn-sm" title="' + esc(q[2]) + '" onclick="runQuick(' + i + ')">' + esc(q[0]) + '</button>').join('');
         document.getElementById('features-container').innerHTML = FEATURES.map((g, gi) =>
           '<div class="feat-group"><h3>' + esc(g[0]) + '</h3><div class="feat-grid">' + g[1].map((c, ci) => {
             const id = 'f' + gi + '-' + ci;
-            return '<div class="feat-card"><div class="ft">' + esc(c[0]) + '</div><div class="fc">/profile ' + esc(c[1].join(' ')) + '</div>' +
+            return '<div class="feat-card"><div class="ft">' + esc(c[0]) + '</div><div class="fd">' + esc(QUIPS[c[0]] || '') + '</div><div class="fc">/profile ' + esc(c[1].join(' ')) + '</div>' +
               c[2].map((f, fi) => fieldHtml(id + '-' + fi, f)).join('') +
               '<div><button class="btn btn-sm' + (c[3] ? ' btn-danger' : '') + '" onclick="runFeature(' + gi + ',' + ci + ')">▶ Chạy</button></div></div>';
           }).join('') + '</div></div>'
@@ -1191,7 +1243,12 @@ export function renderDashboardHtml() {
       c[2].forEach((f, fi) => { if (f[0] === 'password') document.getElementById('f' + gi + '-' + ci + '-' + fi).value = ''; });
     }
 
+    let settingsKey = '';
     function renderSettings() {
+      // the 5s poll must not wipe what the user is typing: redraw only when the stored settings change
+      const key = JSON.stringify([appData.auto, appData.balance, appData.webhook, appData.masking, (appData.profiles || []).map(p => p.name)]);
+      if (key === settingsKey) return;
+      settingsKey = key;
       document.getElementById('cfg-auto-enabled').checked = Boolean(appData.auto.enabled);
       document.getElementById('cfg-auto-threshold').value = appData.auto.threshold || 95;
       document.getElementById('cfg-auto-safeguard').value = appData.auto.safeguardThreshold || 85;
@@ -1208,9 +1265,11 @@ export function renderDashboardHtml() {
       document.getElementById('cfg-balance-mode').value = appData.balance.mode || 'least-used';
       document.getElementById('cfg-balance-pool').value = appData.balance.pool || 'all';
 
-      document.getElementById('cfg-webhook-telegram').value = appData.webhook.telegram || '';
-      document.getElementById('cfg-webhook-discord').value = appData.webhook.discord || '';
-      document.getElementById('cfg-webhook-slack').value = appData.webhook.slack || '';
+      ['telegram', 'discord', 'slack', 'generic'].forEach(k => {
+        const el = document.getElementById('cfg-webhook-' + k);
+        el.value = '';
+        el.placeholder = appData.webhook[k] ? '✅ Đã đặt (' + appData.webhook[k] + '), để trống = giữ nguyên' : 'Chưa đặt';
+      });
 
       document.getElementById('cfg-masking').checked = Boolean(appData.masking);
     }
@@ -1281,9 +1340,10 @@ export function renderDashboardHtml() {
           pool: document.getElementById('cfg-balance-pool').value || 'all'
         },
         webhook: {
-          telegram: document.getElementById('cfg-webhook-telegram').value.trim() || null,
-          discord: document.getElementById('cfg-webhook-discord').value.trim() || null,
-          slack: document.getElementById('cfg-webhook-slack').value.trim() || null
+          telegram: document.getElementById('cfg-webhook-telegram').value.trim(),
+          discord: document.getElementById('cfg-webhook-discord').value.trim(),
+          slack: document.getElementById('cfg-webhook-slack').value.trim(),
+          generic: document.getElementById('cfg-webhook-generic').value.trim()
         },
         masking: document.getElementById('cfg-masking').checked
       };
@@ -1297,6 +1357,7 @@ export function renderDashboardHtml() {
         const data = await res.json();
         if (data.ok) {
           showToast('✓ Đã lưu toàn bộ cấu hình thành công!');
+          settingsKey = ''; // redraw: typed webhook URLs leave the screen, the masked placeholder replaces them
           loadData();
         } else {
           showToast('Lỗi lưu cấu hình: ' + data.error);
@@ -1492,7 +1553,11 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
                 })
               }
               if (body.balance) saveBalanceConfig(home, body.balance)
-              if (body.webhook) saveWebhookConfig(home, body.webhook)
+              if (body.webhook) {
+                // only typed-in URLs are sent; an empty field keeps the stored (never displayed) value
+                const urls = Object.entries(body.webhook).filter(([k, v]) => WEBHOOK_TYPES.includes(k) && typeof v === 'string' && /^https?:\/\//.test(v))
+                if (urls.length) saveWebhookConfig(home, Object.fromEntries(urls))
+              }
               if (typeof body.masking === 'boolean') setMasking(home, body.masking)
               res.writeHead(200, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ ok: true }))

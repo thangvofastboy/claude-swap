@@ -145,107 +145,107 @@ This part is a bit more serious, because typos in commands aren't fun.
 
 | Command | Description |
 | --- | --- |
-| `/profile` | Show the full help |
-| `/profile list [--json]` | List profiles with 🟢/⚪, email 👤, tags 🏷️ and usage bars |
-| `/profile current [--json]` | Which profile is active |
-| `/profile <name\|alias>` | Switch to profile or alias `<name>` |
-| `/profile pick` | Pick a profile with `↑` `↓` |
-| `/profile alias <name> <p>` | Set an alias (e.g. `/profile alias w work`) |
-| `/profile unalias <name>` | Remove an alias |
-| `/profile aliases` | List aliases |
-| `/profile new <name> [--force]` | Create a profile from the logged-in account |
-| `/profile save <name> [--force]`| Save the current login into a profile |
-| `/profile delete <name>` | Delete a profile and clean up what belongs to it |
-| `/profile folder` | Open the profiles folder |
-| `/profile lang [vi\|en]` | Show or change the language |
-| `/profile version` | Show the plugin version |
+| `/profile` | Show the full help. Lost? Type this |
+| `/profile list [--json]` | Roll call: 🟢/⚪, email 👤, tags 🏷️ and quota bars |
+| `/profile current [--json]` | The philosophical question "who am I?", answered with the active profile name |
+| `/profile <name\|alias>` | Switch to profile or alias `<name>`. Claude won't even notice it changed owners |
+| `/profile pick` | Pick with `↑` `↓`, for people who can't remember their own profile names |
+| `/profile alias <name> <p>` | Give a profile a nickname (e.g. `/profile alias w work`). One letter beats a whole sentence |
+| `/profile unalias <name>` | Drop a nickname. The profile itself is perfectly fine |
+| `/profile aliases` | Your nickname phone book |
+| `/profile new <name> [--force]` | Snapshot the logged-in account and file it as a new profile |
+| `/profile save <name> [--force]`| Write the logged-in account into a profile, handy right after a fresh `/login` |
+| `/profile delete <name>` | A clean break: delete the profile and everything that belongs to it. There is no recycle bin |
+| `/profile folder` | Open the profiles folder. Look, don't touch |
+| `/profile lang [vi\|en]` | Show or change the language. Bilingual, no interpreter needed |
+| `/profile version` | Which version am I running? |
 
 ### 🚀 Web, load balancing & utilities
 
 | Command | Description |
 | --- | --- |
-| `/profile web [--port <p>]` | Open the Web Dashboard |
-| `/profile web stop` | Stop the Web Dashboard |
+| `/profile web [--port <p>]` | Open the Web Dashboard, for days when typing feels like too much |
+| `/profile web stop` | Put the dashboard to bed |
 | `/profile balance [on\|off]` | Turn load balancing on / off. When on, auto-switch picks the next profile by `mode` (instead of `auto order`) |
-| `/profile balance mode <least-used\|round-robin>` | Most quota left first, or take turns |
+| `/profile balance mode <least-used\|round-robin>` | Pick a strategy: most quota left goes first, or everyone takes turns |
 | `/profile balance pool <tag\|all>` | Only balance within a tagged group |
-| `/profile balance next` | Switch to the next profile by the algorithm right now |
-| `/profile webhook [status]` | Show webhook status |
-| `/profile webhook set <telegram\|discord\|slack\|generic> <url>` | Set a webhook |
-| `/profile webhook unset <type>` | Remove a webhook |
-| `/profile webhook test` | Send a test message |
-| `/profile budget [status]` | Show monthly budgets |
-| `/profile budget set <name> <amount>` | Set a budget for a profile |
-| `/profile budget unset <name>` | Remove a budget |
-| `/profile mask [on\|off]` | Mask emails in list and dashboard |
-| `/profile share [file.json]` | Export config without tokens |
-| `/profile completion [bash\|zsh\|fish]` | Generate a Tab-completion script |
+| `/profile balance next` | Pass the ball to the next profile right now |
+| `/profile webhook [status]` | Which alert channels are on |
+| `/profile webhook set <telegram\|discord\|slack\|generic> <url>` | Wire up alerts to Telegram, Discord, Slack or any URL |
+| `/profile webhook unset <type>` | Mute one alert channel |
+| `/profile webhook test` | Fire a test message to make sure the line works |
+| `/profile budget [status]` | Show monthly spending caps |
+| `/profile budget set <name> <amount>` | Set a spending cap for a profile. Your wallet says thanks |
+| `/profile budget unset <name>` | Remove a spending cap. Live free, own the consequences |
+| `/profile mask [on\|off]` | Mask emails while you screen-share (`us***@domain.com`) |
+| `/profile share [file.json]` | Export config for teammates, without the house keys (tokens) |
+| `/profile completion [bash\|zsh\|fish]` | Type half a word, hit Tab, let the shell do the rest |
 
 ### ⚡ Parallel sessions & tokens
 
 | Command | Description |
 | --- | --- |
-| `/profile run <name> [-- cmd]` | Run an isolated Claude Code session for a profile |
-| `/profile add-token <tok> [name]` | Create a profile from a setup-token or API key |
-| `echo $TOK \| node swap.js add-token - [name]` | Pass the token via `stdin` so it stays out of shell history |
-| `/profile upgrade` | Update the plugin to the latest version |
-| `/profile disable <name>` | Bench a profile from auto-switch |
-| `/profile enable <name>` | Put it back on the team |
-| `/profile disabled [--json]` | See who's benched |
+| `/profile run <name> [-- cmd]` | Start another Claude Code on a different account, side by side, no toe-stepping |
+| `/profile add-token <tok> [name]` | Create a profile straight from a setup-token or API key, no browser needed |
+| `echo $TOK \| node swap.js add-token - [name]` | Feed the token via `stdin` so it stays out of your shell history |
+| `/profile upgrade` | Pull the latest version (remember to restart Claude Code) |
+| `/profile disable <name>` | Send a profile on leave: auto-switch won't wake it up |
+| `/profile enable <name>` | Leave is over, back into the auto-switch rotation |
+| `/profile disabled [--json]` | Who's on leave |
 
 ### 🤖 Auto-switch & quota
 
 | Command | Description |
 | --- | --- |
-| `/profile usage` | 5h, 7d and per-model quota (Opus, Sonnet, Haiku…) |
-| `/profile auto` | Auto-switch status |
-| `/profile auto on` / `off` | Turn auto-switch on / off |
+| `/profile usage` | 5h, 7d and per-model quota (Opus, Sonnet, Haiku…), down to the percent |
+| `/profile auto` | How auto-switch is set up right now |
+| `/profile auto on` / `off` | Switch accounts automatically past the threshold. Turn it on and keep coding |
 | `/profile auto threshold <%>` | Usage % that triggers a switch (default `95%`) |
-| `/profile auto order <list>` | Priority order (e.g. `work,personal,backup`) |
+| `/profile auto order <list>` | Who steps in first (e.g. `work,personal,backup`) |
 | `/profile auto pool <tag\|all>`| Only switch within a tagged group |
-| `/profile auto safeguard [on\|off\|<%>]` | 7-day quota safeguard (default `85%`) |
-| `/profile auto return [on\|off]` | Return to the primary profile once it recovers |
-| `/profile auto primary <name>` | Set the primary profile |
-| `/profile auto check` | Check quota now and switch if needed |
-| `/profile forecast` | Burn rate and when you'll run out |
-| `/profile cooldown` | Countdown to the 5h quota reset |
-| `/profile doctor` | Check OAuth tokens, config files and connectivity |
-| `/profile cleanup [--force]` | Find duplicate email/UUID profiles and broken tokens |
+| `/profile auto safeguard [on\|off\|<%>]` | Don't jump into an account that has nearly burned its weekly quota (default `85%`) |
+| `/profile auto return [on\|off]` | Go back to the primary profile once it has recovered |
+| `/profile auto primary <name>` | Choose "home" for auto-return |
+| `/profile auto check` | Don't wait for the next prompt: check now, switch if over the line |
+| `/profile forecast` | Predict when you'll run dry, based on your real burn rate |
+| `/profile cooldown` | Countdown to the 5h quota coming back |
+| `/profile doctor` | Full checkup: OAuth tokens, config files, connectivity |
+| `/profile cleanup [--force]` | Find duplicate email/UUID profiles and broken tokens. Add `--force` to actually clean up |
 
 ### 📁 Projects, Git branches, tags & models
 
 | Command | Description |
 | --- | --- |
-| `/profile bind [name]` | Bind a profile to the current folder (`.claude-profile` file) |
-| `/profile unbind` | Unbind the folder |
-| `/profile bind-branch <pat> [name]` | Bind a profile to a Git branch pattern (e.g. `feat/*`, `hotfix-*`) |
-| `/profile unbind-branch [pat]`| Unbind a branch pattern |
-| `/profile branch-bindings` | List branch bindings |
-| `/profile tag <name> <tag>` | Tag a profile (e.g. `/profile tag work corp`) |
-| `/profile untag <name> <tag>` | Remove a tag |
-| `/profile tags` | Which profiles carry which tags |
-| `/profile affinity <model> <name>` | Assign a profile to a model (e.g. `opus`, `sonnet`) |
-| `/profile affinity apply <model>` | Switch to the profile assigned to that model |
-| `/profile unaffinity <model>` | Remove a model assignment |
-| `/profile affinities` | List model assignments |
+| `/profile bind [name]` | Bind a profile to this folder (`.claude-profile` file). Open the project, get the right account |
+| `/profile unbind` | Unbind: this folder is free again |
+| `/profile bind-branch <pat> [name]` | Bind a profile to a Git branch pattern (e.g. `feat/*`, `hotfix-*`). Checkout is a switch |
+| `/profile unbind-branch [pat]`| Untie a branch |
+| `/profile branch-bindings` | Which branch goes with which account |
+| `/profile tag <name> <tag>` | Tag profiles into groups (e.g. `/profile tag work corp`) |
+| `/profile untag <name> <tag>` | Peel the tag off. The profile won't hold a grudge |
+| `/profile tags` | Who belongs to which group |
+| `/profile affinity <model> <name>` | Give a model its own account (e.g. `opus`, which eats quota for breakfast) |
+| `/profile affinity apply <model>` | Jump to the account assigned to that model |
+| `/profile unaffinity <model>` | This model goes back to sharing with everyone |
+| `/profile affinities` | Which model goes with which account |
 
 ### ⏳ Borrowing, history & backups
 
 | Command | Description |
 | --- | --- |
-| `/profile temp <name> [time]` | Borrow a profile for a while (e.g. `30m`, `1h`) |
-| `/profile untemp` | Give it back now and return to your original profile |
-| `/profile statusline` | Short status string for shell prompts (e.g. `[Claude: 🟢 work (32%)]`) |
-| `/profile prompt [shell]` | Config snippet for `starship`, `zsh`, `bash`, `tmux`, `powershell` |
-| `/profile notify [on\|off]` | Desktop notification on profile switch (off by default) |
-| `/profile history [n]` | Recent switches (default 10) |
-| `/profile stats` | Counts of manual, automatic and per-project switches |
-| `/profile sync setup <path>` | Choose where encrypted sync backups live |
-| `/profile sync push` | Push an encrypted backup |
-| `/profile sync pull` | Pull and decrypt it |
-| `/profile export <file>` | Export an AES-256-GCM encrypted backup |
-| `/profile import-enc <file>` | Restore from an encrypted file |
-| `/profile import <folder> [--force]` | Import raw profiles from another folder |
+| `/profile temp <name> [time]` | Borrow a profile with a due time (e.g. `30m`, `1h`). It hands itself back |
+| `/profile untemp` | Return it early, keep your reputation, back to your own profile |
+| `/profile statusline` | Compact status string for prompts (e.g. `[Claude: 🟢 work (32%)]`) |
+| `/profile prompt [shell]` | Snippets so `starship`, `zsh`, `bash`, `tmux`, `powershell` know who you are |
+| `/profile notify [on\|off]` | Desktop notification on switch (off by default, for your sanity) |
+| `/profile history [n]` | Switch diary: who, when, why (10 lines by default) |
+| `/profile stats` | How many manual, automatic and per-project switches |
+| `/profile sync setup <path>` | Choose where the sync safe lives (a Dropbox folder, a network drive…) |
+| `/profile sync push` | Send the encrypted safe to the sync spot |
+| `/profile sync pull` | Bring the safe to this machine and open it |
+| `/profile export <file>` | Lock every profile in an AES-256-GCM safe. Forget the password and it's gone |
+| `/profile import-enc <file>` | Open the safe and bring the profiles home. Right password only |
+| `/profile import <folder> [--force]` | Move raw profiles in from another folder |
 
 > 🔑 **Backup passwords are never written to disk.** Provide one with `--password-stdin` (safest: `echo "$PW" | node swap.js export f.enc --password-stdin`), the `CLAUDE_SWAP_PASSWORD` environment variable, or `--password <pw>` (which leaves it in your shell history, so use it only if you trust that history).
 
@@ -309,6 +309,12 @@ Each profile is a file `~/.config/claude-cli-profiles/<name>.json` (mode `0600`,
 - Every file is written to a temp file and then renamed (atomic write), with a `.bak` copy. A power cut mid-write won't cost you a profile.
 - If you set `CLAUDE_CONFIG_DIR`, the plugin works with that folder instead of `~/.claude`.
 - On macOS the token goes into the Keychain via `stdin`, never on the command line, so `ps` can't see it.
+
+**Keeping secrets secret:**
+- Tokens, credentials and backup passwords never appear on a child process's command line, never get printed, and never reach the dashboard.
+- Webhook URLs (which carry a Telegram bot token or a Discord/Slack secret) are stored in full, but the dashboard only shows the domain. Type a new URL to change one; leave the field empty to keep it.
+- A corrupt profile reports "invalid JSON" instead of quoting the file in the error, so no token fragment ends up in your terminal.
+- `.bak` copies are created `0600` from the very first byte, with no window for anyone else to peek.
 
 ---
 

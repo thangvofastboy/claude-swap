@@ -1318,6 +1318,21 @@ describe('swap.js core functionality', () => {
       headers: { 'Content-Type': 'application/json', ...auth },
       body: JSON.stringify({ action: 'save_config', auto: { enabled: true, threshold: 90, safeguard: 70, primary: 'web_a', pool: 'all' } }),
     })
+    // webhook URLs are secrets: stored in full, shown masked, and an empty field keeps the stored one
+    const hook = 'https://api.telegram.org/bot123:SECRET/sendMessage?chat_id=1'
+    const saveHook = webhook => fetch(`${dash.url}/api/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...auth },
+      body: JSON.stringify({ action: 'save_config', webhook }),
+    })
+    await saveHook({ telegram: hook, evil: 'https://x.test', slack: 'javascript:alert(1)' })
+    await saveHook({ telegram: '', discord: '' })
+    assert.equal(loadWebhookConfig(tmpHome).telegram, hook)
+    assert.equal(loadWebhookConfig(tmpHome).slack, null)
+    assert.ok(!('evil' in JSON.parse(fs.readFileSync(path.join(tmpHome, '.config', 'claude-cli-profiles', '.webhook.json'), 'utf-8'))))
+    const shown = await (await fetch(`${dash.url}/api/data`, { headers: auth })).text()
+    assert.ok(!shown.includes('SECRET'))
+
     const saved = JSON.parse(fs.readFileSync(cfgFile, 'utf-8'))
     assert.deepEqual(saved.order, ['web_a'])
     assert.equal(saved.safeguardThreshold, 70)
@@ -1326,6 +1341,13 @@ describe('swap.js core functionality', () => {
     } finally {
       dash.close() // a failed assertion must not leave the server holding the test process open
     }
+  })
+
+  test('a corrupt profile error never echoes the file content', () => {
+    login(tmpHome, 'leak', 'tok-leak')
+    saveProfile(tmpHome, 'leak')
+    fs.writeFileSync(profilePath(tmpHome, 'leak'), '{"credentials": sk-ant-SECRET-TOKEN}')
+    assert.throws(() => swapProfile(tmpHome, 'leak'), err => !err.message.includes('sk-ant') && /JSON/.test(err.message))
   })
 
   test('cross-platform helpers and quota labels', async () => {

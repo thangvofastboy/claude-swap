@@ -45,6 +45,8 @@ State is kept in dotfiles beside the profiles: `.current`, `.aliases.json`, `.au
 ### Secrets
 
 - Keychain writes go through `security -i` on stdin (`keychainWriteCommand`, hex `-X`), never `-w <token>` on argv where `ps` shows it.
+- Webhook URLs are secrets (bot token / signing path). `/api/data` sends only `maskUrl()` versions, and `save_config` only accepts typed-in `http(s)` URLs for the four known types (an empty field keeps the stored value). Never pass one on a child's argv: the web "Features" tab deliberately has no `webhook set`.
+- Errors about secret-bearing files go through `safeError()`. Node's `JSON.parse` messages quote the input (`"sk-ant-…" is not valid JSON`).
 - Backup/sync passwords are never written to disk (`saveSyncConfig` strips `password`). Read them only with `readPasswordArg` (`--password-stdin` > `--password` > `CLAUDE_SWAP_PASSWORD`).
 
 ### Cross-platform
