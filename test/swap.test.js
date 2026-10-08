@@ -32,6 +32,28 @@ import {
   loadTempProfile,
   formatHelpReport,
   addProfileTag,
+  setAlias,
+  loadAliases,
+  removeAlias,
+  resolveProfileOrAlias,
+  bindBranch,
+  unbindBranch,
+  getBoundBranchProfile,
+  matchBranchPattern,
+  recordUsageSnapshot,
+  calculateForecast,
+  formatForecastReport,
+  interactivePickProfile,
+  syncPush,
+  syncPull,
+  saveSyncConfig,
+  loadSyncConfig,
+  setModelAffinity,
+  loadModelAffinity,
+  removeModelAffinity,
+  analyzeProfilesForCleanup,
+  formatCleanupReport,
+  cleanupProfiles,
 } from '../swap.js'
 
 function login(home, account, token, extra = {}) {
@@ -600,6 +622,151 @@ describe('swap.js core functionality', () => {
 
     assert.equal(await runCli([], tmpHome), 0)
     assert.equal(await runCli(['help'], tmpHome), 0)
+  })
+
+  test('profile aliases: set, resolve, swap and CLI', async () => {
+    login(tmpHome, 'w', 'tok-w')
+    saveProfile(tmpHome, 'work-full-name')
+
+    setAlias(tmpHome, 'w', 'work-full-name')
+    const aliases = loadAliases(tmpHome)
+    assert.equal(aliases.w, 'work-full-name')
+    assert.equal(resolveProfileOrAlias(tmpHome, 'w'), 'work-full-name')
+    assert.equal(resolveProfileOrAlias(tmpHome, 'nonexistent'), 'nonexistent')
+
+    // Swap using alias
+    login(tmpHome, 'other', 'tok-other')
+    saveProfile(tmpHome, 'other')
+    swapProfile(tmpHome, 'w')
+    assert.equal(currentProfile(tmpHome), 'work-full-name')
+
+    // CLI commands
+    assert.equal(await runCli(['alias', 'wf', 'work-full-name'], tmpHome), 0)
+    assert.equal(await runCli(['aliases'], tmpHome), 0)
+    assert.equal(await runCli(['unalias', 'wf'], tmpHome), 0)
+  })
+
+  test('git branch binding: pattern matching and CLI', async () => {
+    login(tmpHome, 'w', 'tok-w')
+    saveProfile(tmpHome, 'work')
+    login(tmpHome, 'p', 'tok-p')
+    saveProfile(tmpHome, 'personal')
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-branch-'))
+    assert.equal(matchBranchPattern('feat/*', 'feat/login'), true)
+    assert.equal(matchBranchPattern('feat/*', 'main'), false)
+    assert.equal(matchBranchPattern('work-*', 'work-123'), true)
+
+    bindBranch(tmpHome, projectDir, 'feat/*', 'work')
+    bindBranch(tmpHome, projectDir, 'main', 'personal')
+
+    const boundFeat = getBoundBranchProfile(tmpHome, projectDir, 'feat/login')
+    assert.equal(boundFeat.profile, 'work')
+    const boundMain = getBoundBranchProfile(tmpHome, projectDir, 'main')
+    assert.equal(boundMain.profile, 'personal')
+
+    // CLI
+    assert.equal(await runCli(['bind-branch', 'exp/*', 'work', projectDir], tmpHome), 0)
+    assert.equal(await runCli(['branch-bindings'], tmpHome), 0)
+    assert.equal(await runCli(['unbind-branch', 'exp/*', projectDir], tmpHome), 0)
+  })
+
+  test('quota burn-rate and exhaustion forecast', async () => {
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'worker')
+
+    // Empty forecast
+    const emptyF = calculateForecast(tmpHome, 'worker')
+    assert.equal(emptyF.hasData, false)
+
+    // Record two snapshots 1 hour apart with 10% increase
+    recordUsageSnapshot(tmpHome, 'worker', 50)
+    const histFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-history.json')
+    const data = JSON.parse(fs.readFileSync(histFile, 'utf-8'))
+    data.worker[0].timestamp = Date.now() - 3600000
+    data.worker.push({ timestamp: Date.now(), util5h: 60, util7d: null })
+    fs.writeFileSync(histFile, JSON.stringify(data))
+
+    const f = calculateForecast(tmpHome, 'worker', 90)
+    assert.equal(f.hasData, true)
+    assert.equal(f.currentUtil, 60)
+    assert.equal(f.trend, 'increasing')
+    assert.equal(f.burnRatePerHour, 10)
+    assert.equal(f.minutesUntilThreshold, 180)
+
+    const report = formatForecastReport(tmpHome)
+    assert.match(report, /worker/)
+    assert.equal(await runCli(['forecast'], tmpHome), 0)
+  })
+
+  test('interactive picker fallback in non-interactive mode', async () => {
+    login(tmpHome, 'p1', 'tok-1')
+    saveProfile(tmpHome, 'p1')
+    login(tmpHome, 'p2', 'tok-2')
+    saveProfile(tmpHome, 'p2')
+
+    const res = await interactivePickProfile(tmpHome, { nonInteractive: true })
+    assert.ok(res.selected === 'p1' || res.selected === 'p2')
+    assert.equal(await runCli(['pick'], tmpHome), 0)
+  })
+
+  test('encrypted remote sync: setup, push and pull', async () => {
+    login(tmpHome, 'sync1', 'tok-s1')
+    saveProfile(tmpHome, 'sync_profile')
+
+    const syncFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'claude-sync-')), 'sync.enc')
+    const pushRes = syncPush(tmpHome, syncFile, 'mypassword')
+    assert.equal(pushRes.count, 1)
+    assert.ok(fs.existsSync(syncFile))
+
+    // Pull into new home
+    const newHome = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-synchome-'))
+    const pullRes = syncPull(newHome, syncFile, 'mypassword')
+    assert.ok(pullRes.added.includes('sync_profile'))
+
+    // CLI sync commands
+    assert.equal(await runCli(['sync', 'setup', syncFile, '--password', 'mypassword'], tmpHome), 0)
+    assert.equal(await runCli(['sync', 'status'], tmpHome), 0)
+    assert.equal(await runCli(['sync', 'push', '--password', 'mypassword'], tmpHome), 0)
+  })
+
+  test('model affinity: assign, list, apply and CLI', async () => {
+    login(tmpHome, 'op', 'tok-op')
+    saveProfile(tmpHome, 'opus_heavy')
+    login(tmpHome, 'so', 'tok-so')
+    saveProfile(tmpHome, 'sonnet_fast')
+
+    setModelAffinity(tmpHome, 'opus', 'opus_heavy')
+    setModelAffinity(tmpHome, 'sonnet', 'sonnet_fast')
+
+    const map = loadModelAffinity(tmpHome)
+    assert.equal(map.opus, 'opus_heavy')
+    assert.equal(map.sonnet, 'sonnet_fast')
+
+    // CLI commands
+    assert.equal(await runCli(['affinity', 'opus', 'opus_heavy'], tmpHome), 0)
+    assert.equal(await runCli(['affinities'], tmpHome), 0)
+    assert.equal(await runCli(['affinity', 'apply', 'opus'], tmpHome), 0)
+    assert.equal(currentProfile(tmpHome), 'opus_heavy')
+    assert.equal(await runCli(['unaffinity', 'opus'], tmpHome), 0)
+  })
+
+  test('profile cleanup and duplicate detection', async () => {
+    login(tmpHome, 'same_user', 'tok-1')
+    saveProfile(tmpHome, 'p_work')
+    login(tmpHome, 'same_user', 'tok-2')
+    saveProfile(tmpHome, 'p_work_clone')
+
+    const analysis = analyzeProfilesForCleanup(tmpHome)
+    assert.equal(analysis.duplicates.length, 1)
+    assert.equal(analysis.duplicates[0].profiles.length, 2)
+
+    const report = formatCleanupReport(analysis)
+    assert.match(report, /p_work/)
+    assert.match(report, /p_work_clone/)
+
+    assert.equal(await runCli(['cleanup'], tmpHome), 0)
+    assert.equal(await runCli(['cleanup', '--force'], tmpHome), 0)
   })
 })
 

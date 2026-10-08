@@ -28,7 +28,14 @@ Plugin chạy trực tiếp trên môi trường **Node.js** sẵn có của Cla
 | | |
 | --- | --- |
 | 💾 **Tạo / chuyển / xoá** | Mỗi profile là một tài khoản Claude đã đăng nhập. Hỗ trợ `/profile new <tên>` và `/profile save <tên>`. |
-| 📋 **Danh sách trực quan** | Icon 🟢 Active / ⚪ Inactive, email 👤, hiển thị nhanh quota và màu sắc nổi bật trên terminal. |
+| 🔤 **Profile Aliases** | Đặt tên viết tắt ngắn gọn (vd: `w` ➔ `work-company`) để chuyển cực nhanh bằng `/profile w`. |
+| 🎛️ **Interactive Picker** | Gõ `/profile pick` để chọn profile bằng phím mũi tên `↑` `↓` và `Enter` trực quan ngay trong terminal. |
+| 🌿 **Git Branch Binding** | Tự động chuyển profile theo mẫu nhánh Git (vd `work-*` ➔ công ty, `feat/*` ➔ dev). |
+| 📈 **Quota Forecast & Burn-Rate** | Dự báo tốc độ tiêu thụ % token/giờ và thời điểm ước tính cạn hạn mức token (`/profile forecast`). |
+| 🧠 **Model-Affinity Switcher** | Gán profile chuyên dụng theo từng dòng model AI (Opus, Sonnet, Haiku) với `/profile affinity`. |
+| 🧹 **Dọn dẹp & Phát hiện trùng** | Quét và cảnh báo các profile trùng tài khoản email/UUID, token hỏng hoặc hết hạn (`/profile cleanup`). |
+| ☁️ **Đồng bộ mã hóa từ xa (Sync)** | Đẩy/kéo bản sao lưu mã hóa AES-256 an toàn đa thiết bị (`/profile sync push` / `pull`). |
+| 📋 **Danh sách trực quan** | Icon 🟢 Active / ⚪ Inactive, email 👤, nhãn 🏷️, hiển thị nhanh quota và màu sắc nổi bật trên terminal. |
 | 📊 **Usage từng profile** | Quota 5 giờ, 7 ngày và theo model (Opus, Sonnet…). Thanh màu theo mức: 🟢 < 50% · 🟡 < 80% · 🟠 < 95% · 🔴 ≥ 95%, kèm ⚠ từ 80%. |
 | 🤖 **Tự động chuyển profile** | Tự động switch khi vượt ngưỡng token hoặc bị rate limit (ưu tiên account còn nhiều token, reset sớm hơn hoặc theo danh sách cài đặt). |
 | ⏱️ **Đếm ngược Cooldown & Auto-Return** | Theo dõi đồng hồ đếm ngược reset quota 5h và tự động quay về tài khoản chính khi đã hồi phục. |
@@ -81,8 +88,26 @@ claude --plugin-dir /path/to/claude-swap
 
 | Lệnh | Mô tả |
 | --- | --- |
-| `/profile` | Liệt kê các profile kèm icon 🟢/⚪, email 👤 và thanh usage tóm tắt |
-| `/profile <tên>` | Chuyển sang profile `<tên>` |
+| `/profile` | Hiển thị hướng dẫn sử dụng tất cả các lệnh của claude-swap |
+| `/profile list` | Liệt kê các profile kèm icon 🟢/⚪, email 👤, nhãn 🏷️ và thanh usage tóm tắt |
+| `/profile <tên\|alias>` | Chuyển sang profile hoặc bí danh (alias) `<tên>` |
+| `/profile pick` | Chọn profile tương tác bằng phím mũi tên `↑` `↓` ngay trong terminal |
+| `/profile alias <tên> <profile>` | Đặt bí danh viết tắt cho profile (vd: `/profile alias w work`) |
+| `/profile unalias <tên>` | Xóa bí danh |
+| `/profile aliases` | Xem danh sách tất cả các bí danh |
+| `/profile forecast` | Dự báo tốc độ tiêu thụ token (%/giờ) và thời gian cạn hạn mức |
+| `/profile bind-branch <pat> [tên]` | Liên kết profile theo mẫu nhánh Git (vd: `feat/*`, `work-*`) |
+| `/profile unbind-branch [pat]` | Gỡ liên kết nhánh Git |
+| `/profile branch-bindings` | Xem danh sách các liên kết nhánh Git đã cài đặt |
+| `/profile affinity <model> <tên>` | Gán profile chuyên dụng cho model (Opus, Sonnet...) |
+| `/profile affinity apply <model>` | Tự chuyển sang profile đã gán cho model |
+| `/profile unaffinity <model>` | Gỡ gán model affinity |
+| `/profile affinities` | Xem danh sách các gán model affinity |
+| `/profile cleanup [--force]` | Quét phát hiện profile trùng lặp, token cũ hỏng (dùng `--force` để dọn) |
+| `/profile sync setup <path>` | Thiết lập đường dẫn file đồng bộ đa thiết bị |
+| `/profile sync push [--password <pw>]` | Đẩy bản sao lưu mã hóa lên file/kho lưu trữ đồng bộ |
+| `/profile sync pull [--password <pw>]` | Kéo và giải mã bản sao lưu từ kho lưu trữ đồng bộ |
+| `/profile sync status` | Xem trạng thái đồng bộ |
 | `/profile usage` | Xem chi tiết quota 5 giờ / 7 ngày / theo model của từng profile |
 | `/profile auto` | Xem trạng thái tự động chuyển profile khi vượt ngưỡng token |
 | `/profile auto on` / `off` | Bật / tắt tính năng tự động chuyển profile |

@@ -27,9 +27,22 @@ const SUBCOMMANDS = new Set([
   'prompt',
   'temp',
   'untemp',
+  'alias',
+  'unalias',
+  'aliases',
+  'bind-branch',
+  'unbind-branch',
+  'branch-bindings',
+  'forecast',
+  'pick',
+  'sync',
+  'affinity',
+  'unaffinity',
+  'affinities',
+  'cleanup',
 ])
 const USAGE =
-  'Dùng: /profile | /profile list | /profile <tên> | /profile usage | /profile auto | /profile cooldown | /profile doctor | /profile temp <tên> [thời_gian] | /profile bind [tên]'
+  'Dùng: /profile | /profile list | /profile <tên|alias> | /profile pick | /profile auto | /profile forecast | /profile cooldown | /profile doctor | /profile cleanup | /profile bind-branch <pat> | /profile sync'
 
 // "" → help, "list" → list, "work" → swap work, "save work" → save work, "import ~/a b" → import "~/a b", "auto ..." → auto ...
 function toArgv(args: string): string[] | undefined {

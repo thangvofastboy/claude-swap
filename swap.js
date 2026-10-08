@@ -251,7 +251,8 @@ export function saveProfile(home, name, force = false) {
 }
 
 export function swapProfile(home, name, options = {}) {
-  const src = profilePath(home, name)
+  const resolved = resolveProfileOrAlias(home, name)
+  const src = profilePath(home, resolved)
   if (!fs.existsSync(src)) {
     throw new SwapError(`Không có profile '${name}'.`)
   }
@@ -262,7 +263,7 @@ export function swapProfile(home, name, options = {}) {
       throw new Error('thiếu trường claude_json')
     }
   } catch (err) {
-    throw new SwapError(`File profile '${name}' bị hỏng: ${err.message}`)
+    throw new SwapError(`File profile '${resolved}' bị hỏng: ${err.message}`)
   }
 
   const cj = claudeJson(home)
@@ -276,7 +277,7 @@ export function swapProfile(home, name, options = {}) {
     } catch {}
     if (curId && curId === accountId(data.oauthAccount)) {
       saveProfile(home, cur, true)
-      if (cur === name) {
+      if (cur === resolved) {
         return
       }
     }
@@ -299,12 +300,12 @@ export function swapProfile(home, name, options = {}) {
   } else {
     clearCredentials(home)
   }
-  setCurrent(home, name)
+  setCurrent(home, resolved)
 
   recordSwapHistory(home, {
     timestamp: new Date().toISOString(),
     from: cur || '(none)',
-    to: name,
+    to: resolved,
     type: options.type || 'manual',
     reason: options.reason || '',
     cwd: options.cwd || process.cwd(),
@@ -1399,6 +1400,23 @@ export async function autoCheckAndSwap(home, options = {}) {
     return { swapped: false, reason: 'no_current' }
   }
 
+  // Check branch binding
+  const branchBound = getBoundBranchProfile(home, process.cwd())
+  if (branchBound && branchBound.profile !== cur && profileExists(home, branchBound.profile)) {
+    swapProfile(home, branchBound.profile, {
+      type: 'project',
+      reason: `Branch binding (${branchBound.branch})`,
+      cwd: process.cwd(),
+    })
+    sendNotification(home, 'claude-swap', `Đã chuyển sang profile '${branchBound.profile}' theo nhánh '${branchBound.branch}'.`)
+    return {
+      swapped: true,
+      from: cur,
+      to: branchBound.profile,
+      isBranchBinding: true,
+    }
+  }
+
   const email = profileEmail(home, cur)
   const cache = options.cache || loadUsageCache(home)
 
@@ -1452,6 +1470,7 @@ export async function autoCheckAndSwap(home, options = {}) {
   const raw7d = sevenDay ? Number(sevenDay[1]) : 0
   const util7d = raw7d <= 1 && raw7d > 0 ? raw7d * 100 : raw7d
   const isSafeguardTriggered = Boolean(config.safeguardThreshold && util7d >= config.safeguardThreshold)
+  recordUsageSnapshot(home, cur, util, util7d)
 
   const isRateLimited = Boolean(hit.retry_at && hit.retry_at > Date.now() / 1000)
   if (isRateLimited || util >= config.threshold || isSafeguardTriggered) {
@@ -1707,6 +1726,564 @@ export function importEncryptedProfiles(home, sourcePath, password, overwrite = 
   return result
 }
 
+// ---------------------------------------------------------------- aliases
+
+export function aliasesFile(home) {
+  return path.join(profilesDir(home), '.aliases.json')
+}
+
+export function loadAliases(home) {
+  const f = aliasesFile(home)
+  try {
+    return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf-8')) : {}
+  } catch {
+    return {}
+  }
+}
+
+export function saveAliases(home, aliases) {
+  const f = aliasesFile(home)
+  atomicWrite(f, JSON.stringify(aliases, null, 2))
+}
+
+export function resolveProfileOrAlias(home, nameOrAlias) {
+  if (!nameOrAlias) return nameOrAlias
+  const aliases = loadAliases(home)
+  if (aliases[nameOrAlias]) {
+    return aliases[nameOrAlias]
+  }
+  return nameOrAlias
+}
+
+export function setAlias(home, alias, profileName) {
+  if (!alias || !profileName) {
+    throw new SwapError('Cú pháp: /profile alias <tên_alias> <tên_profile>')
+  }
+  const resolved = resolveProfileOrAlias(home, profileName)
+  if (!profileExists(home, resolved)) {
+    throw new SwapError(`Profile '${profileName}' không tồn tại.`)
+  }
+  const aliases = loadAliases(home)
+  aliases[alias.trim()] = resolved
+  saveAliases(home, aliases)
+  return aliases
+}
+
+export function removeAlias(home, alias) {
+  if (!alias) throw new SwapError('Thiếu tên alias cần xoá.')
+  const aliases = loadAliases(home)
+  if (!aliases[alias.trim()]) {
+    throw new SwapError(`Alias '${alias}' không tồn tại.`)
+  }
+  delete aliases[alias.trim()]
+  saveAliases(home, aliases)
+  return aliases
+}
+
+export function listAliases(home) {
+  return loadAliases(home)
+}
+
+// ---------------------------------------------------------------- git branch binding
+
+export function branchBindingsFile(home) {
+  return path.join(profilesDir(home), '.branch-bindings.json')
+}
+
+export function loadBranchBindings(home) {
+  const f = branchBindingsFile(home)
+  try {
+    return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf-8')) : {}
+  } catch {
+    return {}
+  }
+}
+
+export function saveBranchBindings(home, bindings) {
+  const f = branchBindingsFile(home)
+  atomicWrite(f, JSON.stringify(bindings, null, 2))
+}
+
+export function getCurrentGitBranch(dir = process.cwd()) {
+  try {
+    return child_process
+      .execSync('git rev-parse --abbrev-ref HEAD', {
+        cwd: dir,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 3000,
+      })
+      .toString('utf-8')
+      .trim()
+  } catch {
+    return null
+  }
+}
+
+export function matchBranchPattern(pattern, branch) {
+  if (!pattern || !branch) return false
+  if (pattern === '*' || pattern === branch) return true
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')
+  return new RegExp(`^${escaped}$`).test(branch)
+}
+
+export function bindBranch(home, repoDir, pattern, profileName) {
+  if (!pattern || !profileName) {
+    throw new SwapError('Cú pháp: /profile bind-branch <pattern> <tên_profile>')
+  }
+  const resolvedName = resolveProfileOrAlias(home, profileName)
+  if (!profileExists(home, resolvedName)) {
+    throw new SwapError(`Profile '${profileName}' không tồn tại.`)
+  }
+  const resolvedDir = path.resolve(repoDir || process.cwd())
+  const bindings = loadBranchBindings(home)
+  if (!Array.isArray(bindings[resolvedDir])) {
+    bindings[resolvedDir] = []
+  }
+  bindings[resolvedDir] = bindings[resolvedDir].filter(b => b.pattern !== pattern.trim())
+  bindings[resolvedDir].push({ pattern: pattern.trim(), profile: resolvedName })
+  saveBranchBindings(home, bindings)
+  return { dir: resolvedDir, pattern: pattern.trim(), profile: resolvedName }
+}
+
+export function unbindBranch(home, repoDir, pattern = null) {
+  const resolvedDir = path.resolve(repoDir || process.cwd())
+  const bindings = loadBranchBindings(home)
+  if (!bindings[resolvedDir]) {
+    return { dir: resolvedDir, removed: 0 }
+  }
+  const prevCount = bindings[resolvedDir].length
+  if (pattern) {
+    bindings[resolvedDir] = bindings[resolvedDir].filter(b => b.pattern !== pattern.trim())
+  } else {
+    delete bindings[resolvedDir]
+  }
+  saveBranchBindings(home, bindings)
+  return { dir: resolvedDir, removed: prevCount - (bindings[resolvedDir]?.length || 0) }
+}
+
+export function getBoundBranchProfile(home, startDir = process.cwd(), currentBranch = null) {
+  let cur = path.resolve(startDir)
+  const bindings = loadBranchBindings(home)
+  const branch = currentBranch || getCurrentGitBranch(cur)
+  if (!branch) return null
+
+  while (true) {
+    const repoBindings = bindings[cur]
+    if (Array.isArray(repoBindings)) {
+      for (const b of repoBindings) {
+        if (matchBranchPattern(b.pattern, branch) && profileExists(home, b.profile)) {
+          return { profile: b.profile, branch, pattern: b.pattern, dir: cur }
+        }
+      }
+    }
+    const parent = path.dirname(cur)
+    if (parent === cur) break
+    cur = parent
+  }
+  return null
+}
+
+// ---------------------------------------------------------------- quota burn-rate & forecast
+
+export function usageHistoryFile(home) {
+  return path.join(profilesDir(home), '.usage-history.json')
+}
+
+export function loadUsageHistory(home) {
+  const f = usageHistoryFile(home)
+  try {
+    return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf-8')) : {}
+  } catch {
+    return {}
+  }
+}
+
+export function recordUsageSnapshot(home, profileName, util5h, util7d = null) {
+  if (!profileName) return
+  const f = usageHistoryFile(home)
+  const history = loadUsageHistory(home)
+  if (!Array.isArray(history[profileName])) {
+    history[profileName] = []
+  }
+  history[profileName].push({
+    timestamp: Date.now(),
+    util5h: Number(util5h),
+    util7d: util7d !== null ? Number(util7d) : null,
+  })
+  if (history[profileName].length > 50) {
+    history[profileName] = history[profileName].slice(-50)
+  }
+  atomicWrite(f, JSON.stringify(history, null, 2))
+}
+
+export function calculateForecast(home, profileName, threshold = 95) {
+  const history = loadUsageHistory(home)
+  const entries = history[profileName] || []
+  if (entries.length < 2) {
+    return {
+      profile: profileName,
+      hasData: false,
+      message: 'Chưa đủ dữ liệu lịch sử (cần ít nhất 2 lần đo quota).',
+    }
+  }
+
+  const first = entries[0]
+  const last = entries[entries.length - 1]
+  const deltaMs = last.timestamp - first.timestamp
+  const deltaHours = deltaMs / (3600 * 1000)
+
+  if (deltaHours <= 0) {
+    return { profile: profileName, hasData: false, message: 'Dữ liệu đo quá sát nhau.' }
+  }
+
+  const deltaUtil = last.util5h - first.util5h
+  const burnRatePerHour = deltaUtil / deltaHours
+  const currentUtil = last.util5h
+
+  if (burnRatePerHour <= 0) {
+    return {
+      profile: profileName,
+      hasData: true,
+      currentUtil,
+      burnRatePerHour: 0,
+      trend: 'stable_or_decreasing',
+      message: `Mức dùng: ${Math.round(currentUtil)}% | Tốc độ tiêu thụ ổn định hoặc đang hạ nhiệt.`,
+    }
+  }
+
+  const remainingUtil = Math.max(0, threshold - currentUtil)
+  const hoursUntilThreshold = remainingUtil / burnRatePerHour
+  const minutesUntilThreshold = Math.round(hoursUntilThreshold * 60)
+  const estimatedTimestamp = Date.now() + minutesUntilThreshold * 60 * 1000
+
+  return {
+    profile: profileName,
+    hasData: true,
+    currentUtil,
+    burnRatePerHour: Math.round(burnRatePerHour * 10) / 10,
+    trend: 'increasing',
+    minutesUntilThreshold,
+    estimatedTimestamp,
+    message:
+      `Mức dùng: ${Math.round(currentUtil)}% | Tốc độ tăng: +${Math.round(burnRatePerHour * 10) / 10}%/giờ. ` +
+      `Dự kiến chạm ngưỡng ${threshold}% sau ~${minutesUntilThreshold} phút ` +
+      `(${new Date(estimatedTimestamp).toLocaleTimeString('vi-VN')}).`,
+  }
+}
+
+export function formatForecastReport(home) {
+  const profiles = listProfiles(home)
+  if (profiles.length === 0) return 'Chưa có profile nào.'
+  const lines = ['📈 Dự báo tốc độ tiêu thụ Token & Cạn hạn mức (Quota Forecast):\n']
+  for (const n of profiles) {
+    const f = calculateForecast(home, n)
+    if (!f.hasData) {
+      lines.push(`• ${n}: ${f.message}`)
+    } else if (f.trend === 'increasing') {
+      const icon = f.minutesUntilThreshold <= 30 ? '🔴' : f.minutesUntilThreshold <= 60 ? '🟠' : '🟡'
+      lines.push(`${icon} ${n}: ${f.message}`)
+    } else {
+      lines.push(`🟢 ${n}: ${f.message}`)
+    }
+  }
+  return lines.join('\n')
+}
+
+// ---------------------------------------------------------------- interactive picker
+
+export async function interactivePickProfile(home, options = {}) {
+  const profiles = listProfiles(home)
+  if (profiles.length === 0) {
+    throw new SwapError('Chưa có profile nào để chọn.')
+  }
+  const cur = currentProfile(home)
+
+  if (!process.stdin.isTTY || options.nonInteractive) {
+    const nextIdx = profiles.indexOf(cur) + 1
+    const target = profiles[nextIdx % profiles.length]
+    swapProfile(home, target, { type: 'manual', reason: 'Interactive pick (non-interactive)' })
+    return { selected: target, nonInteractive: true }
+  }
+
+  return new Promise(resolve => {
+    let index = Math.max(0, profiles.indexOf(cur))
+    const stdin = process.stdin
+    const stdout = process.stdout
+
+    const render = () => {
+      stdout.write('\x1b[2J\x1b[0;0H')
+      stdout.write("🎛️  CHỌN PROFILE (Dùng phím ↑ / ↓ để di chuyển, Enter để chọn, 'q' để hủy):\n\n")
+      profiles.forEach((p, idx) => {
+        const isSelected = idx === index
+        const isActive = p === cur
+        const pointer = isSelected ? '➔ ' : '  '
+        const badge = isActive ? ' (Active)' : ''
+        const tags = getProfileTags(home, p)
+        const tagStr = tags.length ? ` [🏷️ ${tags.join(', ')}]` : ''
+        if (isSelected) {
+          stdout.write(`\x1b[1;36m${pointer}${p}${badge}${tagStr}\x1b[0m\n`)
+        } else {
+          stdout.write(`${pointer}${p}${badge}${tagStr}\n`)
+        }
+      })
+    }
+
+    const wasRaw = stdin.isRaw
+    stdin.setRawMode(true)
+    stdin.resume()
+    stdin.setEncoding('utf-8')
+    render()
+
+    const onKey = key => {
+      if (key === '\u0003' || key === 'q' || key === 'Q') {
+        stdin.removeListener('data', onKey)
+        stdin.setRawMode(wasRaw)
+        stdin.pause()
+        stdout.write('\nĐã hủy chọn profile.\n')
+        resolve({ selected: null, cancelled: true })
+        return
+      }
+
+      if (key === '\r' || key === '\n') {
+        stdin.removeListener('data', onKey)
+        stdin.setRawMode(wasRaw)
+        stdin.pause()
+        const target = profiles[index]
+        swapProfile(home, target, { type: 'manual', reason: 'Interactive pick' })
+        stdout.write(`\n✨ Đã chuyển sang: ${target}\n`)
+        resolve({ selected: target })
+        return
+      }
+
+      if (key === '\u001b[A' || key === 'k') {
+        index = (index - 1 + profiles.length) % profiles.length
+        render()
+      } else if (key === '\u001b[B' || key === 'j') {
+        index = (index + 1) % profiles.length
+        render()
+      }
+    }
+
+    stdin.on('data', onKey)
+  })
+}
+
+// ---------------------------------------------------------------- remote sync
+
+export function syncConfigFile(home) {
+  return path.join(profilesDir(home), '.sync-config.json')
+}
+
+export function loadSyncConfig(home) {
+  const f = syncConfigFile(home)
+  try {
+    return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf-8')) : {}
+  } catch {
+    return {}
+  }
+}
+
+export function saveSyncConfig(home, config) {
+  const f = syncConfigFile(home)
+  atomicWrite(f, JSON.stringify(config, null, 2))
+}
+
+export function syncPush(home, targetPath, password) {
+  const config = loadSyncConfig(home)
+  const dest = targetPath || config.targetPath
+  if (!dest) {
+    throw new SwapError('Chưa cấu hình đường dẫn đích đồng bộ. Dùng: /profile sync setup <đường_dẫn_file>')
+  }
+  const pass = password || config.password
+  if (!pass) {
+    throw new SwapError('Vui lòng cung cấp mật khẩu mã hóa với --password <mật_khẩu>.')
+  }
+
+  const res = exportEncryptedProfiles(home, dest, pass)
+  config.targetPath = dest
+  config.lastPush = Date.now()
+  saveSyncConfig(home, config)
+  return { path: res.path, count: res.count }
+}
+
+export function syncPull(home, sourcePath, password, force = false) {
+  const config = loadSyncConfig(home)
+  const src = sourcePath || config.targetPath
+  if (!src) {
+    throw new SwapError('Chưa cấu hình đường dẫn nguồn đồng bộ. Dùng: /profile sync setup <đường_dẫn_file>')
+  }
+  const pass = password || config.password
+  if (!pass) {
+    throw new SwapError('Vui lòng cung cấp mật khẩu giải mã với --password <mật_khẩu>.')
+  }
+
+  const res = importEncryptedProfiles(home, src, pass, force)
+  config.targetPath = src
+  config.lastPull = Date.now()
+  saveSyncConfig(home, config)
+  return res
+}
+
+// ---------------------------------------------------------------- model affinity
+
+export function modelAffinityFile(home) {
+  return path.join(profilesDir(home), '.model-affinity.json')
+}
+
+export function loadModelAffinity(home) {
+  const f = modelAffinityFile(home)
+  try {
+    return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf-8')) : {}
+  } catch {
+    return {}
+  }
+}
+
+export function saveModelAffinity(home, affinities) {
+  const f = modelAffinityFile(home)
+  atomicWrite(f, JSON.stringify(affinities, null, 2))
+}
+
+export function setModelAffinity(home, modelName, profileName) {
+  if (!modelName || !profileName) {
+    throw new SwapError('Cú pháp: /profile affinity <model> <tên_profile>')
+  }
+  const resolved = resolveProfileOrAlias(home, profileName)
+  if (!profileExists(home, resolved)) {
+    throw new SwapError(`Profile '${profileName}' không tồn tại.`)
+  }
+  const affinities = loadModelAffinity(home)
+  affinities[modelName.toLowerCase().trim()] = resolved
+  saveModelAffinity(home, affinities)
+  return affinities
+}
+
+export function removeModelAffinity(home, modelName) {
+  if (!modelName) throw new SwapError('Thiếu tên model cần gỡ affinity.')
+  const affinities = loadModelAffinity(home)
+  delete affinities[modelName.toLowerCase().trim()]
+  saveModelAffinity(home, affinities)
+  return affinities
+}
+
+export function listModelAffinities(home) {
+  return loadModelAffinity(home)
+}
+
+// ---------------------------------------------------------------- profile cleanup
+
+export function analyzeProfilesForCleanup(home) {
+  const profiles = listProfiles(home)
+  const emailMap = new Map()
+  const uuidMap = new Map()
+  const expiredTokens = []
+  const corruptFiles = []
+
+  for (const n of profiles) {
+    const f = profilePath(home, n)
+    let parsed
+    try {
+      parsed = JSON.parse(fs.readFileSync(f, 'utf-8'))
+      if (!parsed || typeof parsed !== 'object' || !parsed.claude_json) {
+        corruptFiles.push(n)
+        continue
+      }
+    } catch {
+      corruptFiles.push(n)
+      continue
+    }
+
+    const email = parsed.claude_json?.oauthAccount?.emailAddress
+    const uuid = parsed.claude_json?.oauthAccount?.accountUuid
+
+    if (email) {
+      if (!emailMap.has(email)) emailMap.set(email, [])
+      emailMap.get(email).push(n)
+    }
+    if (uuid) {
+      if (!uuidMap.has(uuid)) uuidMap.set(uuid, [])
+      uuidMap.get(uuid).push(n)
+    }
+
+    if (parsed.credentials) {
+      try {
+        const creds = JSON.parse(parsed.credentials)
+        const exp = creds.claudeAiOauth?.expiresAt
+        if (exp) {
+          const expMs = exp > 1e11 ? exp : exp * 1000
+          if (Date.now() - expMs > 7 * 24 * 3600 * 1000) {
+            expiredTokens.push({ name: n, expiredAt: expMs })
+          }
+        }
+      } catch {}
+    }
+  }
+
+  const duplicates = []
+  for (const [email, list] of emailMap.entries()) {
+    if (list.length > 1) {
+      duplicates.push({ type: 'email', value: email, profiles: list })
+    }
+  }
+  for (const [uuid, list] of uuidMap.entries()) {
+    if (list.length > 1 && !duplicates.some(d => d.profiles.join(',') === list.join(','))) {
+      duplicates.push({ type: 'accountUuid', value: uuid, profiles: list })
+    }
+  }
+
+  return { duplicates, expiredTokens, corruptFiles }
+}
+
+export function formatCleanupReport(analysis) {
+  const { duplicates, expiredTokens, corruptFiles } = analysis
+  const hasIssues = duplicates.length > 0 || expiredTokens.length > 0 || corruptFiles.length > 0
+
+  if (!hasIssues) {
+    return '✨ Tuyệt vời! Không phát hiện profile trùng lặp, hỏng hoặc token hết hạn quá 7 ngày.'
+  }
+
+  const lines = ['🧹 Kết quả quét dọn dẹp profile (Profile Cleanup):\n']
+  if (duplicates.length > 0) {
+    lines.push('👥 Các profile trùng cùng tài khoản:')
+    for (const d of duplicates) {
+      lines.push(`   • ${d.type} (${d.value}): ${d.profiles.join(', ')}`)
+    }
+    lines.push('')
+  }
+  if (expiredTokens.length > 0) {
+    lines.push('⌛ Profile có token đã hết hạn quá 7 ngày:')
+    for (const exp of expiredTokens) {
+      lines.push(`   • ${exp.name} (Hạn: ${new Date(exp.expiredAt).toLocaleDateString('vi-VN')})`)
+    }
+    lines.push('')
+  }
+  if (corruptFiles.length > 0) {
+    lines.push('⚠️ File cấu hình bị hỏng:')
+    for (const c of corruptFiles) {
+      lines.push(`   • ${c}`)
+    }
+    lines.push('')
+  }
+
+  lines.push('Gợi ý: Dùng /profile delete <tên> để dọn dẹp các profile thừa hoặc hỏng.')
+  return lines.join('\n')
+}
+
+export function cleanupProfiles(home, options = {}) {
+  const analysis = analyzeProfilesForCleanup(home)
+  if (!options.force) {
+    return { ...analysis, cleaned: [] }
+  }
+  const cleaned = []
+  for (const c of analysis.corruptFiles) {
+    try {
+      fs.unlinkSync(profilePath(home, c))
+      cleaned.push(c)
+    } catch {}
+  }
+  return { ...analysis, cleaned }
+}
+
 // ---------------------------------------------------------------- cli
 
 export function formatHelpReport(color = null) {
@@ -1719,7 +2296,11 @@ export function formatHelpReport(color = null) {
     '',
     `📌 ${bold('Quản lý & Chuyển đổi Profile:')}`,
     `  ${cmd('/profile list')}              Liệt kê danh sách profiles kèm quota & thanh usage`,
-    `  ${cmd('/profile <tên>')}             Chuyển nhanh sang profile <tên>`,
+    `  ${cmd('/profile <tên|alias>')}       Chuyển nhanh sang profile hoặc bí danh (alias)`,
+    `  ${cmd('/profile pick')}              Chọn profile tương tác bằng phím mũi tên ↑ ↓`,
+    `  ${cmd('/profile alias <tên> <p>')}   Đặt bí danh viết tắt cho profile`,
+    `  ${cmd('/profile unalias <tên>')}     Xóa bí danh`,
+    `  ${cmd('/profile aliases')}           Xem danh sách các bí danh`,
     `  ${cmd('/profile current')}           Hiển thị tên profile đang active`,
     `  ${cmd('/profile new <tên>')}         Tạo profile mới từ tài khoản hiện tại`,
     `  ${cmd('/profile save <tên>')}        Lưu thông tin đăng nhập hiện tại vào profile`,
@@ -1736,18 +2317,28 @@ export function formatHelpReport(color = null) {
     `  ${cmd('/profile auto safeguard <%>')} Bảo vệ hạn mức 7 ngày (mặc định: 85%)`,
     `  ${cmd('/profile auto return on|off')} Tự động quay về profile chính khi hồi token`,
     `  ${cmd('/profile auto primary <tên>')} Đặt profile chính để quay về`,
+    `  ${cmd('/profile forecast')}          Dự báo tốc độ tiêu thụ & thời điểm cạn hạn mức`,
     `  ${cmd('/profile cooldown')}          Xem đồng hồ đếm ngược reset quota của các account`,
     `  ${cmd('/profile doctor')}            Quét chẩn đoán sức khỏe, token và lỗi các account`,
+    `  ${cmd('/profile cleanup')}           Quét phát hiện profile trùng lặp, token cũ`,
     '',
-    `📁 ${bold('Dự án & Thẻ nhãn (Tags):')}`,
+    `📁 ${bold('Dự án, Nhánh Git & Thẻ nhãn:')}`,
     `  ${cmd('/profile bind [tên]')}        Gắn profile cho thư mục dự án hiện tại`,
     `  ${cmd('/profile unbind')}            Gỡ gắn kết profile khỏi thư mục hiện tại`,
+    `  ${cmd('/profile bind-branch <pat>')} Gắn profile theo mẫu nhánh Git (vd: work-*, feat/*)`,
+    `  ${cmd('/profile unbind-branch')}     Gỡ gắn kết nhánh Git`,
+    `  ${cmd('/profile branch-bindings')}   Xem danh sách các liên kết nhánh Git`,
     `  ${cmd('/profile tag <tên> <tag>')}   Gắn tag phân loại cho profile`,
     `  ${cmd('/profile untag <tên> <tag>')} Gỡ tag khỏi profile`,
     `  ${cmd('/profile tags')}              Xem danh sách các tag và profile thuộc về`,
     '',
+    `🧠 ${bold('Phân loại Model (Affinity):')}`,
+    `  ${cmd('/profile affinity <m> <p>')}  Gán profile chuyên dụng cho model (vd: opus, sonnet)`,
+    `  ${cmd('/profile unaffinity <m>')}    Gỡ gán model affinity`,
+    `  ${cmd('/profile affinities')}        Xem danh sách model affinities`,
+    '',
     `⏳ ${bold('Mượn tạm & Tiện ích:')}`,
-    `  ${cmd('/profile temp <tên> [thời_gian]')} Mượn tạm profile (vd: 30m, 1h) rồi tự hoàn lại`,
+    `  ${cmd('/profile temp <tên> [tg]')}   Mượn tạm profile (vd: 30m, 1h) rồi tự hoàn lại`,
     `  ${cmd('/profile untemp')}            Hủy mượn tạm và quay về profile gốc ngay`,
     `  ${cmd('/profile statusline')}        Chuỗi trạng thái cho Shell prompt / Tmux`,
     `  ${cmd('/profile prompt <shell>')}    Snippet cấu hình starship, zsh, bash, tmux`,
@@ -1755,9 +2346,10 @@ export function formatHelpReport(color = null) {
     `  ${cmd('/profile history [n]')}       Xem lịch sử các lần chuyển đổi gần nhất`,
     `  ${cmd('/profile stats')}             Thống kê số lần đổi thủ công, tự động`,
     '',
-    `🔐 ${bold('Sao lưu & Di chuyển:')}`,
-    `  ${cmd('/profile export <file> --password <pw>')} Xuất bản sao lưu mã hóa AES-256`,
-    `  ${cmd('/profile import-enc <file> --password <pw>')} Khôi phục từ file mã hóa`,
+    `🔐 ${bold('Sao lưu & Đồng bộ (Sync):')}`,
+    `  ${cmd('/profile sync [push|pull]')}  Đồng bộ bản sao lưu mã hóa đa thiết bị`,
+    `  ${cmd('/profile export <file>')}     Xuất bản sao lưu mã hóa AES-256`,
+    `  ${cmd('/profile import-enc <file>')} Khôi phục từ file mã hóa`,
     `  ${cmd('/profile import <folder>')}   Nhập profile từ thư mục cấu hình khác`,
   ].join('\n')
 }
@@ -2019,6 +2611,11 @@ export async function runCli(argv, home = os.homedir()) {
         const sub = filteredArgv[1]
         if (sub === 'get') {
           const targetDir = filteredArgv[2] || process.cwd()
+          const branchBound = getBoundBranchProfile(home, targetDir)
+          if (branchBound) {
+            console.log(`🔗 Thư mục '${targetDir}' đang liên kết với profile: ${branchBound.profile} (branch: ${branchBound.branch})`)
+            return 0
+          }
           const bound = getBoundProfile(home, targetDir)
           if (bound) {
             console.log(`🔗 Thư mục '${targetDir}' đang liên kết với profile: ${bound.profile} (${bound.source})`)
@@ -2162,6 +2759,188 @@ export async function runCli(argv, home = os.homedir()) {
       case 'untemp': {
         const res = cancelTempSwap(home)
         console.log(`🔄 Đã hoàn tất profile tạm thời và quay về '${res.revertedTo}'.`)
+        return 0
+      }
+      case 'alias': {
+        const alias = filteredArgv[1]
+        const profile = filteredArgv[2]
+        if (!alias || !profile) {
+          throw new SwapError('Cú pháp: /profile alias <tên_alias> <tên_profile>')
+        }
+        setAlias(home, alias, profile)
+        console.log(`🔤 Đã gán alias '${alias}' ➔ '${profile}'.`)
+        return 0
+      }
+      case 'unalias': {
+        const alias = filteredArgv[1]
+        if (!alias) throw new SwapError('Cú pháp: /profile unalias <tên_alias>')
+        removeAlias(home, alias)
+        console.log(`🔤 Đã xoá alias '${alias}'.`)
+        return 0
+      }
+      case 'aliases': {
+        const aliases = listAliases(home)
+        const entries = Object.entries(aliases)
+        if (entries.length === 0) {
+          console.log('Chưa có alias nào. Dùng: /profile alias <tên> <profile>')
+          return 0
+        }
+        console.log('🔤 Danh sách alias profile:')
+        for (const [a, p] of entries) {
+          console.log(`  • ${a} ➔ ${p}`)
+        }
+        return 0
+      }
+      case 'bind-branch': {
+        const pattern = filteredArgv[1]
+        if (pattern === 'get') {
+          const targetDir = filteredArgv[2] || process.cwd()
+          const bound = getBoundBranchProfile(home, targetDir)
+          if (bound) {
+            console.log(`🌿 Nhánh '${bound.branch}' đang liên kết với profile: ${bound.profile} (khớp pattern '${bound.pattern}')`)
+          } else {
+            console.log('🌿 Nhánh hiện tại chưa liên kết với profile nào.')
+          }
+          return 0
+        }
+        const profile = filteredArgv[2] || currentProfile(home)
+        const dir = filteredArgv[3] || process.cwd()
+        if (!pattern || !profile) {
+          throw new SwapError('Cú pháp: /profile bind-branch <pattern> [tên_profile]')
+        }
+        const res = bindBranch(home, dir, pattern, profile)
+        console.log(`🌿 Đã liên kết pattern nhánh '${res.pattern}' với profile '${res.profile}'.`)
+        return 0
+      }
+      case 'unbind-branch': {
+        const pattern = filteredArgv[1] || null
+        const dir = filteredArgv[2] || process.cwd()
+        const res = unbindBranch(home, dir, pattern)
+        console.log(`🌿 Đã gỡ ${res.removed} liên kết nhánh trong '${res.dir}'.`)
+        return 0
+      }
+      case 'branch-bindings': {
+        const bindings = loadBranchBindings(home)
+        const entries = Object.entries(bindings)
+        if (entries.length === 0) {
+          console.log('Chưa có liên kết nhánh nào. Dùng: /profile bind-branch <pattern> <profile>')
+          return 0
+        }
+        console.log('🌿 Danh sách liên kết nhánh Git:')
+        for (const [d, list] of entries) {
+          console.log(`📁 ${d}:`)
+          for (const item of list) {
+            console.log(`   • ${item.pattern} ➔ ${item.profile}`)
+          }
+        }
+        return 0
+      }
+      case 'forecast': {
+        console.log(formatForecastReport(home))
+        return 0
+      }
+      case 'pick': {
+        const res = await interactivePickProfile(home)
+        if (res.selected) {
+          console.log(`🎛️ Đã chọn profile: ${res.selected}`)
+        }
+        return 0
+      }
+      case 'sync': {
+        const sub = filteredArgv[1]
+        if (!sub || sub === 'status') {
+          const cfg = loadSyncConfig(home)
+          console.log('☁️ Trạng thái đồng bộ (Encrypted Sync):')
+          console.log(`  • Đường dẫn đích: ${cfg.targetPath || '(chưa đặt)'}`)
+          console.log(`  • Lần push gần nhất: ${cfg.lastPush ? new Date(cfg.lastPush).toLocaleString('vi-VN') : '(chưa có)'}`)
+          console.log(`  • Lần pull gần nhất: ${cfg.lastPull ? new Date(cfg.lastPull).toLocaleString('vi-VN') : '(chưa có)'}`)
+          return 0
+        }
+        if (sub === 'setup') {
+          const target = filteredArgv[2]
+          if (!target) throw new SwapError('Cú pháp: /profile sync setup <đường_dẫn_file> [--password <mật_khẩu>]')
+          const passIndex = filteredArgv.indexOf('--password')
+          const password = passIndex !== -1 ? filteredArgv[passIndex + 1] : ''
+          const cfg = loadSyncConfig(home)
+          cfg.targetPath = path.resolve(target)
+          if (password) cfg.password = password
+          saveSyncConfig(home, cfg)
+          console.log(`☁️ Đã thiết lập đồng bộ với đường dẫn: ${cfg.targetPath}`)
+          return 0
+        }
+        if (sub === 'push') {
+          const passIndex = filteredArgv.indexOf('--password')
+          const password = passIndex !== -1 ? filteredArgv[passIndex + 1] : ''
+          const target = filteredArgv.slice(2).find(a => a !== '--password' && a !== password)
+          const res = syncPush(home, target, password)
+          console.log(`☁️ Đã đẩy bản sao lưu mã hóa (${res.count} profiles) lên: ${res.path}`)
+          return 0
+        }
+        if (sub === 'pull') {
+          const passIndex = filteredArgv.indexOf('--password')
+          const password = passIndex !== -1 ? filteredArgv[passIndex + 1] : ''
+          const force = filteredArgv.includes('--force')
+          const target = filteredArgv.slice(2).find(a => a !== '--password' && a !== password && a !== '--force')
+          const res = syncPull(home, target, password, force)
+          console.log(`☁️ Đã tải thành công: ${res.added.join(', ') || '(không có profile mới)'}`)
+          return 0
+        }
+        console.error(`❌ Lệnh sync không hợp lệ: ${sub}. Dùng: /profile sync [setup|push|pull|status]`)
+        return 1
+      }
+      case 'affinity': {
+        const sub = filteredArgv[1]
+        if (sub === 'apply') {
+          const model = filteredArgv[2]
+          if (!model) throw new SwapError('Cú pháp: /profile affinity apply <tên_model>')
+          const affinities = listModelAffinities(home)
+          const target = affinities[model.toLowerCase()]
+          if (!target) {
+            console.log(`ℹ️ Không có profile nào được gán cho model '${model}'.`)
+            return 0
+          }
+          swapProfile(home, target, { type: 'manual', reason: `Affinity for ${model}` })
+          console.log(`🧠 Đã chuyển sang profile '${target}' theo affinity model '${model}'.`)
+          return 0
+        }
+        const model = filteredArgv[1]
+        const profile = filteredArgv[2]
+        if (!model || !profile) {
+          throw new SwapError('Cú pháp: /profile affinity <tên_model> <tên_profile>')
+        }
+        setModelAffinity(home, model, profile)
+        console.log(`🧠 Đã gán model '${model}' ➔ profile '${profile}'.`)
+        return 0
+      }
+      case 'unaffinity': {
+        const model = filteredArgv[1]
+        if (!model) throw new SwapError('Cú pháp: /profile unaffinity <tên_model>')
+        removeModelAffinity(home, model)
+        console.log(`🧠 Đã gỡ affinity cho model '${model}'.`)
+        return 0
+      }
+      case 'affinities': {
+        const map = listModelAffinities(home)
+        const entries = Object.entries(map)
+        if (entries.length === 0) {
+          console.log('Chưa có cấu hình affinity model nào. Dùng: /profile affinity <model> <profile>')
+          return 0
+        }
+        console.log('🧠 Danh sách model affinity:')
+        for (const [m, p] of entries) {
+          console.log(`  • ${m} ➔ ${p}`)
+        }
+        return 0
+      }
+      case 'cleanup': {
+        const force = filteredArgv.includes('--force')
+        if (force) {
+          const res = cleanupProfiles(home, { force: true })
+          console.log(`🧹 Đã dọn dẹp các profile bị hỏng: ${res.cleaned.join(', ') || '(không có)'}`)
+          return 0
+        }
+        const analysis = analyzeProfilesForCleanup(home)
+        console.log(formatCleanupReport(analysis))
         return 0
       }
       default:

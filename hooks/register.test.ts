@@ -189,3 +189,38 @@ test('/profile dispatches Batch 2 subcommands: cooldown, doctor, statusline, tem
     ['current'],
   ])
 })
+
+test('/profile dispatches Batch 3 subcommands: alias, bind-branch, forecast, pick, sync, affinity, cleanup', async ($, on) => {
+  const calls: string[][] = []
+  on('process.run', async (_$, { argv }) => {
+    calls.push(argv.slice(2))
+    return ok('OK')
+  })
+  on('ui.status', () => ({ value: undefined }))
+
+  await $.command.run({ command: 'profile', args: 'alias w work' })
+  await $.command.run({ command: 'profile', args: 'bind-branch feat/* work' })
+  await $.command.run({ command: 'profile', args: 'forecast' })
+  await $.command.run({ command: 'profile', args: 'pick' })
+  await $.command.run({ command: 'profile', args: 'sync push' })
+  await $.command.run({ command: 'profile', args: 'affinity opus work' })
+  await $.command.run({ command: 'profile', args: 'cleanup' })
+
+  expect(calls).toEqual([
+    ['alias', 'w', 'work'],
+    ['current'],
+    ['bind-branch', 'feat/*', 'work'],
+    ['current'],
+    ['forecast'],
+    ['current'],
+    ['pick'],
+    ['current'],
+    ['sync', 'push'],
+    ['current'],
+    ['affinity', 'opus', 'work'],
+    ['current'],
+    ['cleanup'],
+    ['current'],
+  ])
+})
+
