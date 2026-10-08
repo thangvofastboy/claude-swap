@@ -27,7 +27,7 @@ Chỉ **một file Python** (`claude_swap.py`) gồm GUI (pywebview), icon trên
 
 | | |
 | --- | --- |
-| 💾 **Lưu / chuyển / xoá** | Mỗi profile là một tài khoản Claude đã đăng nhập. |
+| 💾 **Tạo / chuyển / xoá** | Mỗi profile là một tài khoản Claude đã đăng nhập. Hỗ trợ `/profile new <tên>`. |
 | 📊 **Usage từng profile** | Quota 5 giờ, 7 ngày và theo model (Opus, Sonnet, Fable…). Thanh màu theo mức: 🟢 < 50% · 🟡 < 80% · 🟠 < 95% · 🔴 ≥ 95%, kèm ⚠ từ 80%. |
 | 📥 **Nhập profile** | Từ file `*.json` của app, hoặc thư mục cấu hình Claude khác (vd `~/.claude-work`). Tự gợi ý các thư mục `~/.claude*`, kể cả thư mục ẩn. |
 | 🧭 **Tray + bảng nhanh** | Đổi profile và xem usage chỉ với một cú bấm. |
@@ -53,9 +53,15 @@ cần chạy cho Python bạn đang dùng.
 
 ### Bắt đầu nhanh
 
-1. Đăng nhập Claude CLI bằng tài khoản thứ nhất (`claude` → `/login`), bấm **Lưu**, đặt tên (vd `work`).
-2. `/login` sang tài khoản khác, bấm **Lưu** lần nữa (vd `personal`).
-3. Từ giờ chọn profile rồi bấm **Chuyển profile** (hoặc bấm đúp vào thẻ).
+1. Đăng nhập Claude CLI bằng tài khoản thứ nhất (`claude` → `/login`), tạo profile:
+   - Trong Claude Code: `/profile new work`
+   - Hoặc ngoài terminal (CLI): `python3 claude_swap.py new work`
+   - Hoặc trên GUI: bấm **Lưu**, đặt tên `work`.
+2. `/login` sang tài khoản khác, tạo profile tiếp theo (vd `/profile new personal`).
+3. Chuyển đổi giữa các profile:
+   - Trong Claude Code: `/profile <tên>` (vd `/profile work`)
+   - Ngoài terminal: `python3 claude_swap.py swap <tên>`
+   - Trên GUI: chọn profile rồi bấm **Chuyển profile** (hoặc bấm đúp vào thẻ).
 
 ### 🖥️ GUI
 
