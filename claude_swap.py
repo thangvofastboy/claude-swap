@@ -1024,17 +1024,160 @@ def build_windows(home: Path, missing: list[dict], start_hidden: bool = False, t
     return api
 
 
-def run_gui(home: Path, start_hidden: bool = False) -> int:
+class Instance:
+    """One GUI per user. An OS file lock decides who runs (the kernel drops it if the app crashes);
+    a local socket lets a later launch wake the running app ("show") instead of opening a duplicate."""
+
+    def __init__(self, home: Path):
+        d = profiles_dir(home)
+        self._lock_path, self._sock_path, self._port_path = d / ".gui.lock", d / ".gui.sock", d / ".gui.port"
+        self._lock = self._server = None
+        self._unix = sys.platform != "win32"
+
+    def acquire(self) -> bool:
+        f = open(self._lock_path, "a+")
+        try:
+            if self._unix:
+                import fcntl
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            else:
+                import msvcrt
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            f.close()
+            return False
+        self._lock = f
+        return True
+
+    def release(self) -> None:
+        if self._server is not None:
+            self._server.close()
+            self._server = None
+            if self._unix:
+                self._sock_path.unlink(missing_ok=True)
+        if self._lock is not None:
+            self._lock.close()  # closing the file drops the lock
+            self._lock = None
+
+    def serve(self, handler) -> None:
+        """Listen for messages from later launches; `handler(msg)` runs on a background thread."""
+        import socket
+        if self._unix:
+            self._sock_path.unlink(missing_ok=True)  # left by a crashed run: we hold the lock, so it's stale
+            srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            srv.bind(str(self._sock_path))
+            os.chmod(self._sock_path, 0o600)
+        else:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.bind(("127.0.0.1", 0))
+            _atomic_write(self._port_path, str(srv.getsockname()[1]))
+        srv.listen(4)
+        self._server = srv
+
+        def loop():
+            while True:
+                try:
+                    conn, _ = srv.accept()
+                except OSError:  # closed by release()
+                    return
+                with conn:
+                    try:
+                        conn.settimeout(2)
+                        msg = conn.recv(64).decode(errors="replace").strip()
+                        conn.sendall(b"ok")
+                    except OSError:
+                        continue
+                try:
+                    handler(msg)
+                except Exception:
+                    pass
+        threading.Thread(target=loop, daemon=True).start()
+
+    def notify(self, msg: str, attempts: int = 15) -> bool:
+        """Tell the running app `msg`; retries while it may still be starting up. False if nobody answers."""
+        import socket
+        for i in range(attempts):
+            try:
+                if self._unix:
+                    s, addr = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM), str(self._sock_path)
+                else:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    addr = ("127.0.0.1", int(self._port_path.read_text()))
+                with s:
+                    s.settimeout(2)
+                    s.connect(addr)
+                    s.sendall(msg.encode())
+                    if s.recv(8) == b"ok":
+                        return True
+            except (OSError, ValueError):
+                pass
+            if i + 1 < attempts:
+                time.sleep(0.2)
+        return False
+
+
+DETACH_ENV = "CLAUDE_SWAP_DETACHED"
+
+
+def started_from_terminal() -> bool:
+    return os.environ.get(DETACH_ENV) != "1" and bool(sys.stdin) and sys.stdin.isatty()
+
+
+def detach_command(home: Path) -> tuple[list[str], dict]:
+    """argv + Popen options that relaunch this GUI outside the terminal's session, so closing the
+    terminal (SIGHUP on Linux/macOS, console close on Windows) no longer kills it."""
+    exe = sys.executable
+    if sys.platform == "win32" and not getattr(sys, "frozen", False):
+        pythonw = Path(exe).with_name("pythonw.exe")  # no console window of its own
+        exe = str(pythonw) if pythonw.exists() else exe
+    cmd = [exe] + ([] if getattr(sys, "frozen", False) else [str(Path(__file__).resolve())]) + sys.argv[1:]
+    log = open(profiles_dir(home) / ".gui.log", "w", encoding="utf-8")  # last run's errors, for debugging
+    kw: dict = {"stdin": subprocess.DEVNULL, "stdout": log, "stderr": log, "close_fds": True,
+                "env": {**os.environ, DETACH_ENV: "1"}}
+    if sys.platform == "win32":
+        kw["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kw["start_new_session"] = True  # setsid: no controlling terminal → no SIGHUP
+    return cmd, kw
+
+
+def run_gui(home: Path, start_hidden: bool = False, foreground: bool = False) -> int:
     missing = missing_deps()
-    if any(d["required"] for d in missing):
+    if any(d["required"] for d in missing):  # stays in the terminal: its fallback prints there
         show_setup_window(missing, install_commands(missing))
         return 1
+    instance = Instance(home)
+    if not instance.acquire():
+        # autostart (--tray) while the app already runs: stay quiet; a manual launch brings it forward
+        if instance.notify("ping" if start_hidden else "show"):
+            print("Claude Profiles đang chạy rồi — đã đưa cửa sổ lên trước.")
+        else:
+            print("Claude Profiles đang chạy rồi (chưa phản hồi, thử lại sau giây lát).")
+        return 0
+    if not foreground and started_from_terminal():
+        cmd, kw = detach_command(home)
+        instance.release()  # the detached child takes the lock over
+        try:
+            proc = subprocess.Popen(cmd, **kw)
+        finally:
+            kw["stdout"].close()
+        print(f"Claude Profiles đã chạy nền (pid {proc.pid}) — có thể đóng terminal. "
+              "Chạy kèm --foreground để giữ app trong terminal.")
+        return 0
+    try:
+        return _run_webview(home, missing, start_hidden, instance)
+    finally:
+        instance.release()
+
+
+def _run_webview(home: Path, missing: list[dict], start_hidden: bool, instance: Instance) -> int:
     tray = not any(d["module"] in ("pystray", "PIL") for d in missing)
     if tray and sys.platform.startswith("linux") and os.environ.get("WAYLAND_DISPLAY"):
         os.environ.setdefault("GDK_BACKEND", "x11")  # Wayland ignores window positions; the quick panel needs one
     import webview
     try:
-        build_windows(home, missing, start_hidden, tray)
+        api = build_windows(home, missing, start_hidden, tray)
+        instance.serve(lambda msg: msg == "show" and api.show_main())
         webview.start()
     except Exception as e:  # e.g. WebKitGTK missing even though pywebview imports
         webview_dep = [dict(zip(DEP_KEYS, DEPS[0]))]
@@ -1418,9 +1561,9 @@ if (window.pywebview && window.pywebview.api) start();
 def main() -> int:
     home = Path.home()
     args = sys.argv[1:]
-    if args and args != ["--tray"]:
+    if args and not set(args) <= {"--tray", "--foreground"}:
         return run_cli(args, home)
-    return run_gui(home, start_hidden=args == ["--tray"])
+    return run_gui(home, start_hidden="--tray" in args, foreground="--foreground" in args)
 
 
 if __name__ == "__main__":

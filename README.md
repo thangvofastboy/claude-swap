@@ -36,9 +36,16 @@ cần chạy cho Python bạn đang dùng.
 ### GUI
 
 ```bash
-python3 claude_swap.py          # cửa sổ chính
-python3 claude_swap.py --tray   # chạy nền ở thanh trên cùng (dùng cho khởi động cùng máy)
+python3 claude_swap.py                # cửa sổ chính, tự tách khỏi terminal (đóng terminal app vẫn chạy)
+python3 claude_swap.py --tray         # chạy nền ở thanh trên cùng (dùng cho khởi động cùng máy)
+python3 claude_swap.py --foreground   # giữ app gắn với terminal (để xem log khi debug)
 ```
+
+- Chạy từ terminal, app tự chạy lại ở session riêng (`setsid`; Windows: detached process) rồi trả terminal
+  về ngay, nên đóng terminal không làm tắt app. Lỗi của lần chạy nền gần nhất ghi ở
+  `~/.config/claude-cli-profiles/.gui.log`.
+- **Chỉ một bản chạy cùng lúc:** mở app lần nữa sẽ đưa cửa sổ đang chạy lên trước thay vì mở bản mới
+  (khởi động cùng máy khi app đã chạy thì không làm gì).
 
 1. Đăng nhập Claude CLI bằng tài khoản thứ nhất (`claude` → `/login`), bấm **Lưu**, đặt tên (ví dụ `work`).
 2. `/login` sang tài khoản khác, bấm **Lưu** lần nữa (ví dụ `personal`).
@@ -106,6 +113,5 @@ python3 smoke_test.py                      # CLI thật + cửa sổ thiếu th�
 
 ## Giới hạn đã biết
 
-- Chưa chặn chạy nhiều bản cùng lúc (mở 2 lần → 2 icon tray).
 - macOS chưa hỗ trợ icon tray (pystray và pywebview đều đòi luồng chính).
 - Trên GNOME Wayland, khi có tray app chạy GTK qua XWayland để đặt được vị trí bảng nhanh.

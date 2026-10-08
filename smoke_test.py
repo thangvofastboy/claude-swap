@@ -65,6 +65,43 @@ def main():
             print("Web GUI smoke: SKIP (Python này chưa có pywebview)")
             return
         web_gui_smoke(claude_swap, webview, home)
+        if sys.platform != "win32":
+            detach_and_single_instance_smoke()
+
+
+def detach_and_single_instance_smoke():
+    """Launch from a (pseudo) terminal: the app must detach into its own session and survive the
+    terminal; a second launch must not open a duplicate but wake the running one."""
+    import pty
+    import signal
+    home = Path(tempfile.mkdtemp(dir="/tmp", prefix="cs"))  # short: AF_UNIX path limit
+    env = {**os.environ, "HOME": str(home)}
+    env.pop("CLAUDE_SWAP_DETACHED", None)
+    _, tty = pty.openpty()
+    first = subprocess.run([sys.executable, str(APP)], stdin=tty, env=env, capture_output=True, text=True, timeout=30)
+    os.close(tty)
+    assert first.returncode == 0 and "chạy nền (pid" in first.stdout, first.stdout + first.stderr
+    pid = int(first.stdout.split("pid ")[1].split(")")[0])
+    try:
+        assert os.getsid(pid) != os.getsid(0), "detached app still shares the terminal's session"
+        sock = home / ".config" / "claude-cli-profiles" / ".gui.sock"
+        for _ in range(100):
+            if sock.exists():
+                break
+            time.sleep(0.2)
+        assert sock.exists(), (home / ".config/claude-cli-profiles/.gui.log").read_text()
+        second = subprocess.run([sys.executable, str(APP)], env=env, capture_output=True, text=True, timeout=30)
+        assert second.returncode == 0 and "đang chạy rồi — đã đưa cửa sổ" in second.stdout, second.stdout + second.stderr
+        os.kill(pid, 0)  # the first app is still the only one, still alive
+    finally:
+        os.kill(pid, signal.SIGTERM)
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+            time.sleep(0.1)
+        except ProcessLookupError:
+            break
+    print("Detach + single-instance smoke: OK")
 
 
 def setup_window_smoke(cs):

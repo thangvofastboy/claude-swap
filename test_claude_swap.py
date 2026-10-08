@@ -459,3 +459,56 @@ def test_usage_429_without_cache_or_retry_after(tmp_path):
     assert row["limits"] == [] and "thử lại sau" in row["note"] and "số liệu lúc" not in row["note"]
     cache = json.loads((cs.profiles_dir(tmp_path) / ".usage-cache.json").read_text())
     assert next(iter(cache.values()))["retry_at"] > cs.time.time() + cs.USAGE_BACKOFF - 5
+
+
+def _short_home():  # AF_UNIX paths are capped at ~104 chars; pytest's tmp_path can exceed that
+    import tempfile
+    from pathlib import Path
+    return Path(tempfile.mkdtemp(dir="/tmp", prefix="cs"))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX + flock path")
+def test_single_instance_lock_and_wakeup():
+    home = _short_home()
+    first, second = cs.Instance(home), cs.Instance(home)
+    assert first.acquire() and not second.acquire()
+    got = []
+    first.serve(got.append)
+    assert second.notify("show") and got == ["show"]
+    first.release()
+    assert not (cs.profiles_dir(home) / ".gui.sock").exists()
+    assert not second.notify("show", attempts=1)  # nobody listening any more
+    assert second.acquire()  # lock freed for the next launch
+    second.release()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX + flock path")
+def test_stale_socket_from_crashed_run_is_replaced():
+    home = _short_home()
+    (cs.profiles_dir(home) / ".gui.sock").write_text("left by a crash")
+    inst = cs.Instance(home)
+    assert inst.acquire()
+    inst.serve(lambda m: None)
+    assert cs.Instance(home).notify("ping", attempts=1)
+    inst.release()
+
+
+def test_detach_command_starts_new_session(monkeypatch, tmp_path):
+    monkeypatch.setattr(cs.sys, "argv", ["claude_swap.py", "--tray"])
+    cmd, kw = cs.detach_command(tmp_path)
+    kw["stdout"].close()
+    assert cmd[0] == cs.sys.executable and cmd[1].endswith("claude_swap.py") and cmd[2:] == ["--tray"]
+    assert kw["env"][cs.DETACH_ENV] == "1" and kw["stdin"] is cs.subprocess.DEVNULL
+    assert kw.get("start_new_session") or kw.get("creationflags")
+    assert (cs.profiles_dir(tmp_path) / ".gui.log").exists()
+    monkeypatch.setenv(cs.DETACH_ENV, "1")
+    assert not cs.started_from_terminal()  # the detached child never detaches again
+
+
+def test_main_routes_gui_flags(monkeypatch):
+    seen = []
+    monkeypatch.setattr(cs, "run_gui", lambda home, start_hidden, foreground: seen.append((start_hidden, foreground)) or 0)
+    for argv in ([], ["--tray"], ["--foreground"], ["--tray", "--foreground"]):
+        monkeypatch.setattr(cs.sys, "argv", ["x", *argv])
+        cs.main()
+    assert seen == [(False, False), (True, False), (False, True), (True, True)]
