@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import child_process from 'node:child_process'
+import crypto from 'node:crypto'
 
 export const AUTH_KEYS = ['oauthAccount', 'primaryApiKey', 'customApiKeyResponses']
 export const KEYCHAIN_SERVICE = 'Claude Code-credentials'
@@ -1072,6 +1073,94 @@ export function sendNotification(home, title, message) {
   } catch {}
 }
 
+// ---------------------------------------------------------------- encryption
+
+export function exportEncryptedProfiles(home, targetPath, password) {
+  if (!password) throw new SwapError('Vui lòng cung cấp mật khẩu mã hóa.')
+  const profiles = {}
+  for (const name of listProfiles(home)) {
+    try {
+      profiles[name] = JSON.parse(fs.readFileSync(profilePath(home, name), 'utf-8'))
+    } catch {}
+  }
+  const payload = JSON.stringify({
+    version: 1,
+    profiles,
+    autoSwitch: loadAutoSwitchConfig(home),
+    projectBindings: loadProjectBindings(home),
+  })
+
+  const salt = crypto.randomBytes(16)
+  const iv = crypto.randomBytes(12)
+  const key = crypto.pbkdf2Sync(password, salt, 100000, 32, 'sha512')
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv)
+  const encrypted = Buffer.concat([cipher.update(payload, 'utf-8'), cipher.final()])
+  const tag = cipher.getAuthTag()
+
+  const container = {
+    format: 'claude-swap-encrypted',
+    version: 1,
+    kdf: 'pbkdf2-sha512',
+    iterations: 100000,
+    salt: salt.toString('hex'),
+    iv: iv.toString('hex'),
+    tag: tag.toString('hex'),
+    data: encrypted.toString('hex'),
+  }
+
+  const resolved = path.resolve(targetPath)
+  fs.mkdirSync(path.dirname(resolved), { recursive: true })
+  fs.writeFileSync(resolved, JSON.stringify(container, null, 2), 'utf-8')
+  return { path: resolved, count: Object.keys(profiles).length }
+}
+
+export function importEncryptedProfiles(home, sourcePath, password, overwrite = false) {
+  if (!password) throw new SwapError('Vui lòng cung cấp mật khẩu giải mã.')
+  const resolved = path.resolve(sourcePath)
+  if (!fs.existsSync(resolved)) {
+    throw new SwapError(`Không tìm thấy file: ${sourcePath}`)
+  }
+  let container
+  try {
+    container = JSON.parse(fs.readFileSync(resolved, 'utf-8'))
+    if (container.format !== 'claude-swap-encrypted') {
+      throw new Error('Định dạng không khớp')
+    }
+  } catch (err) {
+    throw new SwapError(`File sao lưu không hợp lệ: ${err.message}`)
+  }
+
+  let payload
+  try {
+    const salt = Buffer.from(container.salt, 'hex')
+    const iv = Buffer.from(container.iv, 'hex')
+    const tag = Buffer.from(container.tag, 'hex')
+    const data = Buffer.from(container.data, 'hex')
+    const key = crypto.pbkdf2Sync(password, salt, container.iterations || 100000, 32, 'sha512')
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv)
+    decipher.setAuthTag(tag)
+    const decrypted = Buffer.concat([decipher.update(data), decipher.final()])
+    payload = JSON.parse(decrypted.toString('utf-8'))
+  } catch {
+    throw new SwapError('Mật khẩu giải mã không chính xác hoặc dữ liệu file bị hỏng.')
+  }
+
+  const result = { added: [], exists: [] }
+  const profiles = payload.profiles || {}
+  for (const [name, data] of Object.entries(profiles)) {
+    if (!NAME_RE.test(name)) continue
+    const target = profilePath(home, name)
+    if (fs.existsSync(target) && !overwrite) {
+      result.exists.push(name)
+      continue
+    }
+    atomicWrite(target, JSON.stringify(data, null, 2))
+    result.added.push(name)
+  }
+
+  return result
+}
+
 // ---------------------------------------------------------------- cli
 
 export async function runCli(argv, home = os.homedir()) {
@@ -1320,6 +1409,30 @@ export async function runCli(argv, home = os.homedir()) {
         }
         for (const [tag, profiles] of entries) {
           console.log(`🏷️ ${tag}: ${profiles.join(', ')}`)
+        }
+        return 0
+      }
+      case 'export': {
+        const targetPath = filteredArgv[1]
+        if (!targetPath) throw new SwapError('Cú pháp: /profile export <đường dẫn file> [--password <mật khẩu>]')
+        const passIndex = filteredArgv.indexOf('--password')
+        const password = passIndex !== -1 ? filteredArgv[passIndex + 1] : ''
+        if (!password) throw new SwapError('Vui lòng cung cấp mật khẩu với --password <mật khẩu>.')
+        const res = exportEncryptedProfiles(home, targetPath, password)
+        console.log(`Đã xuất ${res.count} profiles đã mã hóa ra: ${res.path}`)
+        return 0
+      }
+      case 'import-enc': {
+        const sourcePath = filteredArgv[1]
+        if (!sourcePath) throw new SwapError('Cú pháp: /profile import-enc <đường dẫn file> [--password <mật khẩu>] [--force]')
+        const passIndex = filteredArgv.indexOf('--password')
+        const password = passIndex !== -1 ? filteredArgv[passIndex + 1] : ''
+        if (!password) throw new SwapError('Vui lòng cung cấp mật khẩu với --password <mật khẩu>.')
+        const force = filteredArgv.includes('--force')
+        const res = importEncryptedProfiles(home, sourcePath, password, force)
+        console.log(`Đã nhập thành công: ${res.added.join(', ') || '(không có profile mới)'}`)
+        if (res.exists.length > 0) {
+          console.log(`Bỏ qua profile đã tồn tại (dùng --force để ghi đè): ${res.exists.join(', ')}`)
         }
         return 0
       }

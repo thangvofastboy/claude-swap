@@ -374,5 +374,31 @@ describe('swap.js core functionality', () => {
     assert.equal(await runCli(['untag', 'p_other_work', 'company'], tmpHome), 0)
     assert.equal(await runCli(['auto', 'pool', 'all'], tmpHome), 0)
   })
+
+  test('encrypted export and import with AES-256-GCM', async () => {
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'work')
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'personal')
+
+    const exportFile = path.join(os.tmpdir(), `backup-${Date.now()}.enc`)
+    const newHome = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-new-home-'))
+
+    try {
+      // Export with password
+      assert.equal(await runCli(['export', exportFile, '--password', 'secret123'], tmpHome), 0)
+      assert.ok(fs.existsSync(exportFile))
+
+      // Import with wrong password should fail
+      assert.equal(await runCli(['import-enc', exportFile, '--password', 'wrong_pass'], newHome), 1)
+
+      // Import with correct password into newHome
+      assert.equal(await runCli(['import-enc', exportFile, '--password', 'secret123'], newHome), 0)
+      assert.deepEqual(listProfiles(newHome), ['personal', 'work'])
+    } finally {
+      try { fs.unlinkSync(exportFile) } catch {}
+      try { fs.rmSync(newHome, { recursive: true, force: true }) } catch {}
+    }
+  })
 })
 
