@@ -246,4 +246,33 @@ test('/profile dispatches lang subcommands', async ($, on) => {
   ])
 })
 
+test('/profile dispatches new Batch 4 subcommands: disable, enable, disabled, add-token, run', async ($, on) => {
+  const calls: string[][] = []
+  on('process.run', async (_$, { argv }) => {
+    calls.push(argv.slice(2))
+    return ok('OK')
+  })
+  on('ui.status', () => ({ value: undefined }))
+
+  await $.command.run({ command: 'profile', args: 'disable work' })
+  await $.command.run({ command: 'profile', args: 'enable work' })
+  await $.command.run({ command: 'profile', args: 'disabled' })
+  await $.command.run({ command: 'profile', args: 'add-token sk-ant-api03-test my-api' })
+  await $.command.run({ command: 'profile', args: 'run work' })
+
+  expect(calls).toEqual([
+    ['disable', 'work'],
+    ['current'],
+    ['enable', 'work'],
+    ['current'],
+    ['disabled'],
+    ['current'],
+    ['add-token', 'sk-ant-api03-test', 'my-api'],
+    ['current'],
+    ['run', 'work'],
+    ['current'],
+  ])
+})
+
+
 

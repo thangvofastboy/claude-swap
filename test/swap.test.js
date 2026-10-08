@@ -57,6 +57,15 @@ import {
   loadLanguage,
   setLanguage,
   languageFile,
+  disableProfile,
+  enableProfile,
+  isProfileDisabled,
+  loadDisabledProfiles,
+  addTokenProfile,
+  prepareSession,
+  syncSessionBack,
+  sessionDir,
+  profilePath,
 } from '../swap.js'
 
 function login(home, account, token, extra = {}) {
@@ -809,6 +818,86 @@ describe('swap.js core functionality', () => {
     assert.equal(formatCooldowns(tmpHome, null, 'en'), 'No profiles found.')
     assert.equal(formatForecastReport(tmpHome, 'en'), 'No profiles found.')
     assert.match(formatCleanupReport({ duplicates: [], expiredTokens: [], corruptFiles: [] }, false, 'en'), /Awesome/)
+  })
+
+  test('disabled profiles: exclude from auto-switch rotation and CLI', async () => {
+    login(tmpHome, 'p1', 'tok-1')
+    saveProfile(tmpHome, 'p1')
+    login(tmpHome, 'p2', 'tok-2')
+    saveProfile(tmpHome, 'p2')
+
+    assert.equal(isProfileDisabled(tmpHome, 'p1'), false)
+    disableProfile(tmpHome, 'p1')
+    assert.equal(isProfileDisabled(tmpHome, 'p1'), true)
+    assert.deepEqual(loadDisabledProfiles(tmpHome), ['p1'])
+
+    // /profile list shows disabled badge
+    const listOut = profileListReport(tmpHome, false)
+    assert.match(listOut, /\(disabled\)/)
+
+    // Re-enable
+    enableProfile(tmpHome, 'p1')
+    assert.equal(isProfileDisabled(tmpHome, 'p1'), false)
+
+    // CLI commands
+    assert.equal(await runCli(['disable', 'p2'], tmpHome), 0)
+    assert.equal(isProfileDisabled(tmpHome, 'p2'), true)
+    assert.equal(await runCli(['disabled'], tmpHome), 0)
+    assert.equal(await runCli(['disabled', '--json'], tmpHome), 0)
+    assert.equal(await runCli(['enable', 'p2'], tmpHome), 0)
+    assert.equal(isProfileDisabled(tmpHome, 'p2'), false)
+  })
+
+  test('addTokenProfile: register from API key and OAuth token directly', async () => {
+    // API key registration
+    const apiRes = addTokenProfile(tmpHome, 'sk-ant-api03-secret-key-123', 'my-api-profile')
+    assert.equal(apiRes.name, 'my-api-profile')
+    assert.equal(apiRes.type, 'api_key')
+    assert.ok(listProfiles(tmpHome).includes('my-api-profile'))
+
+    const saved = JSON.parse(fs.readFileSync(apiRes.path, 'utf-8'))
+    assert.equal(saved.claude_json.primaryApiKey, 'sk-ant-api03-secret-key-123')
+
+    // OAuth token registration with auto-generated name
+    const oauthRes = addTokenProfile(tmpHome, 'sk-ant-oat01-my-oauth-token', null, { email: 'custom@domain.com' })
+    assert.equal(oauthRes.type, 'oauth_token')
+    assert.equal(oauthRes.email, 'custom@domain.com')
+    assert.ok(oauthRes.name.startsWith('token-'))
+
+    const savedOauth = JSON.parse(fs.readFileSync(oauthRes.path, 'utf-8'))
+    assert.equal(savedOauth.claude_json.oauthAccount.emailAddress, 'custom@domain.com')
+    assert.match(savedOauth.credentials, /sk-ant-oat01-my-oauth-token/)
+
+    // CLI command
+    assert.equal(await runCli(['add-token', 'sk-ant-api03-cli-token', 'cli-api'], tmpHome), 0)
+    assert.ok(listProfiles(tmpHome).includes('cli-api'))
+  })
+
+  test('isolated session: prepareSession, syncSessionBack and environment directory', async () => {
+    login(tmpHome, 'session_user', 'tok-session')
+    saveProfile(tmpHome, 'session-acc')
+
+    const sDir = prepareSession(tmpHome, 'session-acc')
+    assert.ok(fs.existsSync(sDir))
+    assert.ok(fs.existsSync(path.join(sDir, '.claude.json')))
+    assert.ok(fs.existsSync(path.join(sDir, '.claude', '.credentials.json')))
+
+    // Simulate token refresh during the isolated session
+    const refreshedCreds = JSON.stringify({ claudeAiOauth: { accessToken: 'new-refreshed-token' } })
+    fs.writeFileSync(path.join(sDir, '.claude', '.credentials.json'), refreshedCreds)
+
+    syncSessionBack(tmpHome, 'session-acc', sDir)
+    const updated = JSON.parse(fs.readFileSync(profilePath(tmpHome, 'session-acc'), 'utf-8'))
+    assert.equal(updated.credentials, refreshedCreds)
+  })
+
+  test('JSON output mode for list and current', async () => {
+    login(tmpHome, 'json_user', 'tok-json')
+    saveProfile(tmpHome, 'json_user')
+
+    // Capture stdout or run CLI
+    assert.equal(await runCli(['list', '--json'], tmpHome), 0)
+    assert.equal(await runCli(['current', '--json'], tmpHome), 0)
   })
 })
 

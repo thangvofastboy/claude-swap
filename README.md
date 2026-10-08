@@ -141,6 +141,12 @@ claude --plugin-dir /path/to/claude-swap
 | `/profile import <thư mục> [--force]` | Nhập các profile thô từ thư mục khác |
 | `/profile folder` | Mở thư mục chứa file cấu hình profile |
 | `/profile lang [vi\|en]` | Xem hoặc chuyển đổi ngôn ngữ hiển thị (Tiếng Việt / English) |
+| `/profile run <tên> [-- cmd]` | Chạy session Claude Code song song độc lập cho profile chỉ định |
+| `/profile add-token <token> [tên]` | Tạo profile trực tiếp từ setup-token hoặc API key không qua trình duyệt |
+| `/profile disable <tên>` | Tạm loại trừ profile khỏi vòng xoay auto-switch (vẫn switch thủ công được) |
+| `/profile enable <tên>` | Bật lại profile vào vòng xoay auto-switch |
+| `/profile disabled` | Xem danh sách các profile đang bị loại khỏi auto-switch |
+| `/profile list --json` | Xuất danh sách profiles dưới định dạng JSON cho kịch bản |
 
 Ví dụ hiển thị khi gõ `/profile`:
 

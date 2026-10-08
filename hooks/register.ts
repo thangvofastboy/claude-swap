@@ -42,9 +42,14 @@ const SUBCOMMANDS = new Set([
   'cleanup',
   'lang',
   'language',
+  'disable',
+  'enable',
+  'disabled',
+  'add-token',
+  'run',
 ])
 const USAGE =
-  'Dùng: /profile | /profile list | /profile <tên|alias> | /profile pick | /profile lang [vi|en] | /profile auto | /profile forecast | /profile cooldown | /profile doctor | /profile cleanup | /profile bind-branch <pat> | /profile sync'
+  'Dùng: /profile | /profile list | /profile <tên|alias> | /profile pick | /profile lang [vi|en] | /profile run <tên> | /profile add-token <tok> | /profile disable <tên> | /profile auto | /profile sync'
 
 // "" → help, "list" → list, "work" → swap work, "save work" → save work, "import ~/a b" → import "~/a b", "auto ..." → auto ...
 function toArgv(args: string): string[] | undefined {

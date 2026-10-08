@@ -860,15 +860,22 @@ export function profileListReport(home, color = null, lang = null) {
       summary = useColor ? `  \x1b[38;5;214m(${hit.note})\x1b[0m` : `  (${hit.note})`
     }
 
+    const disabled = isProfileDisabled(home, n)
+    const disabledBadge = disabled
+      ? useColor
+        ? '  \x1b[33m(disabled)\x1b[0m'
+        : '  (disabled)'
+      : ''
+
     const emailStr = email ? `  👤 ${email}` : ''
 
     if (useColor) {
       const nameAndActive = active ? `${n} (Active)` : n
       const nameColored = active ? `\x1b[1;32m${nameAndActive}\x1b[0m` : `\x1b[1;37m${n}\x1b[0m`
       const emailColored = email ? `  \x1b[38;5;248m👤 ${email}\x1b[0m` : ''
-      lines.push(`${icon} ${nameColored}${emailColored}${tagBadge}${summary}`)
+      lines.push(`${icon} ${nameColored}${emailColored}${tagBadge}${disabledBadge}${summary}`)
     } else {
-      lines.push(`${icon} ${n}${activeStr}${emailStr}${tagBadge}${summary}`)
+      lines.push(`${icon} ${n}${activeStr}${emailStr}${tagBadge}${disabledBadge}${summary}`)
     }
   }
   return lines.join('\n')
@@ -1352,6 +1359,7 @@ export function findNextProfile(home, options = {}) {
   const candidates = []
   for (const name of allProfiles) {
     if (name === cur) continue
+    if (isProfileDisabled(home, name)) continue
 
     const email = profileEmail(home, name)
     const key = `${name}|${email}`
@@ -1365,9 +1373,10 @@ export function findNextProfile(home, options = {}) {
           continue
         }
       }
+      const hasApiKey = Boolean(profile.claude_json?.primaryApiKey)
       const oauth = JSON.parse(profile.credentials || '{}').claudeAiOauth || {}
-      if (!oauth.accessToken) continue
-      if (typeof oauth.expiresAt === 'number' && oauth.expiresAt / 1000 < Date.now() / 1000) {
+      if (!oauth.accessToken && !hasApiKey) continue
+      if (!hasApiKey && typeof oauth.expiresAt === 'number' && oauth.expiresAt / 1000 < Date.now() / 1000) {
         continue
       }
     } catch {
@@ -2326,6 +2335,182 @@ export function cleanupProfiles(home, options = {}) {
   return { ...analysis, cleaned }
 }
 
+// ---------------------------------------------------------------- disabled profiles (auto-switch exclusion)
+
+export function disabledProfilesFile(home = os.homedir()) {
+  return path.join(profilesDir(home), '.disabled.json')
+}
+
+export function loadDisabledProfiles(home = os.homedir()) {
+  const f = disabledProfilesFile(home)
+  if (fs.existsSync(f)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(f, 'utf8'))
+      if (Array.isArray(data)) return data
+    } catch {}
+  }
+  return []
+}
+
+export function saveDisabledProfiles(home = os.homedir(), list) {
+  const f = disabledProfilesFile(home)
+  atomicWrite(f, JSON.stringify([...new Set(list)], null, 2))
+}
+
+export function disableProfile(home = os.homedir(), name) {
+  const resolved = resolveProfileOrAlias(home, name)
+  if (!profileExists(home, resolved)) {
+    throw new SwapError(`Profile '${name}' không tồn tại.`)
+  }
+  const list = loadDisabledProfiles(home)
+  if (!list.includes(resolved)) {
+    list.push(resolved)
+    saveDisabledProfiles(home, list)
+  }
+  return resolved
+}
+
+export function enableProfile(home = os.homedir(), name) {
+  const resolved = resolveProfileOrAlias(home, name)
+  const list = loadDisabledProfiles(home)
+  const filtered = list.filter(p => p !== resolved)
+  saveDisabledProfiles(home, filtered)
+  return resolved
+}
+
+export function isProfileDisabled(home = os.homedir(), name) {
+  const list = loadDisabledProfiles(home)
+  return list.includes(name)
+}
+
+// ---------------------------------------------------------------- direct token / api key registration
+
+export function addTokenProfile(home = os.homedir(), token, name = null, options = {}) {
+  const trimmedToken = (token || '').trim()
+  if (!trimmedToken) {
+    throw new SwapError('Vui lòng cung cấp token hoặc API key.')
+  }
+  const isApiKey = trimmedToken.startsWith('sk-ant-api')
+  let profileName = name ? name.trim() : ''
+  if (!profileName) {
+    const existing = listProfiles(home)
+    let idx = 1
+    const prefix = isApiKey ? 'api-key' : 'token'
+    while (existing.includes(`${prefix}-${idx}`)) {
+      idx++
+    }
+    profileName = `${prefix}-${idx}`
+  }
+  checkName(profileName)
+  const target = profilePath(home, profileName)
+  if (fs.existsSync(target) && !options.force) {
+    throw new ProfileExists(`Profile '${profileName}' đã tồn tại. Dùng --force để ghi đè.`)
+  }
+
+  const email = options.email || (isApiKey ? `${profileName}@api.local` : `${profileName}@token.local`)
+  const auth = {}
+  let credentials = null
+
+  if (isApiKey) {
+    auth.primaryApiKey = trimmedToken
+  } else {
+    auth.oauthAccount = {
+      emailAddress: email,
+      accountUuid: `token-account-${Date.now()}`,
+    }
+    credentials = JSON.stringify({
+      claudeAiOauth: {
+        accessToken: trimmedToken,
+        expiresAt: Date.now() + 30 * 24 * 3600 * 1000,
+      },
+    })
+  }
+
+  const profile = {
+    claude_json: auth,
+    credentials,
+    tags: options.tag ? [options.tag] : [],
+  }
+
+  atomicWrite(target, JSON.stringify(profile, null, 2))
+  return {
+    name: profileName,
+    type: isApiKey ? 'api_key' : 'oauth_token',
+    email,
+    path: target,
+  }
+}
+
+// ---------------------------------------------------------------- isolated sessions (parallel execution)
+
+export function sessionDir(home = os.homedir(), name) {
+  const resolved = resolveProfileOrAlias(home, name)
+  return path.join(profilesDir(home), '.sessions', resolved)
+}
+
+export function prepareSession(home = os.homedir(), name) {
+  const resolved = resolveProfileOrAlias(home, name)
+  if (!profileExists(home, resolved)) {
+    throw new SwapError(`Profile '${name}' không tồn tại.`)
+  }
+  const sDir = sessionDir(home, resolved)
+  fs.mkdirSync(path.join(sDir, '.claude'), { recursive: true, mode: 0o700 })
+
+  const pData = JSON.parse(fs.readFileSync(profilePath(home, resolved), 'utf-8'))
+  const cj = path.join(sDir, '.claude.json')
+  const baseClaudeJson = fs.existsSync(claudeJson(home)) ? loadClaudeJson(home) : {}
+  const sessionData = { ...baseClaudeJson, ...(pData.claude_json || {}) }
+  atomicWrite(cj, JSON.stringify(sessionData, null, 2))
+
+  if (pData.credentials) {
+    const credFile = path.join(sDir, '.claude', '.credentials.json')
+    atomicWrite(credFile, pData.credentials)
+  }
+  return sDir
+}
+
+export function syncSessionBack(home = os.homedir(), name, sDir) {
+  const resolved = resolveProfileOrAlias(home, name)
+  const target = profilePath(home, resolved)
+  if (!fs.existsSync(target)) return
+
+  try {
+    const pData = JSON.parse(fs.readFileSync(target, 'utf-8'))
+    const cj = path.join(sDir, '.claude.json')
+    if (fs.existsSync(cj)) {
+      const liveJson = JSON.parse(fs.readFileSync(cj, 'utf-8'))
+      for (const k of AUTH_KEYS) {
+        if (k in liveJson) {
+          pData.claude_json = pData.claude_json || {}
+          pData.claude_json[k] = liveJson[k]
+        }
+      }
+    }
+    const credFile = path.join(sDir, '.claude', '.credentials.json')
+    if (fs.existsSync(credFile)) {
+      pData.credentials = fs.readFileSync(credFile, 'utf-8')
+    }
+    atomicWrite(target, JSON.stringify(pData, null, 2))
+  } catch {}
+}
+
+export function runSession(home = os.homedir(), name, cmdArgs = ['claude']) {
+  const resolved = resolveProfileOrAlias(home, name)
+  const sDir = prepareSession(home, resolved)
+  const [bin, ...args] = cmdArgs && cmdArgs.length ? cmdArgs : ['claude']
+  const env = {
+    ...process.env,
+    CLAUDE_CONFIG_DIR: sDir,
+  }
+  const res = child_process.spawnSync(bin, args, {
+    env,
+    stdio: 'inherit',
+    cwd: process.cwd(),
+  })
+  syncSessionBack(home, resolved, sDir)
+  return res.status ?? 0
+}
+
 // ---------------------------------------------------------------- cli
 
 export function formatHelpReport(color = null, lang = 'vi') {
@@ -2351,6 +2536,12 @@ export function formatHelpReport(color = null, lang = 'vi') {
       `  ${cmd('/profile usage')}             Detailed 5h, 7d and per-model quotas`,
       `  ${cmd('/profile folder')}            Open profile config directory`,
       `  ${cmd('/profile lang [vi|en]')}      View or switch language (Vietnamese / English)`,
+      `  ${cmd('/profile run <name> [-- cmd]')} Run isolated Claude Code session in parallel`,
+      `  ${cmd('/profile add-token <tok> [n]')} Register profile from setup-token or API key`,
+      `  ${cmd('/profile disable <name>')}     Exclude profile from auto-switch rotation`,
+      `  ${cmd('/profile enable <name>')}      Re-enable profile in auto-switch rotation`,
+      `  ${cmd('/profile disabled')}           List profiles excluded from auto-switch`,
+      `  ${cmd('/profile list --json')}        Output profiles list in JSON format`,
       '',
       `🤖 ${bold('Auto-Switching & Quota:')}`,
       `  ${cmd('/profile auto')}              View auto-switch status`,
@@ -2415,6 +2606,12 @@ export function formatHelpReport(color = null, lang = 'vi') {
     `  ${cmd('/profile usage')}             Xem chi tiết quota 5h, 7d và từng model`,
     `  ${cmd('/profile folder')}            Mở thư mục chứa file cấu hình profile`,
     `  ${cmd('/profile lang [vi|en]')}      Xem hoặc đổi ngôn ngữ (Tiếng Việt / English)`,
+    `  ${cmd('/profile run <tên> [-- cmd]')} Chạy session Claude Code độc lập song song`,
+    `  ${cmd('/profile add-token <tok> [tên]')} Tạo profile từ setup-token hoặc API key`,
+    `  ${cmd('/profile disable <tên>')}     Tạm dừng auto-switch đối với profile`,
+    `  ${cmd('/profile enable <tên>')}      Bật lại auto-switch cho profile`,
+    `  ${cmd('/profile disabled')}           Xem danh sách profile đang bị tạm dừng auto`,
+    `  ${cmd('/profile list --json')}        Xuất danh sách profile dưới dạng JSON`,
     '',
     `🤖 ${bold('Tự động chuyển đổi & Quota:')}`,
     `  ${cmd('/profile auto')}              Xem trạng thái tự động chuyển profile`,
@@ -2504,6 +2701,23 @@ export async function runCli(argv, home = os.homedir()) {
         return 0
       }
       case 'list': {
+        if (filteredArgv.includes('--json')) {
+          const profiles = listProfiles(home)
+          const cur = currentProfile(home)
+          const disabled = loadDisabledProfiles(home)
+          const data = {
+            active: cur,
+            profiles: profiles.map(p => ({
+              name: p,
+              active: p === cur,
+              email: profileEmail(home, p) || null,
+              tags: getProfileTags(home, p),
+              disabled: disabled.includes(p),
+            })),
+          }
+          console.log(JSON.stringify(data, null, 2))
+          return 0
+        }
         const refresh = filteredArgv.includes('--refresh')
         try {
           await usageRows(home, fetchUsage, refresh)
@@ -2512,8 +2726,100 @@ export async function runCli(argv, home = os.homedir()) {
         return 0
       }
       case 'current': {
+        if (filteredArgv.includes('--json')) {
+          const cur = currentProfile(home)
+          console.log(
+            JSON.stringify(
+              {
+                current: cur,
+                email: cur ? profileEmail(home, cur) || null : null,
+              },
+              null,
+              2
+            )
+          )
+          return 0
+        }
         console.log(currentProfile(home) || '')
         return 0
+      }
+      case 'disable': {
+        const target = filteredArgv[1]
+        if (!target) {
+          throw new SwapError(lang === 'en' ? 'Usage: /profile disable <name>' : 'Cú pháp: /profile disable <tên>')
+        }
+        const dis = disableProfile(home, target)
+        console.log(
+          lang === 'en'
+            ? `🚫 Disabled auto-switch for profile '${dis}'.`
+            : `🚫 Đã tạm tắt tự động chuyển đối với profile '${dis}'.`
+        )
+        return 0
+      }
+      case 'enable': {
+        const target = filteredArgv[1]
+        if (!target) {
+          throw new SwapError(lang === 'en' ? 'Usage: /profile enable <name>' : 'Cú pháp: /profile enable <tên>')
+        }
+        const en = enableProfile(home, target)
+        console.log(
+          lang === 'en'
+            ? `✅ Enabled auto-switch for profile '${en}'.`
+            : `✅ Đã bật lại tự động chuyển đối với profile '${en}'.`
+        )
+        return 0
+      }
+      case 'disabled': {
+        const list = loadDisabledProfiles(home)
+        if (filteredArgv.includes('--json')) {
+          console.log(JSON.stringify(list, null, 2))
+          return 0
+        }
+        if (list.length === 0) {
+          console.log(
+            lang === 'en'
+              ? 'No profiles are currently disabled from auto-switch.'
+              : 'Không có profile nào đang bị tắt tự động chuyển.'
+          )
+          return 0
+        }
+        console.log(
+          lang === 'en'
+            ? '🚫 Profiles excluded from auto-switch:'
+            : '🚫 Danh sách profile đang tắt tự động chuyển:'
+        )
+        for (const p of list) {
+          console.log(`  • ${p}`)
+        }
+        return 0
+      }
+      case 'add-token': {
+        const token = filteredArgv[1]
+        const pName = filteredArgv[2] && !filteredArgv[2].startsWith('--') ? filteredArgv[2] : null
+        const emailIdx = filteredArgv.indexOf('--email')
+        const email = emailIdx !== -1 ? filteredArgv[emailIdx + 1] : null
+        const force = filteredArgv.includes('--force')
+        const res = addTokenProfile(home, token, pName, { email, force })
+        console.log(
+          lang === 'en'
+            ? `🔑 Successfully registered profile '${res.name}' (${res.type}).`
+            : `🔑 Đã tạo thành công profile '${res.name}' (loại: ${res.type === 'api_key' ? 'API Key' : 'OAuth Token'}).`
+        )
+        return 0
+      }
+      case 'run': {
+        const target = filteredArgv[1]
+        if (!target) {
+          throw new SwapError(
+            lang === 'en'
+              ? 'Usage: /profile run <name> [-- <command...>]'
+              : 'Cú pháp: /profile run <tên> [-- <lệnh...>]'
+          )
+        }
+        const dashDash = filteredArgv.indexOf('--')
+        const cmdArgs = dashDash !== -1 ? filteredArgv.slice(dashDash + 1) : ['claude']
+        const code = runSession(home, target, cmdArgs)
+        return code
       }
       case 'usage': {
         const refresh = filteredArgv.includes('--refresh')
