@@ -74,6 +74,12 @@ claude --plugin-dir /path/to/claude-swap
 | `/profile` | Liệt kê các profile kèm icon 🟢/⚪, email 👤 và thanh usage tóm tắt |
 | `/profile <tên>` | Chuyển sang profile `<tên>` |
 | `/profile usage` | Xem chi tiết quota 5 giờ / 7 ngày / theo model của từng profile |
+| `/profile auto` | Xem trạng thái tự động chuyển profile khi vượt ngưỡng token |
+| `/profile auto on` / `off` | Bật / tắt tính năng tự động chuyển profile |
+| `/profile auto threshold <%>` | Thiết lập ngưỡng % mức dùng để tự động switch (mặc định: `95%`) |
+| `/profile auto order <ds>` | Cài đặt thứ tự ưu tiên các account sẽ switch (vd: `work,personal`) |
+| `/profile auto order default` | Chuyển về quy tắc tự động (nhiều token hơn + reset sớm hơn) |
+| `/profile auto check` | Kiểm tra quota và switch ngay nếu vượt ngưỡng |
 | `/profile new <tên> [--force]` | Tạo profile mới từ tài khoản hiện tại |
 | `/profile save <tên> [--force]` | Lưu thông tin đăng nhập hiện tại vào profile |
 | `/profile delete <tên>` | Xoá profile |

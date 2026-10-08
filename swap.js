@@ -730,6 +730,163 @@ export async function usageReport(home, fetchFn = fetchUsage, force = false, col
   return lines.join('\n')
 }
 
+// ---------------------------------------------------------------- auto-switch
+
+export function autoSwitchConfigFile(home) {
+  return path.join(profilesDir(home), '.auto-switch.json')
+}
+
+export function loadAutoSwitchConfig(home) {
+  const f = autoSwitchConfigFile(home)
+  try {
+    if (fs.existsSync(f)) {
+      const parsed = JSON.parse(fs.readFileSync(f, 'utf-8'))
+      return {
+        enabled: parsed.enabled !== false,
+        threshold: typeof parsed.threshold === 'number' ? parsed.threshold : 95,
+        order: Array.isArray(parsed.order) ? parsed.order : [],
+      }
+    }
+  } catch {}
+  return { enabled: true, threshold: 95, order: [] }
+}
+
+export function saveAutoSwitchConfig(home, config) {
+  const f = autoSwitchConfigFile(home)
+  atomicWrite(f, JSON.stringify(config, null, 2))
+}
+
+function parseResetTime(hit, lim) {
+  if (hit?.resets_at_epoch) return Number(hit.resets_at_epoch)
+  if (hit?.resets_at) {
+    const t = new Date(hit.resets_at).getTime()
+    if (!isNaN(t)) return t
+  }
+  if (lim && lim[2]) {
+    const match = String(lim[2]).match(/(\d{1,2}):(\d{2})/)
+    if (match) {
+      const d = new Date()
+      d.setHours(parseInt(match[1], 10), parseInt(match[2], 10), 0, 0)
+      return d.getTime()
+    }
+  }
+  return Number.MAX_SAFE_INTEGER
+}
+
+export function findNextProfile(home, options = {}) {
+  const config = options.config || loadAutoSwitchConfig(home)
+  const allProfiles = listProfiles(home)
+  const cur = currentProfile(home)
+  const cache = options.cache || loadUsageCache(home)
+
+  const candidates = []
+  for (const name of allProfiles) {
+    if (name === cur) continue
+
+    const email = profileEmail(home, name)
+    const key = `${name}|${email}`
+    const hit = cache[key] && typeof cache[key] === 'object' ? cache[key] : {}
+
+    try {
+      const profile = JSON.parse(fs.readFileSync(profilePath(home, name), 'utf-8'))
+      const oauth = JSON.parse(profile.credentials || '{}').claudeAiOauth || {}
+      if (!oauth.accessToken) continue
+      if (typeof oauth.expiresAt === 'number' && oauth.expiresAt / 1000 < Date.now() / 1000) {
+        continue
+      }
+    } catch {
+      continue
+    }
+
+    const limits = Array.isArray(hit.limits) ? hit.limits : []
+    const fiveHour = limits.find(l => l[0] === '5 giờ') || limits[0]
+    const rawUtil = fiveHour ? Number(fiveHour[1]) : 0
+    const util = rawUtil <= 1 && rawUtil > 0 ? rawUtil * 100 : rawUtil
+
+    if (util >= config.threshold) {
+      continue
+    }
+
+    const resetTime = parseResetTime(hit, fiveHour)
+    candidates.push({ name, util, resetTime })
+  }
+
+  if (candidates.length === 0) {
+    return null
+  }
+
+  if (config.order && config.order.length > 0) {
+    for (const orderedName of config.order) {
+      const found = candidates.find(c => c.name === orderedName)
+      if (found) {
+        return found.name
+      }
+    }
+  }
+
+  candidates.sort((a, b) => {
+    if (a.util !== b.util) {
+      return a.util - b.util
+    }
+    return a.resetTime - b.resetTime
+  })
+
+  return candidates[0].name
+}
+
+export async function autoCheckAndSwap(home, options = {}) {
+  const config = options.config || loadAutoSwitchConfig(home)
+  if (!config.enabled) {
+    return { swapped: false, reason: 'disabled' }
+  }
+
+  const cur = currentProfile(home)
+  if (!cur) {
+    return { swapped: false, reason: 'no_current' }
+  }
+
+  const email = profileEmail(home, cur)
+  const cache = options.cache || loadUsageCache(home)
+  const key = `${cur}|${email}`
+  const hit = cache[key] && typeof cache[key] === 'object' ? cache[key] : {}
+
+  const limits = Array.isArray(hit.limits) ? hit.limits : []
+  const fiveHour = limits.find(l => l[0] === '5 giờ') || limits[0]
+  const rawUtil = fiveHour ? Number(fiveHour[1]) : 0
+  const util = rawUtil <= 1 && rawUtil > 0 ? rawUtil * 100 : rawUtil
+
+  const isRateLimited = Boolean(hit.retry_at && hit.retry_at > Date.now() / 1000)
+  if (isRateLimited || util >= config.threshold) {
+    const next = findNextProfile(home, { config, cache })
+    if (next && next !== cur) {
+      swapProfile(home, next)
+      return {
+        swapped: true,
+        from: cur,
+        to: next,
+        util,
+        threshold: config.threshold,
+        rateLimited: isRateLimited,
+      }
+    }
+    return {
+      swapped: false,
+      reason: 'no_candidate',
+      current: cur,
+      util,
+      threshold: config.threshold,
+    }
+  }
+
+  return {
+    swapped: false,
+    reason: 'below_threshold',
+    current: cur,
+    util,
+    threshold: config.threshold,
+  }
+}
+
 // ---------------------------------------------------------------- cli
 
 export async function runCli(argv, home = os.homedir()) {
@@ -819,6 +976,78 @@ export async function runCli(argv, home = os.homedir()) {
         deleteProfile(home, name)
         console.log(`Đã xoá '${name}'.`)
         return 0
+      }
+      case 'auto': {
+        const sub = filteredArgv[1]
+        const cfg = loadAutoSwitchConfig(home)
+
+        if (!sub || sub === 'status') {
+          console.log(`Tự động chuyển profile: ${cfg.enabled ? '🟢 BẬT' : '⚪ TẮT'} (Ngưỡng: ${cfg.threshold}%)`)
+          if (cfg.order && cfg.order.length > 0) {
+            console.log(`Thứ tự ưu tiên: ${cfg.order.join(' -> ')}`)
+          } else {
+            console.log('Quy tắc chọn: Tự động (Ưu tiên còn nhiều token hơn, thời gian reset 5h ngắn hơn)')
+          }
+          return 0
+        }
+
+        if (sub === 'on') {
+          cfg.enabled = true
+          saveAutoSwitchConfig(home, cfg)
+          console.log('Đã BẬT tự động chuyển profile.')
+          return 0
+        }
+
+        if (sub === 'off') {
+          cfg.enabled = false
+          saveAutoSwitchConfig(home, cfg)
+          console.log('Đã TẮT tự động chuyển profile.')
+          return 0
+        }
+
+        if (sub === 'threshold') {
+          const val = parseFloat(filteredArgv[2])
+          if (isNaN(val) || val < 1 || val > 100) {
+            console.error('Ngưỡng không hợp lệ. Vui lòng nhập số từ 1 đến 100.')
+            return 1
+          }
+          cfg.threshold = Math.round(val)
+          saveAutoSwitchConfig(home, cfg)
+          console.log(`Đã đặt ngưỡng tự động chuyển sang profile khác: ${cfg.threshold}%.`)
+          return 0
+        }
+
+        if (sub === 'order') {
+          const val = filteredArgv[2]
+          if (!val || val === 'default' || val === 'none') {
+            cfg.order = []
+            saveAutoSwitchConfig(home, cfg)
+            console.log('Đã chuyển về quy tắc chọn profile tự động (nhiều token hơn, reset sớm hơn).')
+            return 0
+          }
+          const names = val.split(',').map(s => s.trim()).filter(Boolean)
+          cfg.order = names
+          saveAutoSwitchConfig(home, cfg)
+          console.log(`Đã đặt thứ tự chuyển profile: ${names.join(' -> ')}.`)
+          return 0
+        }
+
+        if (sub === 'check') {
+          const res = await autoCheckAndSwap(home)
+          if (res.swapped) {
+            console.log(`[auto-swap] Đã tự động chuyển từ '${res.from}' sang '${res.to}' (mức dùng: ${res.util}% >= ngưỡng ${res.threshold}%).`)
+          } else if (res.reason === 'no_candidate') {
+            console.log(`[auto-swap] Profile '${res.current}' đạt mức ${res.util}% nhưng không có profile thay thế khả dụng.`)
+          } else if (res.reason === 'disabled') {
+            console.log('Tự động chuyển profile đang tắt.')
+          } else {
+            console.log(`Không cần chuyển profile (mức dùng: ${res.util}%, ngưỡng: ${res.threshold}%).`)
+          }
+          return 0
+        }
+
+        console.error(`Lệnh auto không hợp lệ: ${sub}. Dùng: /profile auto [on|off|threshold <%>|order <danh sách>|check]`)
+        return 1
       }
       default:
         console.error(`Lệnh không hợp lệ: ${cmd}`)

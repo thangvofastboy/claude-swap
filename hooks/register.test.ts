@@ -26,7 +26,7 @@ test('/profile <name> swaps through swap.js and shows it on the status line', as
   expect(statuses).toEqual(['● work'])
 })
 
-test('/profile maps subcommands and rejects junk', async ($, on) => {
+test('/profile maps subcommands including auto and rejects junk', async ($, on) => {
   const calls: string[][] = []
   on('process.run', async (_$, { argv }) => {
     calls.push(argv.slice(2))
@@ -37,6 +37,8 @@ test('/profile maps subcommands and rejects junk', async ($, on) => {
   expect((await $.command.run({ command: 'profile', args: '' })).text).toContain('Chưa có profile')
   await $.command.run({ command: 'profile', args: 'save work --force' })
   await $.command.run({ command: 'profile', args: 'new personal' })
+  await $.command.run({ command: 'profile', args: 'auto threshold 80' })
+  await $.command.run({ command: 'profile', args: 'auto order p1,p2' })
   expect((await $.command.run({ command: 'profile', args: 'a b' })).text).toContain('Dùng:')
 
   expect(calls).toEqual([
@@ -45,6 +47,10 @@ test('/profile maps subcommands and rejects junk', async ($, on) => {
     ['save', 'work', '--force'],
     ['current'],
     ['new', 'personal'],
+    ['current'],
+    ['auto', 'threshold', '80'],
+    ['current'],
+    ['auto', 'order', 'p1,p2'],
     ['current'],
   ])
 })
@@ -60,4 +66,30 @@ test('/profile import keeps a path with spaces as one argument', async ($, on) =
   await $.command.run({ command: 'profile', args: 'import /home/me/old profiles --force' })
   expect(calls[0]).toEqual(['import', '/home/me/old profiles', '--force'])
   expect((await $.command.run({ command: 'profile', args: 'import' })).text).toContain('Dùng:')
+})
+
+test('prompt.submit automatically checks and switches profile if limit exceeded', async ($, on) => {
+  const calls: string[][] = []
+  const statuses: (string | undefined)[] = []
+  on('process.run', async (_$, { argv }) => {
+    calls.push(argv.slice(2))
+    if (argv[2] === 'auto' && argv[3] === 'check') {
+      return ok("[auto-swap] Đã tự động chuyển từ 'work' sang 'personal' (mức dùng: 96% >= ngưỡng 95%).\n")
+    }
+    if (argv[2] === 'current') {
+      return ok('personal\n')
+    }
+    return ok('')
+  })
+  on('ui.status', (_$, { text }) => {
+    statuses.push(text)
+    return { value: undefined }
+  })
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+
+  // Submit prompt
+  await $.prompt.submit({ text: 'test prompt' })
+
+  expect(calls).toEqual([['auto', 'check'], ['current']])
+  expect(statuses).toEqual(['● personal'])
 })

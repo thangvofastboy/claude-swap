@@ -228,4 +228,84 @@ describe('swap.js core functionality', () => {
     assert.equal(currentProfile(tmpHome), 'work')
     assert.equal(await runCli(['delete', 'personal'], tmpHome), 0)
   })
+
+  test('auto-switch config load, save and CLI commands', async () => {
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'p1')
+
+    // Default config
+    assert.equal(await runCli(['auto'], tmpHome), 0)
+
+    // Set threshold
+    assert.equal(await runCli(['auto', 'threshold', '85'], tmpHome), 0)
+    assert.equal(await runCli(['auto', 'threshold', 'invalid'], tmpHome), 1)
+
+    // Set order
+    assert.equal(await runCli(['auto', 'order', 'p1,p2,p3'], tmpHome), 0)
+
+    // Reset order
+    assert.equal(await runCli(['auto', 'order', 'default'], tmpHome), 0)
+
+    // Toggle on/off
+    assert.equal(await runCli(['auto', 'off'], tmpHome), 0)
+    assert.equal(await runCli(['auto', 'on'], tmpHome), 0)
+  })
+
+  test('auto-switch selects profile by custom order', async () => {
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'current')
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'candidate1')
+    login(tmpHome, 'c', 'tok-c')
+    saveProfile(tmpHome, 'candidate2')
+    swapProfile(tmpHome, 'current')
+
+    const mockUsageData = {
+      'current|a@example.com': { limits: [['5 giờ', 96, '20:00']], resets_at_epoch: 1000 },
+      'candidate1|b@example.com': { limits: [['5 giờ', 60, '20:00']], resets_at_epoch: 2000 },
+      'candidate2|c@example.com': { limits: [['5 giờ', 30, '20:00']], resets_at_epoch: 3000 },
+    }
+    // Save cache
+    const cacheFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json')
+    fs.writeFileSync(cacheFile, JSON.stringify(mockUsageData))
+
+    // Set order: candidate1 first, even though candidate2 has lower usage
+    const configFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.auto-switch.json')
+    fs.writeFileSync(configFile, JSON.stringify({ enabled: true, threshold: 90, order: ['candidate1', 'candidate2'] }))
+
+    const res = await runCli(['auto', 'check'], tmpHome)
+    assert.equal(res, 0)
+    assert.equal(currentProfile(tmpHome), 'candidate1')
+  })
+
+  test('auto-switch selects profile by rule: lower utilization, then earlier reset', async () => {
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'current')
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'acc_high_util')
+    login(tmpHome, 'c', 'tok-c')
+    saveProfile(tmpHome, 'acc_same_util_reset_later')
+    login(tmpHome, 'd', 'tok-d')
+    saveProfile(tmpHome, 'acc_same_util_reset_earlier')
+    swapProfile(tmpHome, 'current')
+
+    const mockUsageData = {
+      'current|a@example.com': { limits: [['5 giờ', 98, '20:00']], resets_at: '2026-10-08T20:00:00Z' },
+      'acc_high_util|b@example.com': { limits: [['5 giờ', 70, '20:00']], resets_at: '2026-10-08T19:30:00Z' },
+      'acc_same_util_reset_later|c@example.com': { limits: [['5 giờ', 40, '22:00']], resets_at: '2026-10-08T22:00:00Z' },
+      'acc_same_util_reset_earlier|d@example.com': { limits: [['5 giờ', 40, '20:00']], resets_at: '2026-10-08T20:00:00Z' },
+    }
+    const cacheFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json')
+    fs.writeFileSync(cacheFile, JSON.stringify(mockUsageData))
+
+    // No custom order -> rule-based
+    const configFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.auto-switch.json')
+    fs.writeFileSync(configFile, JSON.stringify({ enabled: true, threshold: 90, order: [] }))
+
+    const res = await runCli(['auto', 'check'], tmpHome)
+    assert.equal(res, 0)
+    // acc_same_util_reset_earlier has 40% and earlier reset than acc_same_util_reset_later
+    assert.equal(currentProfile(tmpHome), 'acc_same_util_reset_earlier')
+  })
 })
+
