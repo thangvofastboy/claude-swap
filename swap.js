@@ -860,6 +860,7 @@ export async function autoCheckAndSwap(home, options = {}) {
     const next = findNextProfile(home, { config, cache })
     if (next && next !== cur) {
       swapProfile(home, next)
+      sendNotification(home, 'claude-swap', `Đã chuyển sang '${next}' (mức dùng: ${util}% >= ngưỡng ${config.threshold}%)`)
       return {
         swapped: true,
         from: cur,
@@ -971,6 +972,43 @@ export function getBoundProfile(home, startDir = process.cwd()) {
   }
 
   return null
+}
+
+// ---------------------------------------------------------------- notifications
+
+export function notificationConfigFile(home) {
+  return path.join(profilesDir(home), '.notification-config.json')
+}
+
+export function loadNotificationConfig(home) {
+  const f = notificationConfigFile(home)
+  try {
+    return fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf-8')) : { enabled: true }
+  } catch {
+    return { enabled: true }
+  }
+}
+
+export function saveNotificationConfig(home, config) {
+  const f = notificationConfigFile(home)
+  atomicWrite(f, JSON.stringify(config, null, 2))
+}
+
+export function sendNotification(home, title, message) {
+  const config = loadNotificationConfig(home)
+  if (!config.enabled) return
+
+  try {
+    if (process.platform === 'linux') {
+      child_process.spawn('notify-send', [title, message], { detached: true, stdio: 'ignore' }).unref()
+    } else if (process.platform === 'darwin') {
+      const script = `display notification "${message.replace(/"/g, '\\"')}" with title "${title.replace(/"/g, '\\"')}"`
+      child_process.spawn('osascript', ['-e', script], { detached: true, stdio: 'ignore' }).unref()
+    } else if (process.platform === 'win32') {
+      const psScript = `[reflection.assembly]::loadwithpartialname('System.Windows.Forms'); [System.Windows.Forms.MessageBox]::Show('${message.replace(/'/g, "''")}', '${title.replace(/'/g, "''")}')`
+      child_process.spawn('powershell', ['-Command', psScript], { detached: true, stdio: 'ignore' }).unref()
+    }
+  } catch {}
 }
 
 // ---------------------------------------------------------------- cli
@@ -1159,6 +1197,28 @@ export async function runCli(argv, home = os.homedir()) {
         const res = unbindProfile(home, targetDir)
         console.log(`Đã gỡ liên kết profile cho thư mục '${res.dir}'.`)
         return 0
+      }
+      case 'notify': {
+        const sub = filteredArgv[1]
+        const cfg = loadNotificationConfig(home)
+        if (!sub || sub === 'status') {
+          console.log(`Thông báo hệ thống: ${cfg.enabled ? '🟢 BẬT' : '⚪ TẮT'}`)
+          return 0
+        }
+        if (sub === 'on') {
+          cfg.enabled = true
+          saveNotificationConfig(home, cfg)
+          console.log('Đã BẬT thông báo hệ thống.')
+          return 0
+        }
+        if (sub === 'off') {
+          cfg.enabled = false
+          saveNotificationConfig(home, cfg)
+          console.log('Đã TẮT thông báo hệ thống.')
+          return 0
+        }
+        console.error(`Lệnh notify không hợp lệ: ${sub}. Dùng: /profile notify [on|off]`)
+        return 1
       }
       default:
         console.error(`Lệnh không hợp lệ: ${cmd}`)

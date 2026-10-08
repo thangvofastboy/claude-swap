@@ -331,5 +331,11 @@ describe('swap.js core functionality', () => {
       fs.rmSync(projectDir, { recursive: true, force: true })
     }
   })
+
+  test('notification config toggle and CLI', async () => {
+    assert.equal(await runCli(['notify'], tmpHome), 0)
+    assert.equal(await runCli(['notify', 'off'], tmpHome), 0)
+    assert.equal(await runCli(['notify', 'on'], tmpHome), 0)
+  })
 })
 
