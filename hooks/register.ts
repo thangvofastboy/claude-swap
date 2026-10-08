@@ -49,15 +49,28 @@ const SUBCOMMANDS = new Set([
   'run',
   'version',
   'upgrade',
+  'web',
+  'dashboard',
+  'balance',
+  'webhook',
+  'budget',
+  'cost',
+  'mask',
+  'share',
+  'completion',
 ])
 const USAGE =
-  'Dùng: /profile | /profile list | /profile <tên|alias> | /profile pick | /profile lang [vi|en] | /profile run <tên> | /profile add-token <tok> | /profile disable <tên> | /profile auto | /profile sync | /profile upgrade'
+  'Dùng: /profile | /profile list | /profile <tên|alias> | /profile pick | /profile web | /profile balance | /profile webhook | /profile lang [vi|en] | /profile run <tên> | /profile add-token <tok> | /profile disable <tên> | /profile auto | /profile sync'
 
 // "" → help, "list" → list, "work" → swap work, "save work" → save work, "import ~/a b" → import ~/a b, "auto ..." → auto ...
 function toArgv(args: string): string[] | undefined {
   const words = args.trim().split(/\s+/).filter(Boolean)
   if (words.length === 0 || words[0] === '--help' || words[0] === '-h') return ['help']
   if (words[0] === 'version' || words[0] === '--version' || words[0] === '-v') return ['version']
+  if (words[0] === 'web' || words[0] === 'dashboard') {
+    if (words[1] === 'stop') return words
+    if (!words.includes('--daemon')) return [words[0], '--daemon', ...words.slice(1)]
+  }
   if (words[0] === 'import') {
     const path = words.slice(1).filter(w => w !== '--force').join(' ')
     if (!path) return undefined

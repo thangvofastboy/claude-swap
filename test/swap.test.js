@@ -67,7 +67,26 @@ import {
   sessionDir,
   profilePath,
   upgradePlugin,
+  loadBalanceConfig,
+  saveBalanceConfig,
+  getNextBalancedProfile,
+  balanceSwap,
+  loadWebhookConfig,
+  saveWebhookConfig,
+  testWebhook,
+  loadBudgetConfig,
+  saveBudgetConfig,
+  setBudgetLimit,
+  removeBudgetLimit,
+  formatBudgetReport,
+  isMaskingEnabled,
+  setMasking,
+  maskEmail,
+  maskToken,
+  exportSafeShare,
+  generateCompletion,
 } from '../swap.js'
+import { startWebDashboard, getDashboardData, stopWebDashboard } from '../web.js'
 
 function login(home, account, token, extra = {}) {
   const data = {
@@ -976,6 +995,141 @@ describe('swap.js core functionality', () => {
     assert.throws(() => upgradePlugin(failFirst), /marketplace update claude-swap' thất bại \(mã 1\):\nnetwork down/)
     assert.equal(n, 1)
     assert.throws(() => upgradePlugin(() => ({ error: new Error('ENOENT') })), /Không chạy được/)
+  })
+
+  test('smart load balancing: modes, config and CLI', async () => {
+    login(tmpHome, 'bal_a', 'tok-bal-a')
+    saveProfile(tmpHome, 'bal_a')
+    login(tmpHome, 'bal_b', 'tok-bal-b')
+    saveProfile(tmpHome, 'bal_b')
+
+    const cfg = loadBalanceConfig(tmpHome)
+    assert.equal(cfg.enabled, false)
+    assert.equal(cfg.mode, 'least-used')
+
+    saveBalanceConfig(tmpHome, { enabled: true, mode: 'round-robin' })
+    const next1 = getNextBalancedProfile(tmpHome)
+    assert.ok(['bal_a', 'bal_b'].includes(next1))
+
+    assert.equal(await runCli(['balance', 'status'], tmpHome), 0)
+    assert.equal(await runCli(['balance', 'on'], tmpHome), 0)
+    assert.equal(await runCli(['balance', 'mode', 'least-used'], tmpHome), 0)
+    assert.equal(await runCli(['balance', 'pool', 'all'], tmpHome), 0)
+    assert.equal(await runCli(['balance', 'next'], tmpHome), 0)
+    assert.equal(await runCli(['balance', 'off'], tmpHome), 0)
+  })
+
+  test('webhook configuration, payload dispatch and CLI', async () => {
+    const cfg = loadWebhookConfig(tmpHome)
+    assert.equal(cfg.telegram, null)
+
+    saveWebhookConfig(tmpHome, {
+      discord: 'https://discord.com/api/webhooks/mock',
+    })
+    const updated = loadWebhookConfig(tmpHome)
+    assert.equal(updated.discord, 'https://discord.com/api/webhooks/mock')
+
+    assert.equal(await runCli(['webhook', 'status'], tmpHome), 0)
+    assert.equal(await runCli(['webhook', 'set', 'discord', 'https://discord.com/api/webhooks/test'], tmpHome), 0)
+    assert.equal(await runCli(['webhook', 'unset', 'discord'], tmpHome), 0)
+  })
+
+  test('budget limits, cost reporting and CLI', async () => {
+    login(tmpHome, 'bud_user', 'tok-bud')
+    saveProfile(tmpHome, 'bud_user')
+
+    setBudgetLimit(tmpHome, 'bud_user', 45.5)
+    const cfg = loadBudgetConfig(tmpHome)
+    assert.equal(cfg.limits['bud_user'], 45.5)
+
+    const rep = formatBudgetReport(tmpHome, 'vi')
+    assert.match(rep, /bud_user: 45.50 USD/)
+
+    assert.equal(await runCli(['budget', 'status'], tmpHome), 0)
+    assert.equal(await runCli(['budget', 'set', 'bud_user', '60'], tmpHome), 0)
+    assert.equal(await runCli(['budget', 'unset', 'bud_user'], tmpHome), 0)
+  })
+
+  test('masking and safe share configuration', async () => {
+    assert.equal(isMaskingEnabled(tmpHome), false)
+    setMasking(tmpHome, true)
+    assert.equal(isMaskingEnabled(tmpHome), true)
+
+    assert.equal(maskEmail('john.doe@example.com', true), 'jo***@example.com')
+    assert.equal(maskToken('sk-ant-api03-abcdef123456', true), 'sk-a***3456')
+
+    login(tmpHome, 'share_acc', 'tok-secret')
+    saveProfile(tmpHome, 'share_acc')
+
+    const outPath = path.join(tmpHome, 'safe-share.json')
+    const res = exportSafeShare(tmpHome, outPath)
+    assert.ok(fs.existsSync(outPath))
+    const parsed = JSON.parse(fs.readFileSync(outPath, 'utf-8'))
+    assert.ok(parsed.profiles['share_acc'])
+    assert.ok(!parsed.profiles['share_acc'].credentials)
+    assert.ok(!parsed.profiles['share_acc'].claude_json)
+
+    assert.equal(await runCli(['mask', 'on'], tmpHome), 0)
+    assert.equal(await runCli(['mask', 'off'], tmpHome), 0)
+    assert.equal(await runCli(['share'], tmpHome), 0)
+  })
+
+  test('shell completion generators', async () => {
+    const bash = generateCompletion('bash')
+    assert.match(bash, /complete -F _claude_swap_completions/)
+    assert.match(bash, /balance/)
+    assert.match(bash, /webhook/)
+    assert.match(bash, /web/)
+
+    const zsh = generateCompletion('zsh')
+    assert.match(zsh, /compdef _claude_swap/)
+
+    const fish = generateCompletion('fish')
+    assert.match(fish, /complete -c swap.js/)
+
+    assert.equal(await runCli(['completion', 'bash'], tmpHome), 0)
+    assert.equal(await runCli(['completion', 'zsh'], tmpHome), 0)
+    assert.equal(await runCli(['completion', 'fish'], tmpHome), 0)
+  })
+
+  test('web dashboard server and API endpoints', async () => {
+    login(tmpHome, 'web_a', 'tok-web-a')
+    saveProfile(tmpHome, 'web_a')
+    login(tmpHome, 'web_b', 'tok-web-b')
+    saveProfile(tmpHome, 'web_b')
+
+    const data = getDashboardData(tmpHome)
+    assert.ok(Array.isArray(data.profiles))
+    assert.equal(data.profiles.length, 2)
+    assert.ok(data.auto)
+    assert.ok(data.balance)
+
+    const dash = await startWebDashboard(tmpHome, { port: 3799, open: false })
+    assert.ok(dash.url.includes('3799'))
+
+    // Verify GET /
+    const htmlRes = await fetch(dash.url)
+    assert.equal(htmlRes.status, 200)
+    const htmlText = await htmlRes.text()
+    assert.match(htmlText, /claude-swap/)
+    assert.match(htmlText, /Web UI/)
+
+    // Verify GET /api/data
+    const dataRes = await fetch(`${dash.url}/api/data`)
+    assert.equal(dataRes.status, 200)
+    const json = await dataRes.json()
+    assert.equal(json.profiles.length, 2)
+
+    // Verify POST /api/action swap
+    const actRes = await fetch(`${dash.url}/api/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'swap', profile: 'web_b' }),
+    })
+    assert.equal(actRes.status, 200)
+    assert.equal(currentProfile(tmpHome), 'web_b')
+
+    dash.close()
   })
 })
 

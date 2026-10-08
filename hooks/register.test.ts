@@ -274,5 +274,39 @@ test('/profile dispatches new Batch 4 subcommands: disable, enable, disabled, ad
   ])
 })
 
+test('/profile dispatches new Batch 5 subcommands: web, balance, webhook, budget, mask, share, completion', async ($, on) => {
+  const calls: string[][] = []
+  on('process.run', async (_$, { argv }) => {
+    calls.push(argv.slice(2))
+    return ok('OK')
+  })
+  on('ui.status', () => ({ value: undefined }))
+
+  await $.command.run({ command: 'profile', args: 'web' })
+  await $.command.run({ command: 'profile', args: 'balance status' })
+  await $.command.run({ command: 'profile', args: 'webhook status' })
+  await $.command.run({ command: 'profile', args: 'budget status' })
+  await $.command.run({ command: 'profile', args: 'mask on' })
+  await $.command.run({ command: 'profile', args: 'share out.json' })
+  await $.command.run({ command: 'profile', args: 'completion bash' })
+
+  expect(calls).toEqual([
+    ['web', '--daemon'],
+    ['current'],
+    ['balance', 'status'],
+    ['current'],
+    ['webhook', 'status'],
+    ['current'],
+    ['budget', 'status'],
+    ['current'],
+    ['mask', 'on'],
+    ['current'],
+    ['share', 'out.json'],
+    ['current'],
+    ['completion', 'bash'],
+    ['current'],
+  ])
+})
+
 
 

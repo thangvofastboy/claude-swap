@@ -14,6 +14,7 @@
 [Tính năng](#-tính-năng) ·
 [Cài đặt](#-cài-đặt) ·
 [Bắt đầu nhanh](#-bắt-đầu-nhanh) ·
+[Web Dashboard](#-web-dashboard--cấu-hình-trực-quan) ·
 [Bảng lệnh đầy đủ](#-bảng-lệnh-profile) ·
 [Session song song](#-chạy-session-song-song-cách-ly) ·
 [Cách hoạt động](#-cách-hoạt-động) ·
@@ -34,9 +35,15 @@ Plugin chạy trực tiếp trên môi trường **Node.js** sẵn có của Cla
 
 | Nhóm | Chi tiết tính năng |
 | --- | --- |
+| 🌐 **Web Dashboard UI** | Bảng điều khiển web hiện đại (`/profile web`), 1-click switch, cấu hình trực tiếp plugin trên trình duyệt và trang tài liệu hướng dẫn chuyên sâu. |
 | 💾 **Quản lý Profile** | Tạo, lưu, chuyển đổi, xóa profile. Hỗ trợ `/profile new <tên>`, `/profile save <tên>`, `/profile delete <tên>`. |
 | 🔤 **Profile Aliases** | Đặt tên viết tắt ngắn gọn (vd: `w` ➔ `work-company`) để chuyển cực nhanh bằng `/profile w`. |
 | 🎛️ **Interactive Picker** | Gõ `/profile pick` để chọn profile bằng phím mũi tên `↑` `↓` trực quan ngay trong terminal. |
+| ⚖️ **Smart Load Balancing** | Chủ động phân bổ lưu lượng quota qua thuật toán `least-used` (ưu tiên còn nhiều token nhất) hoặc `round-robin` với `/profile balance`. |
+| 🔔 **Notification Webhooks**| Gửi thông báo tức thì đến Telegram, Discord, Slack hoặc Generic Webhook khi chạm ngưỡng hoặc đổi account (`/profile webhook`). |
+| 💰 **Budget & Cost Tracker** | Thiết lập trần ngân sách chi tiêu tối đa hàng tháng theo từng tài khoản (`/profile budget`). |
+| 🛡️ **Masking & Safe Share** | Tự động che mờ email cá nhân (`us***@domain.com`) và xuất file cấu hình an toàn không chứa token (`/profile mask`, `/profile share`). |
+| ⌨️ **Shell Auto-Completion** | Tự động sinh mã gợi ý lệnh qua phím `Tab` cho Bash, Zsh, Fish (`/profile completion`). |
 | 🚀 **Parallel Sessions** | Chạy session Claude Code độc lập song song (`/profile run <tên>`) với môi trường cách ly hoàn toàn. |
 | 🔑 **Setup-Token & API Key** | Đăng ký trực tiếp profile từ token không cần browser với `/profile add-token <tok\|->` (hỗ trợ đọc bảo mật từ `stdin`). |
 | 🚫 **Disable / Enable Auto** | Tạm loại trừ profile khỏi auto-switch (`/profile disable <tên>`) mà không cần xóa tài khoản. |
@@ -51,7 +58,6 @@ Plugin chạy trực tiếp trên môi trường **Node.js** sẵn có của Cla
 | ☁️ **Đồng bộ mã hóa (Sync)** | Đẩy/kéo bản sao lưu mã hóa AES-256 an toàn đa thiết bị (`/profile sync push` / `pull`). |
 | 💻 **Shell Prompt & Tmux** | Hiển thị active profile & usage % cực nhanh (<5ms) trên prompt Starship, Zsh, Bash hoặc thanh Tmux. |
 | ⏳ **Mượn profile tạm (Temp)** | Mượn tạm profile thứ hai trong thời gian định trước (vd: `30m`, `1h`) và tự động hoàn trả khi hết giờ. |
-| 🔔 **Thông báo Desktop** | Nhận thông báo banner trên màn hình khi hệ thống tự động đổi profile. |
 | 📊 **JSON Output Mode** | Hỗ trợ cờ `--json` trên `/profile list`, `/profile current`, `/profile disabled` phục vụ viết script/CI. |
 | 🌐 **Bilingual (vi / en)** | Đổi ngôn ngữ mượt mà giữa Tiếng Việt và Tiếng Anh chỉ với một lệnh `/profile lang [vi\|en]`. |
 | ⚡ **Zero Token Cost** | Mọi lệnh `/profile` là plugin hook xử lý tức thì ở local, **không tốn lượt hỏi hay token model**. |
@@ -86,15 +92,32 @@ claude --plugin-dir /path/to/claude-swap
    ```text
    /profile new personal
    ```
-3. Xem hướng dẫn lệnh hoặc danh sách profile:
+3. Xem danh sách profile hoặc mở Web Dashboard:
    ```text
-   /profile         # Hiển thị bảng hướng dẫn sử dụng tất cả các lệnh
    /profile list    # Hiển thị danh sách profile kèm thanh usage %
+   /profile web     # Mở giao diện Web Dashboard trực quan
    ```
 4. Chuyển đổi giữa các profile bất kỳ lúc nào:
    ```text
    /profile work
    ```
+
+---
+
+## 🌐 Web Dashboard & Cấu hình Trực quan
+
+Khởi chạy giao diện Web Dashboard trực quan và hiện đại ngay trên trình duyệt máy tính:
+
+```bash
+/profile web              # Mở Dashboard tại http://localhost:3737
+/profile web --port 8080  # Tùy chỉnh cổng port
+/profile web stop         # Dừng web dashboard chạy ngầm
+```
+
+- **Giao diện hiện đại & Dark Mode:** Xem tình trạng tất cả các profile, thẻ đo % quota 5h & 7d theo thời gian thực và đồng hồ đếm ngược reset cooldown trực quan.
+- **1-Click Profile Switch:** Chuyển đổi sang bất kỳ profile nào chỉ bằng 1 cú nhấp chuột.
+- **Cấu hình Plugin trực tiếp:** Tùy chỉnh thanh trượt Auto-Switch Threshold %, Safeguard 7 ngày, Load Balancer, Webhooks, Ngân sách (Budget), và Chế độ che mờ bảo mật (Masking).
+- **Trang hướng dẫn chi tiết (Documentation Tab):** Tích hợp sẵn trang tra cứu và giải thích sâu toàn bộ tính năng, bảng lệnh, và mẹo sử dụng.
 
 ---
 
@@ -119,14 +142,35 @@ claude --plugin-dir /path/to/claude-swap
 | `/profile lang [vi\|en]` | Xem hoặc đổi ngôn ngữ hiển thị (Tiếng Việt / English) |
 | `/profile version` | Xem phiên bản hiện tại của plugin |
 
-### 🚀 Chạy song song & Token trực tiếp
+### 🚀 Giao diện Web, Cân bằng tải & Tiện ích Nâng cao
+
+| Lệnh | Mô tả |
+| --- | --- |
+| `/profile web [--port <p>]` | Mở Web Dashboard trực quan và cấu hình plugin trên trình duyệt |
+| `/profile web stop` | Dừng Web Dashboard đang chạy ngầm |
+| `/profile balance [on\|off]` | Bật / tắt tính năng cân bằng tải Quota chủ động |
+| `/profile balance mode <least-used\|round-robin>` | Chọn thuật toán cân bằng tải (ưu tiên token nhiều nhất hoặc luân phiên) |
+| `/profile balance pool <tag\|all>` | Giới hạn cân bằng tải trong nhóm có tag |
+| `/profile balance next` | Chuyển ngay sang profile tiếp theo theo thuật toán cân bằng |
+| `/profile webhook [status]` | Xem trạng thái các Webhook cảnh báo từ xa |
+| `/profile webhook set <telegram\|discord\|slack\|generic> <url>` | Thiết lập đường dẫn Webhook |
+| `/profile webhook unset <type>` | Gỡ bỏ Webhook |
+| `/profile webhook test` | Gửi thử thông báo kiểm tra kết nối Webhook |
+| `/profile budget [status]` | Xem danh sách hạn mức ngân sách hàng tháng |
+| `/profile budget set <tên> <số_tiền>` | Đặt hạn mức chi tiêu hàng tháng cho profile |
+| `/profile budget unset <tên>` | Xóa hạn mức ngân sách |
+| `/profile mask [on\|off]` | Bật / tắt che mờ thông tin email & token cá nhân |
+| `/profile share [file.json]` | Xuất gói cấu hình an toàn (không chứa token/credentials) |
+| `/profile completion [bash\|zsh\|fish]` | Sinh mã tự động gợi ý phím Tab cho shell |
+
+### ⚡ Session Song Song & Token Trực Tiếp
 
 | Lệnh | Mô tả |
 | --- | --- |
 | `/profile run <tên> [-- cmd]` | Chạy session Claude Code độc lập song song cho profile chỉ định |
 | `/profile add-token <tok> [tên]` | Tạo profile trực tiếp từ setup-token hoặc API key |
 | `echo $TOK \| node swap.js add-token - [tên]` | Nhập token an toàn từ `stdin` không lưu vào history shell |
-| `/profile upgrade` | Cập nhật plugin lên bản mới nhất từ marketplace (khởi động lại Claude Code để áp dụng) |
+| `/profile upgrade` | Cập nhật plugin lên bản mới nhất từ marketplace |
 | `/profile disable <tên>` | Tạm dừng đưa profile vào vòng xoay auto-switch |
 | `/profile enable <tên>` | Bật lại profile vào vòng xoay auto-switch |
 | `/profile disabled [--json]` | Xem danh sách các profile đang bị tạm dừng auto |
@@ -167,7 +211,7 @@ claude --plugin-dir /path/to/claude-swap
 | `/profile unaffinity <model>` | Gỡ gán model affinity |
 | `/profile affinities` | Xem danh sách gán model affinity |
 
-### ⏳ Mượn tạm, Tiện ích & Đồng bộ (Sync)
+### ⏳ Mượn tạm & Đồng bộ (Sync)
 
 | Lệnh | Mô tả |
 | --- | --- |
@@ -210,8 +254,8 @@ claude --plugin-dir /path/to/claude-swap
 node swap.js list
 node swap.js swap work
 node swap.js usage
-node swap.js forecast
-node swap.js doctor
+node swap.js balance on
+node swap.js web
 ```
 
 ---
@@ -244,26 +288,6 @@ Profile được lưu tại `~/.config/claude-cli-profiles/<tên>.json` (phân q
 - Tự động sao lưu token mới nhất của profile hiện tại trước khi chuyển đổi (nếu token vừa được Claude Code tự động refresh).
 - Ghi nguyên tử (atomic write qua file tạm) và tự tạo bản backup `.bak` chống mất mát dữ liệu khi mất điện hoặc crash đột ngột.
 
-<details>
-<summary><b>Session đang chạy có nhận tài khoản mới ngay không?</b></summary>
-
-<br>
-
-**Không cần khởi động lại session**, nhưng có thể **chưa ngay ở prompt kế tiếp**: Claude Code giữ token trong bộ nhớ và chỉ đọc lại file khi kiểm tra đăng nhập (theo đợt, hoặc khi token cũ hết hạn). Gõ `/status` trong Claude Code để kiểm tra tài khoản đang áp dụng.
-
-</details>
-
-<details>
-<summary><b>Cách thức Usage API và chống Rate Limit (HTTP 429)</b></summary>
-
-<br>
-
-Số liệu được lấy trực tiếp từ endpoint usage của Anthropic:
-- Tự động cache kết quả trong 5 phút tại `~/.config/claude-cli-profiles/.usage-cache.json`.
-- Khi gặp **HTTP 429**, plugin tự động tuân thủ thời gian chờ `Retry-After` từ Anthropic và hiển thị số liệu gần nhất thay vì báo lỗi.
-
-</details>
-
 ---
 
 ## 🌐 Đa ngôn ngữ (vi / en)
@@ -288,9 +312,9 @@ export CLAUDE_SWAP_LANG=en
 Dự án có bộ test suite toàn diện kiểm tra mọi tính năng:
 
 ```bash
-npm test                   # Chạy 40 unit tests của swap.js (node --test)
+npm test                   # Chạy 46 unit tests của swap.js (node --test)
 claude plugin validate .   # Kiểm tra tính hợp lệ của manifest và hooks
-claude plugin test .       # Chạy 10 tests kiểm thử plugin hook của Claude Code
+claude plugin test .       # Chạy 11 tests kiểm thử plugin hook của Claude Code
 ```
 
 ### Cấu trúc dự án:
@@ -298,13 +322,14 @@ claude plugin test .       # Chạy 10 tests kiểm thử plugin hook của Clau
 ```text
 claude-swap/
 ├── swap.js               # Core engine xử lý profile, credentials, sync & usage (Node.js)
+├── web.js                # Web Dashboard Mini UI, REST API & Documentation
 ├── package.json          # Cấu hình project, test script & metadata
 ├── hooks/
 │   ├── hooks.json        # Đăng ký hook với Claude Code
 │   ├── register.ts       # Hook session.start, prompt.submit & command.run cho /profile
-│   └── register.test.ts  # Test suite cho plugin hooks
+│   └── register.test.ts  # Test suite cho plugin hooks (11 tests)
 ├── test/
-│   └── swap.test.js      # Unit tests cho swap.js (40 tests)
+│   └── swap.test.js      # Unit tests cho swap.js (46 tests)
 ├── LICENSE               # Giấy phép mã nguồn mở MIT
 └── .claude-plugin/       # Plugin manifest & marketplace config
 ```

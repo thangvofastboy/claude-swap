@@ -4,6 +4,8 @@ import os from 'node:os'
 import path from 'node:path'
 import child_process from 'node:child_process'
 import crypto from 'node:crypto'
+import http from 'node:http'
+import https from 'node:https'
 import { fileURLToPath } from 'node:url'
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
@@ -353,6 +355,16 @@ export function swapProfile(home, name, options = {}) {
     reason: options.reason || '',
     cwd: options.cwd || process.cwd(),
   })
+
+  try {
+    sendWebhookNotification(home, {
+      event: 'swap',
+      profile: resolved,
+      previousProfile: cur || null,
+      reason: options.reason || '',
+      type: options.type || 'manual',
+    }).catch(() => {})
+  } catch {}
 }
 
 // ---------------------------------------------------------------- history & stats
@@ -861,7 +873,8 @@ export function profileListReport(home, color = null, lang = null) {
 
   for (const n of profiles) {
     const active = n === cur
-    const email = profileEmail(home, n)
+    const rawEmail = profileEmail(home, n)
+    const email = maskEmail(rawEmail, isMaskingEnabled(home))
     const icon = active ? '🟢' : '⚪'
     const activeStr = active ? ' (Active)' : ''
 
@@ -2545,6 +2558,417 @@ export function runSession(home = os.homedir(), name, cmdArgs = ['claude']) {
   return res.status ?? 0
 }
 
+// ---------------------------------------------------------------- smart load balancing
+
+export function balanceConfigFile(home) {
+  return path.join(profilesDir(home), '.balance.json')
+}
+
+export function loadBalanceConfig(home = os.homedir()) {
+  const f = balanceConfigFile(home)
+  try {
+    if (fs.existsSync(f)) {
+      const data = JSON.parse(fs.readFileSync(f, 'utf-8'))
+      if (data && typeof data === 'object') {
+        return {
+          enabled: Boolean(data.enabled),
+          mode: ['least-used', 'round-robin', 'off'].includes(data.mode) ? data.mode : 'least-used',
+          pool: data.pool || 'all',
+          lastIndex: typeof data.lastIndex === 'number' ? data.lastIndex : 0,
+        }
+      }
+    }
+  } catch {}
+  return {
+    enabled: false,
+    mode: 'least-used',
+    pool: 'all',
+    lastIndex: 0,
+  }
+}
+
+export function saveBalanceConfig(home = os.homedir(), config) {
+  const f = balanceConfigFile(home)
+  const current = loadBalanceConfig(home)
+  const merged = { ...current, ...config, updatedAt: new Date().toISOString() }
+  atomicWrite(f, JSON.stringify(merged, null, 2))
+  return merged
+}
+
+export function getNextBalancedProfile(home = os.homedir()) {
+  const config = loadBalanceConfig(home)
+  const all = listProfiles(home)
+  const disabled = loadDisabledProfiles(home)
+  const cur = currentProfile(home)
+
+  let candidates = all.filter(p => !disabled.includes(p))
+  if (config.pool && config.pool !== 'all') {
+    candidates = candidates.filter(p => getProfileTags(home, p).includes(config.pool))
+  }
+  if (candidates.length === 0) return null
+  if (candidates.length === 1) return candidates[0]
+
+  const otherCandidates = candidates.filter(p => p !== cur)
+  const poolToUse = otherCandidates.length > 0 ? otherCandidates : candidates
+
+  if (config.mode === 'round-robin') {
+    const nextIdx = (config.lastIndex + 1) % poolToUse.length
+    config.lastIndex = nextIdx
+    saveBalanceConfig(home, config)
+    return poolToUse[nextIdx]
+  }
+
+  // default: least-used (calculate from usage cache)
+  const cache = loadUsageCache(home)
+  const scored = poolToUse.map(p => {
+    const email = profileEmail(home, p)
+    const hit = cache[`${p}|${email}`] || {}
+    let util = 0
+    const limits = Array.isArray(hit.limits) ? hit.limits : []
+    for (const [lbl, val] of limits) {
+      if (lbl.includes('5') || lbl.toLowerCase().includes('five')) util = Number(val)
+    }
+    return { name: p, util }
+  })
+  scored.sort((a, b) => a.util - b.util)
+  return scored[0].name
+}
+
+export function balanceSwap(home = os.homedir()) {
+  const next = getNextBalancedProfile(home)
+  if (!next) {
+    throw new SwapError('Không tìm thấy profile khả dụng để cân bằng tải.')
+  }
+  swapProfile(home, next, {
+    type: 'auto',
+    reason: 'Smart load balance',
+  })
+  return next
+}
+
+// ---------------------------------------------------------------- webhooks
+
+export function webhookConfigFile(home) {
+  return path.join(profilesDir(home), '.webhook.json')
+}
+
+export function loadWebhookConfig(home = os.homedir()) {
+  const f = webhookConfigFile(home)
+  try {
+    if (fs.existsSync(f)) {
+      const data = JSON.parse(fs.readFileSync(f, 'utf-8'))
+      if (data && typeof data === 'object') {
+        return {
+          telegram: data.telegram || null,
+          discord: data.discord || null,
+          slack: data.slack || null,
+          generic: data.generic || null,
+        }
+      }
+    }
+  } catch {}
+  return {
+    telegram: null,
+    discord: null,
+    slack: null,
+    generic: null,
+  }
+}
+
+export function saveWebhookConfig(home = os.homedir(), config) {
+  const f = webhookConfigFile(home)
+  const current = loadWebhookConfig(home)
+  const merged = { ...current, ...config, updatedAt: new Date().toISOString() }
+  atomicWrite(f, JSON.stringify(merged, null, 2))
+  return merged
+}
+
+export function postHttpJson(targetUrl, payload) {
+  return new Promise((resolve, reject) => {
+    try {
+      const parsedUrl = new URL(targetUrl)
+      const isHttps = parsedUrl.protocol === 'https:'
+      const client = isHttps ? https : http
+      const body = JSON.stringify(payload)
+      const req = client.request(
+        parsedUrl,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(body),
+          },
+          timeout: 5000,
+        },
+        res => {
+          res.resume()
+          resolve({ status: res.statusCode })
+        }
+      )
+      req.on('error', reject)
+      req.on('timeout', () => {
+        req.destroy()
+        reject(new Error('Request timed out'))
+      })
+      req.write(body)
+      req.end()
+    } catch (err) {
+      reject(err)
+    }
+  })
+}
+
+export async function sendWebhookNotification(home = os.homedir(), payload) {
+  const cfg = loadWebhookConfig(home)
+  const results = []
+  const text = payload.text || `[claude-swap] ${payload.event || 'Swap Alert'}: ${payload.profile || 'Profile'} (${payload.reason || 'No reason'})`
+
+  if (cfg.telegram) {
+    try {
+      results.push(postHttpJson(cfg.telegram, { text }).catch(() => null))
+    } catch {}
+  }
+  if (cfg.discord) {
+    try {
+      const body = {
+        embeds: [
+          {
+            title: '🔀 claude-swap Notification',
+            description: text,
+            color: 0x3b82f6,
+            timestamp: new Date().toISOString(),
+          },
+        ],
+      }
+      results.push(postHttpJson(cfg.discord, body).catch(() => null))
+    } catch {}
+  }
+  if (cfg.slack) {
+    try {
+      results.push(postHttpJson(cfg.slack, { text }).catch(() => null))
+    } catch {}
+  }
+  if (cfg.generic) {
+    try {
+      results.push(postHttpJson(cfg.generic, payload).catch(() => null))
+    } catch {}
+  }
+  await Promise.allSettled(results)
+}
+
+export async function testWebhook(home = os.homedir(), type = null) {
+  const cfg = loadWebhookConfig(home)
+  const lang = loadLanguage(home)
+  const testMsg = lang === 'en'
+    ? '🔔 [claude-swap] Test alert: Webhook connection verified successfully!'
+    : '🔔 [claude-swap] Cảnh báo thử nghiệm: Kết nối Webhook hoạt động thành công!'
+
+  const targets = type ? [type] : Object.keys(cfg).filter(k => cfg[k])
+  if (targets.length === 0 || !targets.some(k => cfg[k])) {
+    throw new SwapError(lang === 'en' ? 'No webhooks configured yet.' : 'Chưa có webhook nào được cấu hình.')
+  }
+
+  await sendWebhookNotification(home, {
+    event: 'test',
+    text: testMsg,
+    profile: currentProfile(home) || 'default',
+    reason: 'manual-test',
+  })
+  return targets.filter(k => cfg[k])
+}
+
+// ---------------------------------------------------------------- budget tracker
+
+export function budgetConfigFile(home) {
+  return path.join(profilesDir(home), '.budget.json')
+}
+
+export function loadBudgetConfig(home = os.homedir()) {
+  const f = budgetConfigFile(home)
+  try {
+    if (fs.existsSync(f)) {
+      const data = JSON.parse(fs.readFileSync(f, 'utf-8'))
+      if (data && typeof data === 'object') {
+        return {
+          limits: data.limits || {},
+          currency: data.currency || 'USD',
+          updatedAt: data.updatedAt || null,
+        }
+      }
+    }
+  } catch {}
+  return {
+    limits: {},
+    currency: 'USD',
+    updatedAt: null,
+  }
+}
+
+export function saveBudgetConfig(home = os.homedir(), config) {
+  const f = budgetConfigFile(home)
+  const current = loadBudgetConfig(home)
+  const merged = { ...current, ...config, updatedAt: new Date().toISOString() }
+  atomicWrite(f, JSON.stringify(merged, null, 2))
+  return merged
+}
+
+export function setBudgetLimit(home = os.homedir(), profile, amount) {
+  const resolved = resolveProfileOrAlias(home, profile)
+  const num = parseFloat(amount)
+  if (isNaN(num) || num <= 0) {
+    throw new SwapError('Hạn mức ngân sách phải là số dương lớn hơn 0.')
+  }
+  const cfg = loadBudgetConfig(home)
+  cfg.limits[resolved] = num
+  saveBudgetConfig(home, cfg)
+  return { profile: resolved, limit: num, currency: cfg.currency }
+}
+
+export function removeBudgetLimit(home = os.homedir(), profile) {
+  const resolved = resolveProfileOrAlias(home, profile)
+  const cfg = loadBudgetConfig(home)
+  delete cfg.limits[resolved]
+  saveBudgetConfig(home, cfg)
+  return resolved
+}
+
+export function formatBudgetReport(home = os.homedir(), lang = 'vi') {
+  const cfg = loadBudgetConfig(home)
+  const entries = Object.entries(cfg.limits)
+  if (entries.length === 0) {
+    return lang === 'en'
+      ? 'No budget limits configured. Use: /profile budget set <profile> <amount>'
+      : 'Chưa có hạn mức ngân sách nào. Dùng: /profile budget set <tên> <hạn_mức>'
+  }
+  const lines = [
+    lang === 'en'
+      ? `💰 Profile Budget Limits (${cfg.currency}):`
+      : `💰 Danh sách Hạn mức Ngân sách (${cfg.currency}):`,
+  ]
+  for (const [p, limit] of entries) {
+    lines.push(`  • ${p}: ${limit.toFixed(2)} ${cfg.currency}/tháng`)
+  }
+  return lines.join('\n')
+}
+
+// ---------------------------------------------------------------- masking & safe share
+
+export function maskConfigFile(home) {
+  return path.join(profilesDir(home), '.mask.json')
+}
+
+export function isMaskingEnabled(home = os.homedir()) {
+  const f = maskConfigFile(home)
+  try {
+    if (fs.existsSync(f)) {
+      const data = JSON.parse(fs.readFileSync(f, 'utf-8'))
+      return Boolean(data && data.enabled)
+    }
+  } catch {}
+  return false
+}
+
+export function setMasking(home = os.homedir(), enabled = true) {
+  const f = maskConfigFile(home)
+  atomicWrite(f, JSON.stringify({ enabled: Boolean(enabled), updatedAt: new Date().toISOString() }, null, 2))
+  return Boolean(enabled)
+}
+
+export function maskEmail(email, enabled = true) {
+  if (!enabled || !email || typeof email !== 'string') return email
+  const atIdx = email.indexOf('@')
+  if (atIdx <= 1) return '***@' + (email.slice(atIdx + 1) || '')
+  const name = email.slice(0, atIdx)
+  const domain = email.slice(atIdx + 1)
+  const visible = name.slice(0, 2)
+  return `${visible}***@${domain}`
+}
+
+export function maskToken(token, enabled = true) {
+  if (!enabled || !token || typeof token !== 'string') return token
+  if (token.length <= 8) return '***'
+  return `${token.slice(0, 4)}***${token.slice(-4)}`
+}
+
+export function exportSafeShare(home = os.homedir(), outputPath = null) {
+  const profiles = listProfiles(home)
+  const safeProfiles = {}
+  for (const name of profiles) {
+    safeProfiles[name] = {
+      tags: getProfileTags(home, name),
+      email: maskEmail(profileEmail(home, name), true),
+    }
+  }
+
+  const payload = {
+    version: '1.0',
+    exportedAt: new Date().toISOString(),
+    profiles: safeProfiles,
+    aliases: loadAliases(home),
+    branchBindings: loadBranchBindings(home),
+    affinities: listModelAffinities(home),
+    autoConfig: loadAutoSwitchConfig(home),
+    balanceConfig: loadBalanceConfig(home),
+    budgetConfig: loadBudgetConfig(home),
+  }
+
+  const jsonStr = JSON.stringify(payload, null, 2)
+  if (outputPath) {
+    const full = path.resolve(outputPath)
+    atomicWrite(full, jsonStr, 0o644)
+    return { path: full, payload }
+  }
+  return { path: null, json: jsonStr, payload }
+}
+
+// ---------------------------------------------------------------- shell completion
+
+export function generateCompletion(shell = 'bash') {
+  const subcommands = [
+    'list', 'swap', 'new', 'save', 'delete', 'usage', 'auto', 'run', 'add-token',
+    'disable', 'enable', 'disabled', 'upgrade', 'web', 'dashboard', 'balance',
+    'webhook', 'budget', 'cost', 'mask', 'share', 'completion', 'alias', 'unalias',
+    'aliases', 'bind', 'unbind', 'bind-branch', 'unbind-branch', 'branch-bindings',
+    'tag', 'untag', 'tags', 'affinity', 'unaffinity', 'affinities', 'temp', 'untemp',
+    'statusline', 'prompt', 'notify', 'history', 'stats', 'cooldown', 'doctor',
+    'cleanup', 'lang', 'sync', 'forecast', 'pick', 'version',
+  ].join(' ')
+
+  if (shell === 'zsh') {
+    return `#compdef swap.js claude-swap
+
+_claude_swap() {
+  local -a commands
+  commands=(${subcommands})
+  if (( CURRENT == 2 )); then
+    _describe 'command' commands
+  fi
+}
+
+compdef _claude_swap swap.js
+compdef _claude_swap claude-swap
+`
+  }
+
+  if (shell === 'fish') {
+    return `complete -c swap.js -f -a "${subcommands}"
+complete -c claude-swap -f -a "${subcommands}"
+`
+  }
+
+  return `_claude_swap_completions() {
+  local cur="\${COMP_WORDS[COMP_CWORD]}"
+  local commands="${subcommands}"
+  if [ "$COMP_CWORD" -eq 1 ]; then
+    COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+    return 0
+  fi
+}
+complete -F _claude_swap_completions swap.js
+complete -F _claude_swap_completions claude-swap
+`
+}
+
 // ---------------------------------------------------------------- self-upgrade
 
 export const MARKETPLACE = 'claude-swap'
@@ -2630,6 +3054,13 @@ export function formatHelpReport(color = null, lang = 'vi') {
       `  ${cmd('/profile affinities')}        List model affinities`,
       '',
       `⏳ ${bold('Temporary Swap & Utilities:')}`,
+      `  ${cmd('/profile web [--port <p>]')}   Open interactive Web Dashboard UI`,
+      `  ${cmd('/profile balance [mode]')}     Smart Quota load balancing (least-used, round-robin)`,
+      `  ${cmd('/profile webhook [set|test]')} Setup external alerts (Telegram, Discord, Slack)`,
+      `  ${cmd('/profile budget [set]')}       Monthly budget and cost tracker`,
+      `  ${cmd('/profile mask [on|off]')}      Mask emails and sensitive tokens`,
+      `  ${cmd('/profile share [file]')}       Export safe configuration bundle (no tokens)`,
+      `  ${cmd('/profile completion [sh]')}    Generate shell autocompletion (bash, zsh, fish)`,
       `  ${cmd('/profile temp <name> [time]')} Temporary swap with auto-revert (e.g. 30m, 1h)`,
       `  ${cmd('/profile untemp')}            Cancel temporary swap and revert immediately`,
       `  ${cmd('/profile statusline')}        Status string for Shell prompt / Tmux`,
@@ -2700,7 +3131,14 @@ export function formatHelpReport(color = null, lang = 'vi') {
     `  ${cmd('/profile unaffinity <m>')}    Gỡ gán model affinity`,
     `  ${cmd('/profile affinities')}        Xem danh sách model affinities`,
     '',
-    `⏳ ${bold('Mượn tạm & Tiện ích:')}`,
+    `⏳ ${bold('Mượn tạm, Giao diện & Tiện ích:')}`,
+    `  ${cmd('/profile web [--port <p>]')}  Mở Web Dashboard trực quan cấu hình đa tài khoản`,
+    `  ${cmd('/profile balance [mode]')}    Cân bằng tải Quota thông minh (least-used, round-robin)`,
+    `  ${cmd('/profile webhook [set|test]')} Cấu hình cảnh báo Telegram, Discord, Slack`,
+    `  ${cmd('/profile budget [set|unset]')} Quản lý hạn mức chi tiêu hàng tháng`,
+    `  ${cmd('/profile mask [on|off]')}     Che mờ email & token bảo vệ sự riêng tư`,
+    `  ${cmd('/profile share [file]')}      Xuất cấu hình an toàn không chứa token`,
+    `  ${cmd('/profile completion [sh]')}   Sinh mã autocomplete cho Bash, Zsh, Fish`,
     `  ${cmd('/profile temp <tên> [tg]')}   Mượn tạm profile (vd: 30m, 1h) rồi tự hoàn lại`,
     `  ${cmd('/profile untemp')}            Hủy mượn tạm và quay về profile gốc ngay`,
     `  ${cmd('/profile statusline')}        Chuỗi trạng thái cho Shell prompt / Tmux`,
@@ -3456,6 +3894,185 @@ export async function runCli(argv, home = os.homedir()) {
         }
         const analysis = analyzeProfilesForCleanup(home)
         console.log(formatCleanupReport(analysis, color, lang))
+        return 0
+      }
+      case 'web':
+      case 'dashboard': {
+        const sub = filteredArgv[1]
+        const { startWebDashboard, stopWebDashboard } = await import('./web.js')
+        if (sub === 'stop') {
+          const stopped = stopWebDashboard(home)
+          console.log(stopped
+            ? (lang === 'en' ? '🛑 Stopped Web Dashboard.' : '🛑 Đã dừng Web Dashboard.')
+            : (lang === 'en' ? 'ℹ️ Web Dashboard is not running.' : 'ℹ️ Web Dashboard không chạy.'))
+          return 0
+        }
+        const portArg = filteredArgv.indexOf('--port')
+        const port = portArg !== -1 ? parseInt(filteredArgv[portArg + 1], 10) : 3737
+        const isDaemon = filteredArgv.includes('--daemon')
+        const noOpen = filteredArgv.includes('--no-open')
+
+        if (isDaemon) {
+          const child = child_process.spawn(
+            process.execPath,
+            [SCRIPT_PATH, 'web', '--server', '--port', String(port), ...(noOpen ? ['--no-open'] : [])],
+            { detached: true, stdio: 'ignore' }
+          )
+          child.unref()
+          console.log(lang === 'en'
+            ? `🌐 Web Dashboard running in background at: http://localhost:${port}`
+            : `🌐 Web Dashboard đang chạy ngầm tại: http://localhost:${port}`)
+          return 0
+        }
+
+        const isServer = filteredArgv.includes('--server')
+        const serverInst = await startWebDashboard(home, { port, open: !noOpen && !isServer })
+        console.log(lang === 'en'
+          ? `🌐 Web Dashboard active at: ${serverInst.url}\n(Press Ctrl+C to stop)`
+          : `🌐 Web Dashboard đang hoạt động tại: ${serverInst.url}\n(Nhấn Ctrl+C để dừng)`)
+        return new Promise(() => {})
+      }
+      case 'balance': {
+        const sub = filteredArgv[1]
+        if (!sub || sub === 'status') {
+          const cfg = loadBalanceConfig(home)
+          console.log(lang === 'en' ? '⚖️ Smart Load Balancing Status:' : '⚖️ Trạng thái Cân Bằng Tải Quota:')
+          console.log(`  • ${lang === 'en' ? 'Enabled' : 'Trạng thái'}: ${cfg.enabled ? '✅ on' : '❌ off'}`)
+          console.log(`  • ${lang === 'en' ? 'Mode' : 'Thuật toán'}: ${cfg.mode}`)
+          console.log(`  • ${lang === 'en' ? 'Pool' : 'Nhóm (pool)'}: ${cfg.pool}`)
+          return 0
+        }
+        if (sub === 'on' || sub === 'off') {
+          saveBalanceConfig(home, { enabled: sub === 'on' })
+          console.log(sub === 'on'
+            ? (lang === 'en' ? '✅ Smart Load Balancing enabled.' : '✅ Đã bật Cân Bằng Tải Quota.')
+            : (lang === 'en' ? '❌ Smart Load Balancing disabled.' : '❌ Đã tắt Cân Bằng Tải Quota.'))
+          return 0
+        }
+        if (sub === 'mode') {
+          const mode = filteredArgv[2]
+          if (!mode || !['least-used', 'round-robin'].includes(mode)) {
+            throw new SwapError(lang === 'en' ? 'Usage: /profile balance mode <least-used|round-robin>' : 'Cú pháp: /profile balance mode <least-used|round-robin>')
+          }
+          saveBalanceConfig(home, { mode, enabled: true })
+          console.log(lang === 'en' ? `⚖️ Load balancing mode set to: ${mode}` : `⚖️ Đã đổi thuật toán cân bằng tải sang: ${mode}`)
+          return 0
+        }
+        if (sub === 'pool') {
+          const pool = filteredArgv[2] || 'all'
+          saveBalanceConfig(home, { pool })
+          console.log(lang === 'en' ? `⚖️ Balance pool set to: ${pool}` : `⚖️ Đã đặt nhóm áp dụng cân bằng tải: ${pool}`)
+          return 0
+        }
+        if (sub === 'next') {
+          const next = balanceSwap(home)
+          console.log(lang === 'en' ? `⚖️ Swapped to balanced profile: ${next}` : `⚖️ Đã chuyển sang profile cân bằng: ${next}`)
+          return 0
+        }
+        throw new SwapError(lang === 'en' ? 'Usage: /profile balance [on|off|mode <m>|pool <p>|next]' : 'Cú pháp: /profile balance [on|off|mode <m>|pool <p>|next]')
+      }
+      case 'webhook': {
+        const sub = filteredArgv[1]
+        if (!sub || sub === 'status') {
+          const cfg = loadWebhookConfig(home)
+          console.log(lang === 'en' ? '🔔 Webhook Notifications Status:' : '🔔 Trạng thái Webhook Cảnh Báo:')
+          console.log(`  • Telegram: ${cfg.telegram || '(chưa đặt)'}`)
+          console.log(`  • Discord:  ${cfg.discord || '(chưa đặt)'}`)
+          console.log(`  • Slack:    ${cfg.slack || '(chưa đặt)'}`)
+          console.log(`  • Generic:  ${cfg.generic || '(chưa đặt)'}`)
+          return 0
+        }
+        if (sub === 'set') {
+          const type = filteredArgv[2]
+          const url = filteredArgv[3]
+          if (!type || !url || !['telegram', 'discord', 'slack', 'generic'].includes(type.toLowerCase())) {
+            throw new SwapError(lang === 'en' ? 'Usage: /profile webhook set <telegram|discord|slack|generic> <url>' : 'Cú pháp: /profile webhook set <telegram|discord|slack|generic> <url>')
+          }
+          const cfg = loadWebhookConfig(home)
+          cfg[type.toLowerCase()] = url
+          saveWebhookConfig(home, cfg)
+          console.log(lang === 'en' ? `🔔 Webhook '${type}' configured.` : `🔔 Đã lưu webhook '${type}'.`)
+          return 0
+        }
+        if (sub === 'unset') {
+          const type = filteredArgv[2]
+          if (!type) throw new SwapError(lang === 'en' ? 'Usage: /profile webhook unset <type>' : 'Cú pháp: /profile webhook unset <type>')
+          const cfg = loadWebhookConfig(home)
+          delete cfg[type.toLowerCase()]
+          saveWebhookConfig(home, cfg)
+          console.log(lang === 'en' ? `🔔 Webhook '${type}' removed.` : `🔔 Đã gỡ webhook '${type}'.`)
+          return 0
+        }
+        if (sub === 'test') {
+          const type = filteredArgv[2] || null
+          console.log(lang === 'en' ? '🔔 Sending test notification...' : '🔔 Đang gửi thông báo thử nghiệm...')
+          const targets = await testWebhook(home, type)
+          console.log(lang === 'en' ? `✅ Test notification sent to: ${targets.join(', ')}` : `✅ Đã gửi thông báo thử nghiệm tới: ${targets.join(', ')}`)
+          return 0
+        }
+        throw new SwapError(lang === 'en' ? 'Usage: /profile webhook [set|unset|test|status]' : 'Cú pháp: /profile webhook [set|unset|test|status]')
+      }
+      case 'budget':
+      case 'cost': {
+        const sub = filteredArgv[1]
+        if (!sub || sub === 'status') {
+          console.log(formatBudgetReport(home, lang))
+          return 0
+        }
+        if (sub === 'set') {
+          const profile = filteredArgv[2]
+          const amount = filteredArgv[3]
+          if (!profile || !amount) {
+            throw new SwapError(lang === 'en' ? 'Usage: /profile budget set <profile> <amount>' : 'Cú pháp: /profile budget set <tên> <hạn_mức>')
+          }
+          const res = setBudgetLimit(home, profile, amount)
+          console.log(lang === 'en'
+            ? `💰 Set budget limit for '${res.profile}': ${res.limit.toFixed(2)} ${res.currency}/mo`
+            : `💰 Đã đặt hạn mức cho '${res.profile}': ${res.limit.toFixed(2)} ${res.currency}/tháng`)
+          return 0
+        }
+        if (sub === 'unset') {
+          const profile = filteredArgv[2]
+          if (!profile) throw new SwapError(lang === 'en' ? 'Usage: /profile budget unset <profile>' : 'Cú pháp: /profile budget unset <tên>')
+          const res = removeBudgetLimit(home, profile)
+          console.log(lang === 'en' ? `💰 Removed budget limit for '${res}'.` : `💰 Đã xóa hạn mức ngân sách cho '${res}'.`)
+          return 0
+        }
+        throw new SwapError(lang === 'en' ? 'Usage: /profile budget [set|unset|status]' : 'Cú pháp: /profile budget [set|unset|status]')
+      }
+      case 'mask': {
+        const sub = filteredArgv[1]
+        if (!sub || sub === 'status') {
+          const cur = isMaskingEnabled(home)
+          console.log(lang === 'en'
+            ? `🛡️ Profile masking is currently: ${cur ? '✅ ON' : '❌ OFF'}`
+            : `🛡️ Chế độ che mờ bảo mật hiện tại: ${cur ? '✅ BẬT' : '❌ TẮT'}`)
+          return 0
+        }
+        if (sub === 'on' || sub === 'off') {
+          const enabled = setMasking(home, sub === 'on')
+          console.log(enabled
+            ? (lang === 'en' ? '🛡️ Profile masking enabled.' : '🛡️ Đã bật che mờ email & token.')
+            : (lang === 'en' ? '🛡️ Profile masking disabled.' : '🛡️ Đã tắt che mờ email & token.'))
+          return 0
+        }
+        throw new SwapError(lang === 'en' ? 'Usage: /profile mask [on|off|status]' : 'Cú pháp: /profile mask [on|off|status]')
+      }
+      case 'share': {
+        const file = filteredArgv[1] || null
+        const res = exportSafeShare(home, file)
+        if (res.path) {
+          console.log(lang === 'en'
+            ? `🛡️ Safe configuration bundle exported to: ${res.path}`
+            : `🛡️ Đã xuất bản cấu hình an toàn (không token) ra: ${res.path}`)
+        } else {
+          console.log(res.json)
+        }
+        return 0
+      }
+      case 'completion': {
+        const shell = filteredArgv[1] || 'bash'
+        console.log(generateCompletion(shell))
         return 0
       }
       default:
