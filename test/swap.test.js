@@ -18,6 +18,7 @@ import {
   runCli,
   SwapError,
   ProfileExists,
+  loadSwapHistory,
 } from '../swap.js'
 
 function login(home, account, token, extra = {}) {
@@ -399,6 +400,26 @@ describe('swap.js core functionality', () => {
       try { fs.unlinkSync(exportFile) } catch {}
       try { fs.rmSync(newHome, { recursive: true, force: true }) } catch {}
     }
+  })
+
+  test('swap history and analytics tracking', async () => {
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'work')
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'personal')
+
+    // Perform manual swap
+    assert.equal(await runCli(['swap', 'work'], tmpHome), 0)
+
+    const history = loadSwapHistory(tmpHome)
+    assert.equal(history.length, 1)
+    assert.equal(history[0].from, 'personal')
+    assert.equal(history[0].to, 'work')
+    assert.equal(history[0].type, 'manual')
+
+    // History and stats commands should succeed
+    assert.equal(await runCli(['history'], tmpHome), 0)
+    assert.equal(await runCli(['stats'], tmpHome), 0)
   })
 })
 

@@ -250,7 +250,7 @@ export function saveProfile(home, name, force = false) {
   return target
 }
 
-export function swapProfile(home, name) {
+export function swapProfile(home, name, options = {}) {
   const src = profilePath(home, name)
   if (!fs.existsSync(src)) {
     throw new SwapError(`Không có profile '${name}'.`)
@@ -300,6 +300,94 @@ export function swapProfile(home, name) {
     clearCredentials(home)
   }
   setCurrent(home, name)
+
+  recordSwapHistory(home, {
+    timestamp: new Date().toISOString(),
+    from: cur || '(none)',
+    to: name,
+    type: options.type || 'manual',
+    reason: options.reason || '',
+    cwd: options.cwd || process.cwd(),
+  })
+}
+
+// ---------------------------------------------------------------- history & stats
+
+export function swapHistoryFile(home) {
+  return path.join(profilesDir(home), '.swap-history.json')
+}
+
+export function loadSwapHistory(home) {
+  const f = swapHistoryFile(home)
+  try {
+    if (fs.existsSync(f)) {
+      const data = JSON.parse(fs.readFileSync(f, 'utf-8'))
+      if (Array.isArray(data)) return data
+    }
+  } catch {}
+  return []
+}
+
+export function recordSwapHistory(home, entry) {
+  const list = loadSwapHistory(home)
+  list.unshift({
+    timestamp: entry.timestamp || new Date().toISOString(),
+    from: entry.from || '(none)',
+    to: entry.to || '',
+    type: entry.type || 'manual',
+    reason: entry.reason || '',
+    cwd: entry.cwd || process.cwd(),
+  })
+  if (list.length > 100) {
+    list.length = 100
+  }
+  atomicWrite(swapHistoryFile(home), JSON.stringify(list, null, 2))
+}
+
+export function formatSwapHistory(home, limit = 10) {
+  const list = loadSwapHistory(home)
+  if (list.length === 0) {
+    return 'Chưa có lịch sử chuyển profile.'
+  }
+  const slice = list.slice(0, limit)
+  const lines = ['📜 Lịch sử chuyển profile gần nhất:']
+  for (const item of slice) {
+    const time = new Date(item.timestamp).toLocaleString('vi-VN')
+    const typeTag = item.type === 'auto' ? '🤖 [auto]' : item.type === 'project' ? '📁 [project]' : '👤 [manual]'
+    const reasonText = item.reason ? ` (${item.reason})` : ''
+    lines.push(`• ${time} | ${typeTag} ${item.from} ➔ ${item.to}${reasonText}`)
+  }
+  return lines.join('\n')
+}
+
+export function formatSwapStats(home) {
+  const list = loadSwapHistory(home)
+  if (list.length === 0) {
+    return 'Chưa có dữ liệu thống kê chuyển profile.'
+  }
+  let manual = 0
+  let auto = 0
+  let project = 0
+  const toCounts = {}
+  for (const item of list) {
+    if (item.type === 'auto') auto++
+    else if (item.type === 'project') project++
+    else manual++
+    if (item.to) {
+      toCounts[item.to] = (toCounts[item.to] || 0) + 1
+    }
+  }
+  const sortedProfiles = Object.entries(toCounts).sort((a, b) => b[1] - a[1])
+  const topStr = sortedProfiles.map(([name, count]) => `${name} (${count})`).join(', ')
+
+  return [
+    '📊 Thống kê chuyển đổi profile:',
+    `- Tổng số lần chuyển: ${list.length}`,
+    `- Thủ công (manual): ${manual}`,
+    `- Tự động (auto): ${auto}`,
+    `- Theo dự án (project): ${project}`,
+    `- Profile được chuyển đến nhiều nhất: ${topStr || '(chưa có)'}`,
+  ].join('\n')
 }
 
 export function deleteProfile(home, name) {
@@ -921,7 +1009,11 @@ export async function autoCheckAndSwap(home, options = {}) {
   if (isRateLimited || util >= config.threshold) {
     const next = findNextProfile(home, { config, cache })
     if (next && next !== cur) {
-      swapProfile(home, next)
+      swapProfile(home, next, {
+        type: 'auto',
+        reason: isRateLimited ? 'Rate limited' : `Mức dùng ${util}% >= ngưỡng ${config.threshold}%`,
+        cwd: process.cwd(),
+      })
       sendNotification(home, 'claude-swap', `Đã chuyển sang '${next}' (mức dùng: ${util}% >= ngưỡng ${config.threshold}%)`)
       return {
         swapped: true,
@@ -1237,7 +1329,11 @@ export async function runCli(argv, home = os.homedir()) {
       case 'swap': {
         const name = filteredArgv[1]
         if (!name) throw new SwapError('Thiếu tên profile.')
-        swapProfile(home, name)
+        const isProject = filteredArgv.includes('--project')
+        swapProfile(home, name, {
+          type: isProject ? 'project' : 'manual',
+          reason: isProject ? 'Project binding' : '',
+        })
         console.log(
           `Đã chuyển sang '${name}'. Không cần tắt session; Claude CLI dùng tài khoản mới ở lần ` +
             'kiểm tra đăng nhập kế tiếp (có thể chưa ngay prompt sau). Xem /status để chắc chắn.'
@@ -1434,6 +1530,15 @@ export async function runCli(argv, home = os.homedir()) {
         if (res.exists.length > 0) {
           console.log(`Bỏ qua profile đã tồn tại (dùng --force để ghi đè): ${res.exists.join(', ')}`)
         }
+        return 0
+      }
+      case 'history': {
+        const limit = parseInt(filteredArgv[1], 10) || 10
+        console.log(formatSwapHistory(home, limit))
+        return 0
+      }
+      case 'stats': {
+        console.log(formatSwapStats(home))
         return 0
       }
       default:
