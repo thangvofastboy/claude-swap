@@ -889,10 +889,19 @@ export function loadAutoSwitchConfig(home) {
         threshold: typeof parsed.threshold === 'number' ? parsed.threshold : 95,
         order: Array.isArray(parsed.order) ? parsed.order : [],
         pool: typeof parsed.pool === 'string' && parsed.pool !== 'all' ? parsed.pool : null,
+        autoReturn: parsed.autoReturn === true,
+        primaryProfile: typeof parsed.primaryProfile === 'string' ? parsed.primaryProfile : null,
       }
     }
   } catch {}
-  return { enabled: true, threshold: 95, order: [], pool: null }
+  return {
+    enabled: true,
+    threshold: 95,
+    order: [],
+    pool: null,
+    autoReturn: false,
+    primaryProfile: null,
+  }
 }
 
 export function saveAutoSwitchConfig(home, config) {
@@ -915,6 +924,51 @@ function parseResetTime(hit, lim) {
     }
   }
   return Number.MAX_SAFE_INTEGER
+}
+
+function formatRemainingTime(ms) {
+  if (ms <= 0) return 'Đã sẵn sàng'
+  const totalSeconds = Math.floor(ms / 1000)
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  if (hours > 0) {
+    return `còn ${hours} giờ ${minutes} phút`
+  }
+  return `còn ${minutes} phút`
+}
+
+export function formatCooldowns(home, cache = null) {
+  const profiles = listProfiles(home)
+  if (profiles.length === 0) return 'Chưa có profile nào.'
+  const c = cache || loadUsageCache(home)
+  const lines = ['⏱️ Thời gian reset quota 5 giờ:']
+  for (const name of profiles) {
+    const email = profileEmail(home, name)
+    const key = `${name}|${email}`
+    const hit = c[key] && typeof c[key] === 'object' ? c[key] : {}
+    const limits = Array.isArray(hit.limits) ? hit.limits : []
+    const fiveHour = limits.find(l => l[0] === '5 giờ') || limits[0]
+    const rawUtil = fiveHour ? Number(fiveHour[1]) : 0
+    const util = Math.round(rawUtil <= 1 && rawUtil > 0 ? rawUtil * 100 : rawUtil)
+    const resetTime = parseResetTime(hit, fiveHour)
+    const isRateLimited = Boolean(hit.retry_at && hit.retry_at > Date.now() / 1000)
+
+    let timeDesc = ''
+    if (isRateLimited) {
+      const waitSec = Math.max(0, Math.ceil(hit.retry_at - Date.now() / 1000))
+      timeDesc = `⏳ Rate limited (thử lại sau ${waitSec}s)`
+    } else if (resetTime === Number.MAX_SAFE_INTEGER) {
+      timeDesc = 'Chưa có dữ liệu reset'
+    } else {
+      const remainingMs = resetTime - Date.now()
+      const d = new Date(resetTime)
+      const timeStr = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+      timeDesc = `Reset lúc ${timeStr} - ${formatRemainingTime(remainingMs)}`
+    }
+    const warn = util >= 95 ? ' 🔴' : util >= 80 ? ' 🟡' : ' 🟢'
+    lines.push(`• ${name}: ${util}%${warn} (${timeDesc})`)
+  }
+  return lines.join('\n')
 }
 
 export function findNextProfile(home, options = {}) {
@@ -997,6 +1051,45 @@ export async function autoCheckAndSwap(home, options = {}) {
 
   const email = profileEmail(home, cur)
   const cache = options.cache || loadUsageCache(home)
+
+  // Check auto-return to primary profile
+  if (
+    config.autoReturn &&
+    config.primaryProfile &&
+    cur !== config.primaryProfile &&
+    profileExists(home, config.primaryProfile)
+  ) {
+    const priEmail = profileEmail(home, config.primaryProfile)
+    const priKey = `${config.primaryProfile}|${priEmail}`
+    const priHit = cache[priKey] && typeof cache[priKey] === 'object' ? cache[priKey] : {}
+    const priLimits = Array.isArray(priHit.limits) ? priHit.limits : []
+    const pri5h = priLimits.find(l => l[0] === '5 giờ') || priLimits[0]
+    const priRawUtil = pri5h ? Number(pri5h[1]) : 0
+    const priUtil = priRawUtil <= 1 && priRawUtil > 0 ? priRawUtil * 100 : priRawUtil
+    const priRateLimited = Boolean(priHit.retry_at && priHit.retry_at > Date.now() / 1000)
+
+    if (!priRateLimited && priUtil < config.threshold) {
+      swapProfile(home, config.primaryProfile, {
+        type: 'auto',
+        reason: 'Auto return to primary profile',
+        cwd: process.cwd(),
+      })
+      sendNotification(
+        home,
+        'claude-swap',
+        `Đã tự động quay về profile chính '${config.primaryProfile}' khi đã hồi token.`
+      )
+      return {
+        swapped: true,
+        from: cur,
+        to: config.primaryProfile,
+        util: priUtil,
+        threshold: config.threshold,
+        isAutoReturn: true,
+      }
+    }
+  }
+
   const key = `${cur}|${email}`
   const hit = cache[key] && typeof cache[key] === 'object' ? cache[key] : {}
 
@@ -1430,7 +1523,40 @@ export async function runCli(argv, home = os.homedir()) {
           return 0
         }
 
-        console.error(`Lệnh auto không hợp lệ: ${sub}. Dùng: /profile auto [on|off|threshold <%>|order <danh sách>|pool <tag|all>|check]`)
+        if (sub === 'return') {
+          const state = filteredArgv[2]
+          if (state === 'on') {
+            cfg.autoReturn = true
+            saveAutoSwitchConfig(home, cfg)
+            console.log('Đã BẬT tự động quay về profile chính (auto-return).')
+            return 0
+          }
+          if (state === 'off') {
+            cfg.autoReturn = false
+            saveAutoSwitchConfig(home, cfg)
+            console.log('Đã TẮT tự động quay về profile chính (auto-return).')
+            return 0
+          }
+          console.log(`Tự động quay về profile chính: ${cfg.autoReturn ? '🟢 BẬT' : '⚪ TẮT'}`)
+          return 0
+        }
+
+        if (sub === 'primary') {
+          const name = filteredArgv[2]
+          if (!name) {
+            console.log(`Profile chính hiện tại: ${cfg.primaryProfile || '(chưa đặt)'}`)
+            return 0
+          }
+          if (!profileExists(home, name)) {
+            throw new SwapError(`Profile '${name}' không tồn tại.`)
+          }
+          cfg.primaryProfile = name
+          saveAutoSwitchConfig(home, cfg)
+          console.log(`Đã đặt profile chính cho auto-return: '${name}'.`)
+          return 0
+        }
+
+        console.error(`Lệnh auto không hợp lệ: ${sub}. Dùng: /profile auto [on|off|threshold <%>|order <ds>|pool <tag|all>|return [on|off]|primary <tên>|check]`)
         return 1
       }
       case 'bind': {
@@ -1539,6 +1665,10 @@ export async function runCli(argv, home = os.homedir()) {
       }
       case 'stats': {
         console.log(formatSwapStats(home))
+        return 0
+      }
+      case 'cooldown': {
+        console.log(formatCooldowns(home))
         return 0
       }
       default:

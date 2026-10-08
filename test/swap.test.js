@@ -19,6 +19,8 @@ import {
   SwapError,
   ProfileExists,
   loadSwapHistory,
+  formatCooldowns,
+  autoCheckAndSwap,
 } from '../swap.js'
 
 function login(home, account, token, extra = {}) {
@@ -420,6 +422,43 @@ describe('swap.js core functionality', () => {
     // History and stats commands should succeed
     assert.equal(await runCli(['history'], tmpHome), 0)
     assert.equal(await runCli(['stats'], tmpHome), 0)
+  })
+
+  test('cooldown watcher and auto-return to primary profile', async () => {
+    login(tmpHome, 'p1', 'tok-1')
+    saveProfile(tmpHome, 'primary')
+    login(tmpHome, 'p2', 'tok-2')
+    saveProfile(tmpHome, 'secondary')
+
+    const cache = {
+      'primary|p1@example.com': {
+        limits: [['5 giờ', 20, '20:00']],
+        resets_at_epoch: Date.now() + 1800000, // 30 mins later
+      },
+      'secondary|p2@example.com': {
+        limits: [['5 giờ', 95, '22:00']],
+        resets_at_epoch: Date.now() + 7200000,
+      },
+    }
+
+    const report = formatCooldowns(tmpHome, cache)
+    assert.match(report, /primary/)
+    assert.match(report, /secondary/)
+
+    // Test CLI cooldown command
+    assert.equal(await runCli(['cooldown'], tmpHome), 0)
+
+    // Setup auto-return config
+    assert.equal(await runCli(['auto', 'primary', 'primary'], tmpHome), 0)
+    assert.equal(await runCli(['auto', 'return', 'on'], tmpHome), 0)
+
+    // Current is secondary, but primary has recovered (util 20% < 90%)
+    const res = await autoCheckAndSwap(tmpHome, {
+      cache,
+      config: { enabled: true, threshold: 90, autoReturn: true, primaryProfile: 'primary' },
+    })
+    assert.equal(res.swapped, true)
+    assert.equal(res.to, 'primary')
   })
 })
 
