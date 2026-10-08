@@ -971,6 +971,141 @@ export function formatCooldowns(home, cache = null) {
   return lines.join('\n')
 }
 
+// ---------------------------------------------------------------- doctor & diagnostics
+
+export function diagnoseProfiles(home) {
+  const pDir = profilesDir(home)
+  const results = []
+  if (!fs.existsSync(pDir)) {
+    return { profiles: [], activeProfile: null }
+  }
+
+  const files = fs.readdirSync(pDir).filter(f => f.endsWith('.json') && !f.startsWith('.'))
+  const cache = loadUsageCache(home)
+  const cur = currentProfile(home)
+
+  for (const f of files) {
+    const name = f.replace(/\.json$/, '')
+    const fullPath = path.join(pDir, f)
+    const report = {
+      name,
+      status: 'ok',
+      issues: [],
+      warnings: [],
+      email: '',
+      tokenExpiresAt: null,
+      quota5h: null,
+      quota7d: null,
+    }
+
+    let parsed
+    try {
+      parsed = JSON.parse(fs.readFileSync(fullPath, 'utf-8'))
+      if (!parsed || typeof parsed !== 'object' || !parsed.claude_json) {
+        throw new Error('Thiếu trường claude_json')
+      }
+    } catch (err) {
+      report.status = 'error'
+      report.issues.push(`File cấu hình bị hỏng hoặc không đúng chuẩn: ${err.message}`)
+      results.push(report)
+      continue
+    }
+
+    report.email = parsed.claude_json?.oauthAccount?.emailAddress || ''
+
+    // Check credentials & token expiry
+    if (parsed.credentials) {
+      try {
+        const creds = JSON.parse(parsed.credentials)
+        const oauth = creds.claudeAiOauth
+        if (oauth?.expiresAt) {
+          const expMs = oauth.expiresAt > 1e11 ? oauth.expiresAt : oauth.expiresAt * 1000
+          report.tokenExpiresAt = expMs
+          const now = Date.now()
+          if (expMs <= now) {
+            report.status = 'error'
+            report.issues.push('OAuth token đã hết hạn. Hãy /login để lấy lại token mới.')
+          } else if (expMs - now < 24 * 3600 * 1000) {
+            if (report.status === 'ok') report.status = 'warn'
+            const hours = Math.round((expMs - now) / 3600000)
+            report.warnings.push(`OAuth token sắp hết hạn trong khoảng ${hours} giờ.`)
+          }
+        }
+      } catch {}
+    }
+
+    // Check cache quota & rate limit
+    const key = `${name}|${report.email}`
+    const hit = cache[key] && typeof cache[key] === 'object' ? cache[key] : {}
+    if (hit.retry_at && hit.retry_at > Date.now() / 1000) {
+      if (report.status === 'ok') report.status = 'warn'
+      const wait = Math.ceil(hit.retry_at - Date.now() / 1000)
+      report.warnings.push(`Đang bị tạm khóa do HTTP 429 rate limit (chờ ${wait}s).`)
+    }
+    const limits = Array.isArray(hit.limits) ? hit.limits : []
+    const fiveH = limits.find(l => l[0] === '5 giờ')
+    if (fiveH) {
+      const u = Number(fiveH[1]) <= 1 && Number(fiveH[1]) > 0 ? Number(fiveH[1]) * 100 : Number(fiveH[1])
+      report.quota5h = Math.round(u)
+      if (u >= 95) {
+        if (report.status === 'ok') report.status = 'warn'
+        report.warnings.push(`Quota 5h đã chạm ngưỡng cạn kiệt (${Math.round(u)}%).`)
+      }
+    }
+    const sevenD = limits.find(l => l[0] === '7 ngày')
+    if (sevenD) {
+      const u = Number(sevenD[1]) <= 1 && Number(sevenD[1]) > 0 ? Number(sevenD[1]) * 100 : Number(sevenD[1])
+      report.quota7d = Math.round(u)
+      if (u >= 95) {
+        if (report.status === 'ok') report.status = 'warn'
+        report.warnings.push(`Quota 7 ngày đã chạm ngưỡng cạn kiệt (${Math.round(u)}%).`)
+      }
+    }
+
+    results.push(report)
+  }
+
+  return {
+    profiles: results,
+    activeProfile: cur,
+  }
+}
+
+export function formatDiagnostics(diag) {
+  const lines = ['🩺 Kiểm tra sức khỏe profiles (Profile Doctor):\n']
+  if (!diag || diag.profiles.length === 0) {
+    lines.push('Chưa có profile nào.')
+    return lines.join('\n')
+  }
+
+  for (const p of diag.profiles) {
+    const icon = p.status === 'ok' ? '🟢' : p.status === 'warn' ? '🟡' : '❌'
+    lines.push(`${icon} ${p.name}:`)
+    if (p.email) lines.push(`   • Email: ${p.email}`)
+    if (p.tokenExpiresAt) {
+      const d = new Date(p.tokenExpiresAt).toLocaleString('vi-VN')
+      lines.push(`   • Token OAuth: Hạn đến ${d}`)
+    }
+    if (p.quota5h !== null || p.quota7d !== null) {
+      const q5 = p.quota5h !== null ? `5h: ${p.quota5h}%` : ''
+      const q7 = p.quota7d !== null ? `7d: ${p.quota7d}%` : ''
+      lines.push(`   • Quota: ${[q5, q7].filter(Boolean).join(' | ')}`)
+    }
+    for (const iss of p.issues) {
+      lines.push(`   ❗ Lỗi: ${iss}`)
+    }
+    for (const w of p.warnings) {
+      lines.push(`   ⚠️ Cảnh báo: ${w}`)
+    }
+    if (p.status === 'ok') {
+      lines.push('   ✨ Trạng thái: Hoạt động tốt')
+    }
+    lines.push('')
+  }
+
+  return lines.join('\n').trim()
+}
+
 export function findNextProfile(home, options = {}) {
   const config = options.config || loadAutoSwitchConfig(home)
   const allProfiles = listProfiles(home)
@@ -1669,6 +1804,11 @@ export async function runCli(argv, home = os.homedir()) {
       }
       case 'cooldown': {
         console.log(formatCooldowns(home))
+        return 0
+      }
+      case 'doctor': {
+        const diag = diagnoseProfiles(home)
+        console.log(formatDiagnostics(diag))
         return 0
       }
       default:

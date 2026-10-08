@@ -21,6 +21,7 @@ import {
   loadSwapHistory,
   formatCooldowns,
   autoCheckAndSwap,
+  diagnoseProfiles,
 } from '../swap.js'
 
 function login(home, account, token, extra = {}) {
@@ -459,6 +460,26 @@ describe('swap.js core functionality', () => {
     })
     assert.equal(res.swapped, true)
     assert.equal(res.to, 'primary')
+  })
+
+  test('profile doctor diagnostics and health check', async () => {
+    login(tmpHome, 'good', 'tok-good')
+    saveProfile(tmpHome, 'good_profile')
+
+    // Create a corrupt profile file
+    fs.writeFileSync(path.join(tmpHome, '.config', 'claude-cli-profiles', 'corrupt_profile.json'), '{ invalid json')
+
+    const diag = diagnoseProfiles(tmpHome)
+    assert.equal(diag.profiles.length, 2)
+
+    const goodReport = diag.profiles.find(p => p.name === 'good_profile')
+    assert.equal(goodReport.status, 'ok')
+
+    const corruptReport = diag.profiles.find(p => p.name === 'corrupt_profile')
+    assert.equal(corruptReport.status, 'error')
+
+    // CLI doctor command should run cleanly
+    assert.equal(await runCli(['doctor'], tmpHome), 0)
   })
 })
 
