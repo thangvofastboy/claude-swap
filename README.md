@@ -140,6 +140,7 @@ claude --plugin-dir /path/to/claude-swap
 | `/profile delete <tên>` | Xoá profile |
 | `/profile import <thư mục> [--force]` | Nhập các profile thô từ thư mục khác |
 | `/profile folder` | Mở thư mục chứa file cấu hình profile |
+| `/profile lang [vi\|en]` | Xem hoặc chuyển đổi ngôn ngữ hiển thị (Tiếng Việt / English) |
 
 Ví dụ hiển thị khi gõ `/profile`:
 
@@ -213,5 +214,23 @@ claude-swap/
 │   └── register.test.ts  # Test suite cho plugin hook
 ├── test/
 │   └── swap.test.js      # Unit tests cho swap.js
+├── LICENSE               # Giấy phép mã nguồn mở MIT
 └── .claude-plugin/       # Plugin manifest & marketplace config
 ```
+
+## 🌐 Đa ngôn ngữ (Bilingual: vi / en)
+
+`claude-swap` hỗ trợ đầy đủ hai ngôn ngữ: **Tiếng Việt** và **Tiếng Anh**.
+
+```bash
+/profile lang           # Xem ngôn ngữ hiện tại
+/profile lang en        # Chuyển sang Tiếng Anh
+/profile lang vi        # Chuyển sang Tiếng Việt
+```
+
+Cấu hình ngôn ngữ được lưu tại `~/.config/claude-cli-profiles/.language.json` hoặc điều khiển qua biến môi trường `CLAUDE_SWAP_LANG=en|vi`.
+
+## 📄 License
+
+Dự án được phân phối dưới giấy phép [MIT](LICENSE).
+

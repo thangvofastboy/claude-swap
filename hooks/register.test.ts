@@ -224,3 +224,26 @@ test('/profile dispatches Batch 3 subcommands: alias, bind-branch, forecast, pic
   ])
 })
 
+test('/profile dispatches lang subcommands', async ($, on) => {
+  const calls: string[][] = []
+  on('process.run', async (_$, { argv }) => {
+    calls.push(argv.slice(2))
+    return ok('OK')
+  })
+  on('ui.status', () => ({ value: undefined }))
+
+  await $.command.run({ command: 'profile', args: 'lang' })
+  await $.command.run({ command: 'profile', args: 'lang en' })
+  await $.command.run({ command: 'profile', args: 'language vi' })
+
+  expect(calls).toEqual([
+    ['lang'],
+    ['current'],
+    ['lang', 'en'],
+    ['current'],
+    ['language', 'vi'],
+    ['current'],
+  ])
+})
+
+

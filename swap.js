@@ -41,6 +41,40 @@ export function profilesDir(home) {
   return d
 }
 
+export function languageFile(home = os.homedir()) {
+  return path.join(profilesDir(home), '.language.json')
+}
+
+export function loadLanguage(home = os.homedir()) {
+  if (process.env.CLAUDE_SWAP_LANG && ['vi', 'en'].includes(process.env.CLAUDE_SWAP_LANG.toLowerCase())) {
+    return process.env.CLAUDE_SWAP_LANG.toLowerCase()
+  }
+  const file = languageFile(home)
+  if (fs.existsSync(file)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(file, 'utf8'))
+      if (data && data.language && ['vi', 'en'].includes(data.language.toLowerCase())) {
+        return data.language.toLowerCase()
+      }
+    } catch {}
+  }
+  return 'vi'
+}
+
+export function setLanguage(home = os.homedir(), lang) {
+  const norm = (lang || '').trim().toLowerCase()
+  if (norm !== 'vi' && norm !== 'en') {
+    throw new SwapError(
+      norm
+        ? `Ngôn ngữ không được hỗ trợ: '${lang}'. Chỉ hỗ trợ 'vi' hoặc 'en'.`
+        : `Vui lòng chỉ định ngôn ngữ: /profile lang [vi|en]`
+    )
+  }
+  const file = languageFile(home)
+  atomicWrite(file, JSON.stringify({ language: norm, updatedAt: new Date().toISOString() }, null, 2))
+  return norm
+}
+
 export function checkName(name) {
   if (!name || !NAME_RE.test(name)) {
     throw new SwapError(`Tên profile không hợp lệ: '${name}' (chỉ dùng chữ, số, _ . -)`)
@@ -785,10 +819,13 @@ export function formatLimitChart(label, pct, color = false) {
   return `\x1b[1;36m${lbl}\x1b[0m ${barStr} ${c}${pctInt}%\x1b[0m${warnColored}`
 }
 
-export function profileListReport(home, color = null) {
+export function profileListReport(home, color = null, lang = null) {
+  const currentLang = lang || loadLanguage(home)
   const profiles = listProfiles(home)
   if (profiles.length === 0) {
-    return 'Chưa có profile nào. Tạo bằng: /profile new <tên>'
+    return currentLang === 'en'
+      ? 'No profiles found. Create one with: /profile new <name>'
+      : 'Chưa có profile nào. Tạo bằng: /profile new <tên>'
   }
   const cur = currentProfile(home)
   const cache = loadUsageCache(home)
@@ -837,10 +874,11 @@ export function profileListReport(home, color = null) {
   return lines.join('\n')
 }
 
-export async function usageReport(home, fetchFn = fetchUsage, force = false, color = false) {
+export async function usageReport(home, fetchFn = fetchUsage, force = false, color = false, lang = null) {
+  const currentLang = lang || loadLanguage(home)
   const rows = await usageRows(home, fetchFn, force)
   if (rows.length === 0) {
-    return 'Chưa có profile nào.'
+    return currentLang === 'en' ? 'No profiles found.' : 'Chưa có profile nào.'
   }
   const lines = []
   for (const r of rows) {
@@ -958,11 +996,12 @@ function formatRemainingTime(ms) {
   return `còn ${minutes} phút`
 }
 
-export function formatCooldowns(home, cache = null) {
+export function formatCooldowns(home, cache = null, lang = null) {
+  const currentLang = lang || loadLanguage(home)
   const profiles = listProfiles(home)
-  if (profiles.length === 0) return 'Chưa có profile nào.'
+  if (profiles.length === 0) return currentLang === 'en' ? 'No profiles found.' : 'Chưa có profile nào.'
   const c = cache || loadUsageCache(home)
-  const lines = ['⏱️ Thời gian reset quota 5 giờ:']
+  const lines = [currentLang === 'en' ? '⏱️ 5-hour quota reset countdowns:' : '⏱️ Thời gian reset quota 5 giờ:']
   for (const name of profiles) {
     const email = profileEmail(home, name)
     const key = `${name}|${email}`
@@ -1092,10 +1131,10 @@ export function diagnoseProfiles(home) {
   }
 }
 
-export function formatDiagnostics(diag) {
-  const lines = ['🩺 Kiểm tra sức khỏe profiles (Profile Doctor):\n']
+export function formatDiagnostics(diag, color = null, lang = 'vi') {
+  const lines = [lang === 'en' ? '🩺 Profiles health check (Profile Doctor):\n' : '🩺 Kiểm tra sức khỏe profiles (Profile Doctor):\n']
   if (!diag || diag.profiles.length === 0) {
-    lines.push('Chưa có profile nào.')
+    lines.push(lang === 'en' ? 'No profiles found.' : 'Chưa có profile nào.')
     return lines.join('\n')
   }
 
@@ -1971,10 +2010,11 @@ export function calculateForecast(home, profileName, threshold = 95) {
   }
 }
 
-export function formatForecastReport(home) {
+export function formatForecastReport(home, lang = null) {
+  const currentLang = lang || loadLanguage(home)
   const profiles = listProfiles(home)
-  if (profiles.length === 0) return 'Chưa có profile nào.'
-  const lines = ['📈 Dự báo tốc độ tiêu thụ Token & Cạn hạn mức (Quota Forecast):\n']
+  if (profiles.length === 0) return currentLang === 'en' ? 'No profiles found.' : 'Chưa có profile nào.'
+  const lines = [currentLang === 'en' ? '📈 Token Burn-Rate & Exhaustion Forecast (Quota Forecast):\n' : '📈 Dự báo tốc độ tiêu thụ Token & Cạn hạn mức (Quota Forecast):\n']
   for (const n of profiles) {
     const f = calculateForecast(home, n)
     if (!f.hasData) {
@@ -2234,15 +2274,17 @@ export function analyzeProfilesForCleanup(home) {
   return { duplicates, expiredTokens, corruptFiles }
 }
 
-export function formatCleanupReport(analysis) {
+export function formatCleanupReport(analysis, color = null, lang = 'vi') {
   const { duplicates, expiredTokens, corruptFiles } = analysis
   const hasIssues = duplicates.length > 0 || expiredTokens.length > 0 || corruptFiles.length > 0
 
   if (!hasIssues) {
-    return '✨ Tuyệt vời! Không phát hiện profile trùng lặp, hỏng hoặc token hết hạn quá 7 ngày.'
+    return lang === 'en'
+      ? '✨ Awesome! No duplicate, corrupt profiles or expired tokens over 7 days detected.'
+      : '✨ Tuyệt vời! Không phát hiện profile trùng lặp, hỏng hoặc token hết hạn quá 7 ngày.'
   }
 
-  const lines = ['🧹 Kết quả quét dọn dẹp profile (Profile Cleanup):\n']
+  const lines = [lang === 'en' ? '🧹 Profile Cleanup scan report:\n' : '🧹 Kết quả quét dọn dẹp profile (Profile Cleanup):\n']
   if (duplicates.length > 0) {
     lines.push('👥 Các profile trùng cùng tài khoản:')
     for (const d of duplicates) {
@@ -2286,10 +2328,75 @@ export function cleanupProfiles(home, options = {}) {
 
 // ---------------------------------------------------------------- cli
 
-export function formatHelpReport(color = null) {
+export function formatHelpReport(color = null, lang = 'vi') {
   const useColor = shouldColor(color)
   const bold = s => (useColor ? `\x1b[1;36m${s}\x1b[0m` : s)
   const cmd = s => (useColor ? `\x1b[1;33m${s}\x1b[0m` : s)
+
+  if (lang === 'en') {
+    return [
+      `🔀 ${bold('claude-swap')} — Command Usage Guide:`,
+      '',
+      `📌 ${bold('Profile Management & Switching:')}`,
+      `  ${cmd('/profile list')}              List profiles with quotas & usage bars`,
+      `  ${cmd('/profile <name|alias>')}      Quick switch to profile or alias`,
+      `  ${cmd('/profile pick')}              Interactive profile picker with arrow keys ↑ ↓`,
+      `  ${cmd('/profile alias <name> <p>')}  Set short alias for profile`,
+      `  ${cmd('/profile unalias <name>')}    Delete alias`,
+      `  ${cmd('/profile aliases')}           List all aliases`,
+      `  ${cmd('/profile current')}           Show currently active profile`,
+      `  ${cmd('/profile new <name>')}        Create new profile from current login`,
+      `  ${cmd('/profile save <name>')}       Save current credentials to profile`,
+      `  ${cmd('/profile delete <name>')}     Delete profile`,
+      `  ${cmd('/profile usage')}             Detailed 5h, 7d and per-model quotas`,
+      `  ${cmd('/profile folder')}            Open profile config directory`,
+      `  ${cmd('/profile lang [vi|en]')}      View or switch language (Vietnamese / English)`,
+      '',
+      `🤖 ${bold('Auto-Switching & Quota:')}`,
+      `  ${cmd('/profile auto')}              View auto-switch status`,
+      `  ${cmd('/profile auto on|off')}       Enable / disable auto-switch on limit`,
+      `  ${cmd('/profile auto threshold <%>')} Set token % threshold to swap (default: 95%)`,
+      `  ${cmd('/profile auto order <list>')} Set swap priority order (e.g. p1,p2)`,
+      `  ${cmd('/profile auto pool <tag>')}   Limit auto-switch to tagged pool`,
+      `  ${cmd('/profile auto safeguard <%>')} 7-day safeguard threshold (default: 85%)`,
+      `  ${cmd('/profile auto return on|off')} Auto return to primary profile when quota resets`,
+      `  ${cmd('/profile auto primary <name>')} Set primary profile to return to`,
+      `  ${cmd('/profile forecast')}          Burn rate & quota exhaustion forecast`,
+      `  ${cmd('/profile cooldown')}          Quota reset countdown timers`,
+      `  ${cmd('/profile doctor')}            Diagnostics for accounts, tokens and health`,
+      `  ${cmd('/profile cleanup')}           Detect duplicate profiles and dead tokens`,
+      '',
+      `📁 ${bold('Projects, Git Branches & Tags:')}`,
+      `  ${cmd('/profile bind [name]')}       Bind profile to current project directory`,
+      `  ${cmd('/profile unbind')}            Unbind profile from current directory`,
+      `  ${cmd('/profile bind-branch <pat>')} Bind profile to Git branch pattern (e.g. work-*, feat/*)`,
+      `  ${cmd('/profile unbind-branch')}     Unbind Git branch`,
+      `  ${cmd('/profile branch-bindings')}   List Git branch bindings`,
+      `  ${cmd('/profile tag <name> <tag>')}  Assign tag to profile`,
+      `  ${cmd('/profile untag <name> <tag>')} Remove tag from profile`,
+      `  ${cmd('/profile tags')}              List tags and associated profiles`,
+      '',
+      `🧠 ${bold('Model Affinity:')}`,
+      `  ${cmd('/profile affinity <m> <p>')}  Assign profile to model (e.g. opus, sonnet)`,
+      `  ${cmd('/profile unaffinity <m>')}    Remove model affinity`,
+      `  ${cmd('/profile affinities')}        List model affinities`,
+      '',
+      `⏳ ${bold('Temporary Swap & Utilities:')}`,
+      `  ${cmd('/profile temp <name> [time]')} Temporary swap with auto-revert (e.g. 30m, 1h)`,
+      `  ${cmd('/profile untemp')}            Cancel temporary swap and revert immediately`,
+      `  ${cmd('/profile statusline')}        Status string for Shell prompt / Tmux`,
+      `  ${cmd('/profile prompt <shell>')}    Config snippet for starship, zsh, bash, tmux`,
+      `  ${cmd('/profile notify on|off')}     Toggle desktop notifications on profile swap`,
+      `  ${cmd('/profile history [n]')}       View recent swap history`,
+      `  ${cmd('/profile stats')}             Statistics on manual vs automatic swaps`,
+      '',
+      `🔐 ${bold('Backup & Remote Sync:')}`,
+      `  ${cmd('/profile sync [push|pull]')}  Multi-device encrypted backup sync`,
+      `  ${cmd('/profile export <file>')}     Export AES-256 encrypted backup`,
+      `  ${cmd('/profile import-enc <file>')} Restore from encrypted file`,
+      `  ${cmd('/profile import <folder>')}   Import profiles from config directory`,
+    ].join('\n')
+  }
 
   return [
     `🔀 ${bold('claude-swap')} — Hướng dẫn sử dụng các lệnh:`,
@@ -2307,6 +2414,7 @@ export function formatHelpReport(color = null) {
     `  ${cmd('/profile delete <tên>')}      Xóa profile`,
     `  ${cmd('/profile usage')}             Xem chi tiết quota 5h, 7d và từng model`,
     `  ${cmd('/profile folder')}            Mở thư mục chứa file cấu hình profile`,
+    `  ${cmd('/profile lang [vi|en]')}      Xem hoặc đổi ngôn ngữ (Tiếng Việt / English)`,
     '',
     `🤖 ${bold('Tự động chuyển đổi & Quota:')}`,
     `  ${cmd('/profile auto')}              Xem trạng thái tự động chuyển profile`,
@@ -2365,22 +2473,42 @@ export async function runCli(argv, home = os.homedir()) {
     }
   }
 
+  const lang = loadLanguage(home)
   const cmd = filteredArgv[0]
   const color = !noColor && shouldColor()
 
   if (!cmd || cmd === 'help') {
-    console.log(formatHelpReport(color))
+    console.log(formatHelpReport(color, lang))
     return 0
   }
 
   try {
     switch (cmd) {
+      case 'lang':
+      case 'language': {
+        const target = filteredArgv[1]
+        if (!target) {
+          if (lang === 'en') {
+            console.log(`🌐 Current language: English (en). Switch with: /profile lang <vi|en>`)
+          } else {
+            console.log(`🌐 Ngôn ngữ hiện tại: Tiếng Việt (vi). Đổi bằng: /profile lang <vi|en>`)
+          }
+          return 0
+        }
+        const updated = setLanguage(home, target)
+        if (updated === 'en') {
+          console.log(`🌐 Language switched to: English (en).`)
+        } else {
+          console.log(`🌐 Đã chuyển ngôn ngữ sang: Tiếng Việt (vi).`)
+        }
+        return 0
+      }
       case 'list': {
         const refresh = filteredArgv.includes('--refresh')
         try {
           await usageRows(home, fetchUsage, refresh)
         } catch {}
-        console.log(profileListReport(home, color))
+        console.log(profileListReport(home, color, lang))
         return 0
       }
       case 'current': {
@@ -2389,7 +2517,7 @@ export async function runCli(argv, home = os.homedir()) {
       }
       case 'usage': {
         const refresh = filteredArgv.includes('--refresh')
-        console.log(await usageReport(home, fetchUsage, refresh, color))
+        console.log(await usageReport(home, fetchUsage, refresh, color, lang))
         return 0
       }
       case 'folder': {
@@ -2721,12 +2849,12 @@ export async function runCli(argv, home = os.homedir()) {
         return 0
       }
       case 'cooldown': {
-        console.log(formatCooldowns(home))
+        console.log(formatCooldowns(home, null, lang))
         return 0
       }
       case 'doctor': {
         const diag = diagnoseProfiles(home)
-        console.log(formatDiagnostics(diag))
+        console.log(formatDiagnostics(diag, color, lang))
         return 0
       }
       case 'statusline': {
@@ -2836,7 +2964,7 @@ export async function runCli(argv, home = os.homedir()) {
         return 0
       }
       case 'forecast': {
-        console.log(formatForecastReport(home))
+        console.log(formatForecastReport(home, lang))
         return 0
       }
       case 'pick': {
@@ -2940,16 +3068,16 @@ export async function runCli(argv, home = os.homedir()) {
           return 0
         }
         const analysis = analyzeProfilesForCleanup(home)
-        console.log(formatCleanupReport(analysis))
+        console.log(formatCleanupReport(analysis, color, lang))
         return 0
       }
       default:
-        console.error(`❌ Lệnh không hợp lệ: ${cmd}`)
+        console.error(lang === 'en' ? `❌ Invalid command: ${cmd}` : `❌ Lệnh không hợp lệ: ${cmd}`)
         return 1
     }
   } catch (err) {
     if (err instanceof SwapError) {
-      console.error(`❌ Lỗi: ${err.message}`)
+      console.error(lang === 'en' ? `❌ Error: ${err.message}` : `❌ Lỗi: ${err.message}`)
       return 1
     }
     throw err

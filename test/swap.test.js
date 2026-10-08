@@ -54,6 +54,9 @@ import {
   analyzeProfilesForCleanup,
   formatCleanupReport,
   cleanupProfiles,
+  loadLanguage,
+  setLanguage,
+  languageFile,
 } from '../swap.js'
 
 function login(home, account, token, extra = {}) {
@@ -767,6 +770,45 @@ describe('swap.js core functionality', () => {
 
     assert.equal(await runCli(['cleanup'], tmpHome), 0)
     assert.equal(await runCli(['cleanup', '--force'], tmpHome), 0)
+  })
+
+  test('bilingual language support: setLanguage, loadLanguage and formatHelpReport', async () => {
+    // Default language is 'vi'
+    assert.equal(loadLanguage(tmpHome), 'vi')
+
+    // Switch to English
+    assert.equal(setLanguage(tmpHome, 'en'), 'en')
+    assert.equal(loadLanguage(tmpHome), 'en')
+
+    // formatHelpReport in English
+    const helpEn = formatHelpReport(false, 'en')
+    assert.match(helpEn, /Command Usage Guide/)
+    assert.match(helpEn, /Profile Management & Switching:/)
+    assert.match(helpEn, /\/profile lang \[vi\|en\]/)
+
+    // Switch to Vietnamese
+    assert.equal(setLanguage(tmpHome, 'vi'), 'vi')
+    assert.equal(loadLanguage(tmpHome), 'vi')
+
+    const helpVi = formatHelpReport(false, 'vi')
+    assert.match(helpVi, /Hướng dẫn sử dụng các lệnh/)
+
+    // CLI lang commands
+    assert.equal(await runCli(['lang'], tmpHome), 0)
+    assert.equal(await runCli(['lang', 'en'], tmpHome), 0)
+    assert.equal(loadLanguage(tmpHome), 'en')
+    assert.equal(await runCli(['language', 'vi'], tmpHome), 0)
+    assert.equal(loadLanguage(tmpHome), 'vi')
+
+    // Invalid language throws / exits 1
+    assert.throws(() => setLanguage(tmpHome, 'fr'), /Ngôn ngữ không được hỗ trợ/)
+    assert.equal(await runCli(['lang', 'invalid'], tmpHome), 1)
+
+    // Check empty reports in English
+    assert.equal(profileListReport(tmpHome, false, 'en'), 'No profiles found. Create one with: /profile new <name>')
+    assert.equal(formatCooldowns(tmpHome, null, 'en'), 'No profiles found.')
+    assert.equal(formatForecastReport(tmpHome, 'en'), 'No profiles found.')
+    assert.match(formatCleanupReport({ duplicates: [], expiredTokens: [], corruptFiles: [] }, false, 'en'), /Awesome/)
   })
 })
 
