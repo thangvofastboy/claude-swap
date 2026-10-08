@@ -66,9 +66,27 @@ python3 claude_swap.py folder                  # mở thư mục lưu profile
 
 ### Lệnh `/profile` trong Claude Code
 
-Bản plugin Claude Code (`/profile`, `/profile <tên>`, `/profile usage`, `/profile import <thư mục>`…) gọi thẳng
-`claude_swap.py`, không tốn lượt hỏi model và hiện profile đang dùng trên thanh trạng thái. Mã plugin hiện
-chưa có trong repo này.
+Repo này cũng là một plugin Claude Code (`profile-swap`): gõ lệnh ngay trong ô nhập của Claude, lệnh chạy thẳng
+`claude_swap.py` nên không tốn lượt hỏi model, và profile đang dùng hiện trên thanh trạng thái.
+
+Cài (gõ trong terminal đang chạy `claude`; trả lời `y` để thêm marketplace, rồi chọn phạm vi):
+
+```
+/plugin install profile-swap --marketplace thangvofastboy/claude-swap
+```
+
+| Lệnh | Việc làm |
+| --- | --- |
+| `/profile` | liệt kê profile, đánh dấu (Active) |
+| `/profile <tên>` | chuyển sang profile `<tên>` |
+| `/profile usage` | quota 5 giờ / 7 ngày / theo model của mọi profile |
+| `/profile save <tên> [--force]` | lưu tài khoản đang đăng nhập |
+| `/profile delete <tên>` | xoá profile |
+| `/profile import <thư mục> [--force]` | nhập profile từ thư mục khác (đường dẫn có dấu cách dùng được) |
+| `/profile folder` | mở thư mục lưu profile |
+
+Plugin cần `python3` (Windows: `python`) trên PATH; chỉ dùng phần CLI nên không cần pywebview.
+Chạy thử không cần cài: `claude --plugin-dir <đường dẫn tới repo>`.
 
 ## Cách hoạt động
 
@@ -109,7 +127,11 @@ pyinstaller --onefile --noconsole claude_swap.py
 ```bash
 python3 -m pytest -q test_claude_swap.py   # unit test
 python3 smoke_test.py                      # CLI thật + cửa sổ thiếu thư viện + cửa sổ pywebview thật
+claude plugin validate .                   # manifest, marketplace và hooks của plugin
+claude plugin test .                       # test plugin (hooks/register.test.ts)
 ```
+
+Cấu trúc: `claude_swap.py` (app + CLI), `.claude-plugin/` (manifest + marketplace), `hooks/` (lệnh `/profile`).
 
 ## Giới hạn đã biết
 

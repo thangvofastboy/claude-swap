@@ -1,0 +1,12 @@
+{
+  "name": "claude-swap",
+  "owner": { "name": "thangvofastboy" },
+  "description": "Hot-swap Claude Code accounts without restarting a session",
+  "plugins": [
+    {
+      "name": "profile-swap",
+      "source": "./",
+      "description": "/profile: hot-swap Claude Code accounts and check their usage without leaving the session"
+    }
+  ]
+}
