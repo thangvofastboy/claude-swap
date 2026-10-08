@@ -148,7 +148,7 @@ Khởi chạy giao diện Web Dashboard trực quan và hiện đại ngay trên
 | --- | --- |
 | `/profile web [--port <p>]` | Mở Web Dashboard trực quan và cấu hình plugin trên trình duyệt |
 | `/profile web stop` | Dừng Web Dashboard đang chạy ngầm |
-| `/profile balance [on\|off]` | Bật / tắt tính năng cân bằng tải Quota chủ động |
+| `/profile balance [on\|off]` | Bật / tắt cân bằng tải: khi bật, auto-switch chọn profile kế tiếp theo `mode` (thay cho `auto order`) |
 | `/profile balance mode <least-used\|round-robin>` | Chọn thuật toán cân bằng tải (ưu tiên token nhiều nhất hoặc luân phiên) |
 | `/profile balance pool <tag\|all>` | Giới hạn cân bằng tải trong nhóm có tag |
 | `/profile balance next` | Chuyển ngay sang profile tiếp theo theo thuật toán cân bằng |
@@ -159,7 +159,7 @@ Khởi chạy giao diện Web Dashboard trực quan và hiện đại ngay trên
 | `/profile budget [status]` | Xem danh sách hạn mức ngân sách hàng tháng |
 | `/profile budget set <tên> <số_tiền>` | Đặt hạn mức chi tiêu hàng tháng cho profile |
 | `/profile budget unset <tên>` | Xóa hạn mức ngân sách |
-| `/profile mask [on\|off]` | Bật / tắt che mờ thông tin email & token cá nhân |
+| `/profile mask [on\|off]` | Bật / tắt che mờ email tài khoản trong list & dashboard |
 | `/profile share [file.json]` | Xuất gói cấu hình an toàn (không chứa token/credentials) |
 | `/profile completion [bash\|zsh\|fish]` | Sinh mã tự động gợi ý phím Tab cho shell |
 
@@ -218,7 +218,7 @@ Khởi chạy giao diện Web Dashboard trực quan và hiện đại ngay trên
 | `/profile temp <tên> [tg]` | Mượn tạm profile trong thời gian định trước (vd: `30m`, `1h`) |
 | `/profile untemp` | Hủy mượn tạm và quay về profile gốc ngay lập tức |
 | `/profile statusline` | Chuỗi trạng thái rút gọn cho shell prompt (vd: `[Claude: 🟢 work (32%)]`) |
-| `/profile prompt [shell]` | Hướng dẫn cấu hình prompt (`starship`, `zsh`, `bash`, `tmux`) |
+| `/profile prompt [shell]` | Hướng dẫn cấu hình prompt (`starship`, `zsh`, `bash`, `tmux`, `powershell`) |
 | `/profile notify [on\|off]` | Bật / tắt thông báo desktop banner khi đổi profile |
 | `/profile history [n]` | Xem lịch sử các lần chuyển đổi gần nhất (mặc định 10 lần) |
 | `/profile stats` | Thống kê số lần chuyển đổi thủ công, tự động và theo dự án |
@@ -272,7 +272,7 @@ node swap.js run work
 node swap.js run work -- claude --model claude-3-7-sonnet
 ```
 
-Session sẽ được lưu tách biệt tại `~/.claude-swap/.sessions/<tên>` với biến môi trường `CLAUDE_CONFIG_DIR`, bảo đảm an toàn dữ liệu và vệ sinh credential tuyệt đối.
+Session sẽ được lưu tách biệt tại `~/.config/claude-cli-profiles/.sessions/<tên>` với biến môi trường `CLAUDE_CONFIG_DIR`, bảo đảm an toàn dữ liệu và vệ sinh credential tuyệt đối.
 
 ---
 
@@ -312,7 +312,7 @@ export CLAUDE_SWAP_LANG=en
 Dự án có bộ test suite toàn diện kiểm tra mọi tính năng:
 
 ```bash
-npm test                   # Chạy 46 unit tests của swap.js (node --test)
+npm test                   # Chạy 47 unit tests của swap.js & web.js (node --test)
 claude plugin validate .   # Kiểm tra tính hợp lệ của manifest và hooks
 claude plugin test .       # Chạy 11 tests kiểm thử plugin hook của Claude Code
 ```
@@ -329,7 +329,7 @@ claude-swap/
 │   ├── register.ts       # Hook session.start, prompt.submit & command.run cho /profile
 │   └── register.test.ts  # Test suite cho plugin hooks (11 tests)
 ├── test/
-│   └── swap.test.js      # Unit tests cho swap.js (46 tests)
+│   └── swap.test.js      # Unit tests cho swap.js & web.js (47 tests)
 ├── LICENSE               # Giấy phép mã nguồn mở MIT
 └── .claude-plugin/       # Plugin manifest & marketplace config
 ```

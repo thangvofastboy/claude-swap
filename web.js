@@ -2,7 +2,6 @@ import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import child_process from 'node:child_process'
 import {
   listProfiles,
   currentProfile,
@@ -15,16 +14,9 @@ import {
   deleteProfile,
   saveProfile,
   addTokenProfile,
-  tempSwap,
   loadAliases,
-  setAlias,
-  removeAlias,
   loadBranchBindings,
-  bindBranch,
-  unbindBranch,
   listModelAffinities,
-  setModelAffinity,
-  removeModelAffinity,
   loadLanguage,
   setLanguage,
   loadAutoSwitchConfig,
@@ -32,53 +24,55 @@ import {
   loadUsageCache,
   profilesDir,
   atomicWrite,
-  SwapError,
   loadBalanceConfig,
   saveBalanceConfig,
   loadWebhookConfig,
   saveWebhookConfig,
   testWebhook,
   loadBudgetConfig,
-  saveBudgetConfig,
-  setBudgetLimit,
-  removeBudgetLimit,
   isMaskingEnabled,
   setMasking,
   maskEmail,
-  exportSafeShare,
+  quotaSnapshot,
+  spawnDetached,
 } from './swap.js'
+
+const HOST = '127.0.0.1'
+const LOCAL_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]'])
+const MAX_BODY = 1024 * 1024
 
 export function webPidFile(home = os.homedir()) {
   return path.join(profilesDir(home), '.web.pid')
 }
 
 export function openBrowser(url) {
+  if (process.platform === 'darwin') spawnDetached('open', [url])
+  else if (process.platform === 'win32') spawnDetached('cmd', ['/c', 'start', '', url])
+  else spawnDetached('xdg-open', [url])
+}
+
+// { pid, port } of a dashboard that is still alive, else null (a stale pid file is removed)
+export function runningDashboard(home = os.homedir()) {
+  const pf = webPidFile(home)
   try {
-    if (process.platform === 'darwin') {
-      child_process.spawn('open', [url], { detached: true, stdio: 'ignore' }).unref()
-    } else if (process.platform === 'win32') {
-      child_process.spawn('start', [url], { detached: true, shell: true, stdio: 'ignore' }).unref()
-    } else {
-      child_process.spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref()
-    }
-  } catch {}
+    const raw = fs.readFileSync(pf, 'utf-8').trim()
+    const state = raw.startsWith('{') ? JSON.parse(raw) : { pid: Number(raw), port: null }
+    process.kill(state.pid, 0) // throws if no such process
+    return state
+  } catch {
+    fs.rmSync(pf, { force: true })
+    return null
+  }
 }
 
 export function stopWebDashboard(home = os.homedir()) {
-  const pf = webPidFile(home)
-  if (!fs.existsSync(pf)) return false
+  const state = runningDashboard(home)
+  if (!state) return false
   try {
-    const pid = parseInt(fs.readFileSync(pf, 'utf-8').trim(), 10)
-    if (pid && !isNaN(pid)) {
-      try {
-        process.kill(pid, 'SIGTERM')
-      } catch {}
-    }
-    fs.unlinkSync(pf)
-    return true
-  } catch {
-    return false
-  }
+    process.kill(state.pid, 'SIGTERM')
+  } catch {}
+  fs.rmSync(webPidFile(home), { force: true })
+  return true
 }
 
 export function getDashboardData(home = os.homedir()) {
@@ -88,29 +82,14 @@ export function getDashboardData(home = os.homedir()) {
   const cache = loadUsageCache(home)
   const masking = isMaskingEnabled(home)
   const aliases = loadAliases(home)
-  const now = Date.now() / 1000
+  const now = Date.now()
 
   const profileCards = profiles.map(name => {
     const rawEmail = profileEmail(home, name)
     const email = masking ? maskEmail(rawEmail, true) : rawEmail
     const tags = getProfileTags(home, name)
-    const key = `${name}|${rawEmail}`
-    const hit = cache[key] && typeof cache[key] === 'object' ? cache[key] : {}
-    const limits = Array.isArray(hit.limits) ? hit.limits : []
-
-    let quota5h = null
-    let quota7d = null
-    for (const [lbl, val] of limits) {
-      if (lbl.includes('5') || lbl.toLowerCase().includes('five')) quota5h = Number(val)
-      if (lbl.includes('7') || lbl.toLowerCase().includes('seven')) quota7d = Number(val)
-    }
-
-    let cooldownSec = 0
-    if (hit.resets_at && hit.resets_at > now) {
-      cooldownSec = Math.round(hit.resets_at - now)
-    } else if (hit.retry_at && hit.retry_at > now) {
-      cooldownSec = Math.round(hit.retry_at - now)
-    }
+    const quota = quotaSnapshot(home, cache, name)
+    const cooldownSec = quota.resetAt ? Math.max(0, Math.round((quota.resetAt - now) / 1000)) : 0
 
     const aliasList = Object.entries(aliases)
       .filter(([_, target]) => target === name)
@@ -123,10 +102,10 @@ export function getDashboardData(home = os.homedir()) {
       tags,
       aliases: aliasList,
       disabled: disabled.includes(name),
-      quota5h,
-      quota7d,
+      quota5h: quota.util5h,
+      quota7d: quota.util7d,
       cooldownSec,
-      rateLimited: Boolean(hit.retry_at && hit.retry_at > now),
+      rateLimited: quota.rateLimited,
     }
   })
 
@@ -531,7 +510,7 @@ export function renderDashboardHtml() {
           <div id="doc-security" class="docs-card">
             <h2>🔐 7. Bảo Mật & Cách Ly Session Song Song</h2>
             <p>Mỗi profile được lưu trữ tại <span class="cmd-code">~/.config/claude-cli-profiles/&lt;tên&gt;.json</span> với phân quyền <span class="cmd-code">0600</span> nghiêm ngặt:</p>
-            <p>• Khi chạy song song bằng <span class="cmd-code">/profile run &lt;tên&gt;</span>, một thư mục cô lập độc lập được tạo tại <span class="cmd-code">~/.claude-swap/.sessions/&lt;tên&gt;</span>, giúp hai cửa sổ terminal chạy hai tài khoản Claude Code cùng lúc mà không bị lẫn lộn token.</p>
+            <p>• Khi chạy song song bằng <span class="cmd-code">/profile run &lt;tên&gt;</span>, một thư mục cô lập độc lập được tạo tại <span class="cmd-code">~/.config/claude-cli-profiles/.sessions/&lt;tên&gt;</span>, giúp hai cửa sổ terminal chạy hai tài khoản Claude Code cùng lúc mà không bị lẫn lộn token.</p>
           </div>
         </div>
       </div>
@@ -568,6 +547,10 @@ export function renderDashboardHtml() {
 
   <script>
     let appData = {};
+
+    function esc(v) {
+      return String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+    }
 
     function showToast(msg) {
       const t = document.getElementById('toast');
@@ -646,16 +629,16 @@ export function renderDashboardHtml() {
           cooldownHtml = \`<div class="cooldown-text">⏱️ Reset sau: \${mins}m \${secs}s</div>\`;
         }
 
-        const tagsHtml = p.tags.map(t => \`<span class="tag-pill">🏷️ \${t}</span>\`).join(' ');
-        const aliasHtml = p.aliases.length ? \`<span style="color:#94a3b8; font-size:0.8rem;">(alias: \${p.aliases.join(', ')})</span>\` : '';
+        const tagsHtml = p.tags.map(t => \`<span class="tag-pill">🏷️ \${esc(t)}</span>\`).join(' ');
+        const aliasHtml = p.aliases.length ? \`<span style="color:#94a3b8; font-size:0.8rem;">(alias: \${esc(p.aliases.join(', '))})</span>\` : '';
 
         card.innerHTML = \`
           <div class="profile-header">
             <div class="profile-title">
               <span style="font-size: 1.3rem;">\${p.active ? '🟢' : '⚪'}</span>
               <div>
-                <div class="profile-name">\${p.name} \${aliasHtml}</div>
-                <div class="profile-email">👤 \${p.email || 'Chưa liên kết email'}</div>
+                <div class="profile-name">\${esc(p.name)} \${aliasHtml}</div>
+                <div class="profile-email">👤 \${esc(p.email || 'Chưa liên kết email')}</div>
               </div>
             </div>
             \${p.active ? '<span class="active-badge">Active</span>' : ''}
@@ -684,14 +667,14 @@ export function renderDashboardHtml() {
     function renderSettings() {
       document.getElementById('cfg-auto-enabled').checked = Boolean(appData.auto.enabled);
       document.getElementById('cfg-auto-threshold').value = appData.auto.threshold || 95;
-      document.getElementById('cfg-auto-safeguard').value = appData.auto.safeguard || 85;
+      document.getElementById('cfg-auto-safeguard').value = appData.auto.safeguardThreshold || 85;
       document.getElementById('cfg-auto-return').checked = Boolean(appData.auto.autoReturn);
       document.getElementById('cfg-auto-pool').value = appData.auto.pool || 'all';
 
       const primSel = document.getElementById('cfg-auto-primary');
       primSel.innerHTML = '<option value="">(Tự động)</option>';
       appData.profiles.forEach(p => {
-        primSel.innerHTML += \`<option value="\${p.name}" \${appData.auto.primary === p.name ? 'selected' : ''}>\${p.name}</option>\`;
+        primSel.innerHTML += \`<option value="\${esc(p.name)}" \${appData.auto.primaryProfile === p.name ? 'selected' : ''}>\${esc(p.name)}</option>\`;
       });
 
       document.getElementById('cfg-balance-enabled').checked = Boolean(appData.balance.enabled);
@@ -882,7 +865,15 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
 
   let port = initialPort
   const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url, `http://localhost:${port}`)
+    const url = new URL(req.url, `http://${HOST}:${port}`)
+
+    // DNS rebinding: a foreign site resolving its own name to 127.0.0.1 still sends its own Host
+    const hostname = (req.headers.host || '').replace(/:\d+$/, '')
+    if (!LOCAL_HOSTNAMES.has(hostname)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain' })
+      res.end('Forbidden')
+      return
+    }
 
     if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
@@ -903,8 +894,17 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
     }
 
     if (req.method === 'POST' && url.pathname === '/api/action') {
+      // CSRF: a cross-site form/fetch cannot send application/json without a preflight we never answer
+      if (!String(req.headers['content-type'] || '').startsWith('application/json')) {
+        res.writeHead(415, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Content-Type must be application/json' }))
+        return
+      }
       let bodyStr = ''
-      req.on('data', chunk => { bodyStr += chunk })
+      req.on('data', chunk => {
+        bodyStr += chunk
+        if (bodyStr.length > MAX_BODY) req.destroy()
+      })
       req.on('end', async () => {
         try {
           const body = JSON.parse(bodyStr || '{}')
@@ -946,7 +946,17 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
               return
             }
             case 'save_config': {
-              if (body.auto) saveAutoSwitchConfig(home, body.auto)
+              if (body.auto) {
+                // the form uses short field names; keep keys it does not edit (order, ...)
+                const { safeguard, primary, pool, ...rest } = body.auto
+                saveAutoSwitchConfig(home, {
+                  ...loadAutoSwitchConfig(home),
+                  ...rest,
+                  safeguardThreshold: safeguard || null,
+                  primaryProfile: primary || null,
+                  pool: pool && pool !== 'all' ? pool : null,
+                })
+              }
               if (body.balance) saveBalanceConfig(home, body.balance)
               if (body.webhook) saveWebhookConfig(home, body.webhook)
               if (typeof body.masking === 'boolean') setMasking(home, body.masking)
@@ -988,7 +998,7 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
     try {
       await new Promise((resolve, reject) => {
         server.once('error', reject)
-        server.listen(port, () => {
+        server.listen(port, HOST, () => {
           server.removeListener('error', reject)
           resolve()
         })
@@ -1003,8 +1013,8 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
     }
   }
 
-  atomicWrite(pf, String(process.pid))
-  const targetUrl = `http://localhost:${port}`
+  atomicWrite(pf, JSON.stringify({ pid: process.pid, port }))
+  const targetUrl = `http://${HOST}:${port}`
 
   if (shouldOpen) {
     openBrowser(targetUrl)

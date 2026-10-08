@@ -86,11 +86,18 @@ import {
   isMaskingEnabled,
   setMasking,
   maskEmail,
-  maskToken,
   exportSafeShare,
   generateCompletion,
+  findNextProfile,
+  isolatedSession,
+  readCurrent,
+  quotaSnapshot,
+  maskUrl,
+  spawnDetached,
 } from '../swap.js'
 import { startWebDashboard, getDashboardData, stopWebDashboard } from '../web.js'
+import child_process from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 
 function login(home, account, token, extra = {}) {
   const data = {
@@ -913,11 +920,11 @@ describe('swap.js core functionality', () => {
     const sDir = prepareSession(tmpHome, 'session-acc')
     assert.ok(fs.existsSync(sDir))
     assert.ok(fs.existsSync(path.join(sDir, '.claude.json')))
-    assert.ok(fs.existsSync(path.join(sDir, '.claude', '.credentials.json')))
+    assert.ok(fs.existsSync(path.join(sDir, '.credentials.json'))) // CLAUDE_CONFIG_DIR/.credentials.json is what Claude Code reads
 
     // Simulate token refresh during the isolated session
     const refreshedCreds = JSON.stringify({ claudeAiOauth: { accessToken: 'new-refreshed-token' } })
-    fs.writeFileSync(path.join(sDir, '.claude', '.credentials.json'), refreshedCreds)
+    fs.writeFileSync(path.join(sDir, '.credentials.json'), refreshedCreds)
 
     syncSessionBack(tmpHome, 'session-acc', sDir)
     const updated = JSON.parse(fs.readFileSync(profilePath(tmpHome, 'session-acc'), 'utf-8'))
@@ -1025,6 +1032,85 @@ describe('swap.js core functionality', () => {
     assert.equal(await runCli(['balance', 'off'], tmpHome), 0)
   })
 
+  test('balance on drives auto-switch: round-robin rotates, least-used and pools apply, order is overridden', () => {
+    for (const n of ['b1', 'b2', 'b3']) {
+      login(tmpHome, n, `tok-${n}`)
+      saveProfile(tmpHome, n)
+    }
+    swapProfile(tmpHome, 'b1')
+    const config = { enabled: true, threshold: 95, order: ['b3'], safeguardThreshold: null }
+    const cache = {
+      'b2|b2@example.com': { limits: [['5 giờ', 50, '']] },
+      'b3|b3@example.com': { limits: [['5 giờ', 10, '']] },
+    }
+    // off: `order` decides
+    assert.equal(findNextProfile(tmpHome, { config, cache }), 'b3')
+    // round-robin: next name after the current one, wrapping around
+    const rr = { enabled: true, mode: 'round-robin', pool: 'all' }
+    assert.equal(findNextProfile(tmpHome, { config, cache, balance: rr }), 'b2')
+    swapProfile(tmpHome, 'b3')
+    assert.equal(findNextProfile(tmpHome, { config, cache, balance: rr }), 'b1')
+    // least-used: lowest 5h usage, `order` ignored
+    swapProfile(tmpHome, 'b1')
+    const lu = { enabled: true, mode: 'least-used', pool: 'all' }
+    assert.equal(findNextProfile(tmpHome, { config: { ...config, order: ['b2'] }, cache, balance: lu }), 'b3')
+    // balance pool filters candidates; exhausted profiles are never picked
+    addProfileTag(tmpHome, 'b2', 'team')
+    assert.equal(findNextProfile(tmpHome, { config, cache, balance: { ...lu, pool: 'team' } }), 'b2')
+    const full = { ...cache, 'b2|b2@example.com': { limits: [['5 giờ', 99, '']] } }
+    assert.equal(findNextProfile(tmpHome, { config, cache: full, balance: { ...lu, pool: 'team' } }), null)
+  })
+
+  test('CLAUDE_CONFIG_DIR is honoured for the real home and run sessions are protected', () => {
+    const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, DIR: process.env.CLAUDE_CONFIG_DIR }
+    const restore = () => {
+      for (const [k, v] of [['HOME', saved.HOME], ['USERPROFILE', saved.USERPROFILE], ['CLAUDE_CONFIG_DIR', saved.DIR]]) {
+        if (v === undefined) delete process.env[k]
+        else process.env[k] = v
+      }
+    }
+    try {
+      process.env.HOME = process.env.USERPROFILE = tmpHome // os.homedir() === tmpHome
+      const custom = path.join(tmpHome, 'custom-claude')
+      process.env.CLAUDE_CONFIG_DIR = custom
+      const loginCustom = (account, token) => {
+        fs.mkdirSync(custom, { recursive: true })
+        fs.writeFileSync(path.join(custom, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: `${account}@example.com`, accountUuid: `uuid-${account}` } }))
+        fs.writeFileSync(path.join(custom, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: token } }))
+      }
+      loginCustom('a', 'tok-a')
+      saveProfile(tmpHome, 'ca')
+      loginCustom('b', 'tok-b')
+      saveProfile(tmpHome, 'cb')
+      swapProfile(tmpHome, 'ca')
+      const live = JSON.parse(fs.readFileSync(path.join(custom, '.claude.json'), 'utf-8'))
+      assert.equal(live.oauthAccount.emailAddress, 'a@example.com') // edited the dir Claude Code reads
+      assert.ok(!fs.existsSync(path.join(tmpHome, '.claude.json'))) // not ~/.claude.json
+      assert.equal(readCurrent(tmpHome), 'ca')
+
+      // inside a `/profile run` session: swapping is refused, the pointer is the session's profile
+      const sDir = prepareSession(tmpHome, 'cb')
+      process.env.CLAUDE_CONFIG_DIR = sDir
+      assert.equal(isolatedSession(tmpHome), 'cb')
+      assert.equal(currentProfile(tmpHome), 'cb')
+      assert.throws(() => swapProfile(tmpHome, 'ca'), /session cô lập/)
+
+      // logging into another account inside the session must not overwrite profile cb on exit
+      fs.writeFileSync(path.join(sDir, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'x@example.com', accountUuid: 'uuid-x' } }))
+      syncSessionBack(tmpHome, 'cb', sDir)
+      assert.equal(profileEmail(tmpHome, 'cb'), 'b@example.com')
+    } finally {
+      restore()
+    }
+    // a home other than os.homedir() is never redirected
+    process.env.CLAUDE_CONFIG_DIR = path.join(tmpHome, 'elsewhere')
+    try {
+      assert.equal(isolatedSession(tmpHome), null)
+    } finally {
+      restore()
+    }
+  })
+
   test('webhook configuration, payload dispatch and CLI', async () => {
     const cfg = loadWebhookConfig(tmpHome)
     assert.equal(cfg.telegram, null)
@@ -1038,6 +1124,8 @@ describe('swap.js core functionality', () => {
     assert.equal(await runCli(['webhook', 'status'], tmpHome), 0)
     assert.equal(await runCli(['webhook', 'set', 'discord', 'https://discord.com/api/webhooks/test'], tmpHome), 0)
     assert.equal(await runCli(['webhook', 'unset', 'discord'], tmpHome), 0)
+    assert.equal(loadWebhookConfig(tmpHome).discord, null) // merge-on-save used to bring it back
+    assert.equal(maskUrl('https://api.telegram.org/bot123:SECRET/sendMessage'), 'https://api.telegram.org/…')
   })
 
   test('budget limits, cost reporting and CLI', async () => {
@@ -1062,7 +1150,6 @@ describe('swap.js core functionality', () => {
     assert.equal(isMaskingEnabled(tmpHome), true)
 
     assert.equal(maskEmail('john.doe@example.com', true), 'jo***@example.com')
-    assert.equal(maskToken('sk-ant-api03-abcdef123456', true), 'sk-a***3456')
 
     login(tmpHome, 'share_acc', 'tok-secret')
     saveProfile(tmpHome, 'share_acc')
@@ -1111,6 +1198,7 @@ describe('swap.js core functionality', () => {
     assert.ok(data.balance)
 
     const dash = await startWebDashboard(tmpHome, { port: 3799, open: false })
+    try {
     assert.ok(dash.url.includes('3799'))
 
     // Verify GET /
@@ -1134,8 +1222,57 @@ describe('swap.js core functionality', () => {
     })
     assert.equal(actRes.status, 200)
     assert.equal(currentProfile(tmpHome), 'web_b')
+    assert.match(dash.url, /^http:\/\/127\.0\.0\.1:/)
 
-    dash.close()
+    // CSRF: a cross-site "simple" POST (text/plain) is refused
+    const csrf = await fetch(`${dash.url}/api/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ action: 'delete', profile: 'web_a' }),
+    })
+    assert.equal(csrf.status, 415)
+    assert.ok(listProfiles(tmpHome).includes('web_a'))
+
+    // saving the form keeps auto-switch keys it does not show (order) and maps its short names
+    const cfgFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.auto-switch.json')
+    fs.writeFileSync(cfgFile, JSON.stringify({ enabled: true, threshold: 95, order: ['web_a'] }))
+    await fetch(`${dash.url}/api/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'save_config', auto: { enabled: true, threshold: 90, safeguard: 70, primary: 'web_a', pool: 'all' } }),
+    })
+    const saved = JSON.parse(fs.readFileSync(cfgFile, 'utf-8'))
+    assert.deepEqual(saved.order, ['web_a'])
+    assert.equal(saved.safeguardThreshold, 70)
+    assert.equal(saved.primaryProfile, 'web_a')
+    assert.equal(saved.pool, null)
+    } finally {
+      dash.close() // a failed assertion must not leave the server holding the test process open
+    }
+  })
+
+  test('cross-platform helpers and quota labels', async () => {
+    // a missing binary must not crash the process with an unhandled 'error' event
+    spawnDetached('claude-swap-no-such-binary', [])
+    await new Promise(r => setTimeout(r, 50))
+
+    // model-specific labels containing digits must not be read as the 5h/7d quota
+    login(tmpHome, 'q', 'tok-q')
+    saveProfile(tmpHome, 'q')
+    const cache = { 'q|q@example.com': { limits: [['5 giờ', 10, ''], ['7 ngày', 20, ''], ['7 ngày Opus 5.5', 99, '']] } }
+    const snap = quotaSnapshot(tmpHome, cache, 'q')
+    assert.equal(snap.util5h, 10)
+    assert.equal(snap.util7d, 20)
+
+    // run as the entry script: `web` dynamically imports web.js, which imports swap.js back;
+    // a top-level await at the entry used to deadlock that and exit without doing anything
+    const res = child_process.spawnSync(process.execPath, [fileURLToPath(new URL('../swap.js', import.meta.url)), 'web', 'stop'], {
+      env: { ...process.env, HOME: tmpHome, USERPROFILE: tmpHome },
+      encoding: 'utf-8',
+      timeout: 10000,
+    })
+    assert.equal(res.status, 0, res.stderr)
+    assert.match(res.stdout, /Web Dashboard/)
   })
 })
 

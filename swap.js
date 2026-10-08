@@ -4,8 +4,6 @@ import os from 'node:os'
 import path from 'node:path'
 import child_process from 'node:child_process'
 import crypto from 'node:crypto'
-import http from 'node:http'
-import https from 'node:https'
 import { fileURLToPath } from 'node:url'
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
@@ -31,12 +29,32 @@ export class ProfileExists extends SwapError {}
 
 // ---------------------------------------------------------------- paths
 
+// Claude Code's config home. With CLAUDE_CONFIG_DIR set it reads <dir>/.claude.json and <dir>/.credentials.json
+// instead of ~/.claude.json and ~/.claude/.credentials.json. Honoured only for the real home: callers that pass
+// another home (tests, sandboxes) must never be redirected into the user's actual config.
+export function claudeConfigDir(home) {
+  const dir = process.env.CLAUDE_CONFIG_DIR
+  return dir && home === os.homedir() ? dir : null
+}
+
 export function claudeJson(home) {
-  return path.join(home, '.claude.json')
+  return path.join(claudeConfigDir(home) || home, '.claude.json')
 }
 
 export function credentialsFile(home) {
-  return path.join(home, '.claude', '.credentials.json')
+  return path.join(claudeConfigDir(home) || path.join(home, '.claude'), '.credentials.json')
+}
+
+function dirHash(dir) {
+  return crypto.createHash('sha256').update(dir.normalize('NFC')).digest('hex').slice(0, 8)
+}
+
+// name of the profile whose `/profile run` session we are inside, else null
+export function isolatedSession(home) {
+  const dir = claudeConfigDir(home)
+  if (!dir) return null
+  const rel = path.relative(path.join(profilesDir(home), '.sessions'), path.resolve(dir))
+  return rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? rel.split(path.sep)[0] : null
 }
 
 const readyDirs = new Set()
@@ -106,13 +124,46 @@ export function atomicWrite(filePath, text, mode = 0o600) {
   )
   try {
     fs.writeFileSync(tmp, text, { encoding: 'utf-8', mode })
-    fs.renameSync(tmp, filePath)
+    renameWithRetry(tmp, filePath)
   } catch (err) {
     try {
       if (fs.existsSync(tmp)) fs.unlinkSync(tmp)
     } catch {}
     throw err
   }
+}
+
+// on Windows an antivirus/indexer can hold the target for a moment; retry like graceful-fs does
+function renameWithRetry(from, to) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return fs.renameSync(from, to)
+    } catch (err) {
+      if (process.platform !== 'win32' || attempt >= 9 || !['EPERM', 'EACCES', 'EBUSY'].includes(err.code)) throw err
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
+    }
+  }
+}
+
+// fire-and-forget helper: a missing binary (no notify-send/xdg-open) emits 'error' asynchronously,
+// which crashes the process when nobody listens
+export function spawnDetached(cmd, args, options = {}) {
+  try {
+    const child = child_process.spawn(cmd, args, { detached: true, stdio: 'ignore', windowsHide: true, ...options })
+    child.on('error', () => {})
+    child.unref()
+    return child
+  } catch {
+    return null
+  }
+}
+
+// npm installs `claude` as claude.cmd on Windows, which Node refuses to spawn without a shell
+// ponytail: only whitespace/quotes are escaped for cmd.exe; args with & | ^ < > are not supported there
+export function spawnClaudeSync(bin, args, options = {}) {
+  if (process.platform !== 'win32') return child_process.spawnSync(bin, args, options)
+  const quote = a => (/[\s"]/.test(a) ? `"${a.replace(/"/g, '""')}"` : a)
+  return child_process.spawnSync(quote(bin), args.map(quote), { ...options, shell: true })
 }
 
 export function backup(filePath) {
@@ -131,53 +182,70 @@ export function useKeychain(home) {
   return process.platform === 'darwin' && !fs.existsSync(credentialsFile(home))
 }
 
-export function readCredentials(home) {
-  if (useKeychain(home)) {
-    try {
-      const res = child_process.execFileSync(
-        'security',
-        ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-w'],
-        { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }
-      )
-      return res.trim() || null
-    } catch {
-      return null
-    }
+// same account name Claude Code uses, so `-U` updates its item instead of adding a second one
+function keychainAccount() {
+  let user
+  try {
+    user = process.env.USER || os.userInfo().username
+  } catch {}
+  return user && /^[A-Za-z0-9._-]+$/.test(user) ? user : 'claude-code-user'
+}
+
+function readKeychain(service) {
+  try {
+    const res = child_process.execFileSync('security', ['find-generic-password', '-s', service, '-w'], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    return res.trim() || null
+  } catch {
+    return null
   }
+}
+
+function writeKeychain(service, data) {
+  try {
+    child_process.execFileSync(
+      'security',
+      ['add-generic-password', '-U', '-s', service, '-a', keychainAccount(), '-w', data],
+      { stdio: ['ignore', 'pipe', 'pipe'] }
+    )
+  } catch (err) {
+    throw new SwapError(`Không ghi được Keychain: ${err.message}`)
+  }
+}
+
+function deleteKeychain(service) {
+  try {
+    child_process.execFileSync('security', ['delete-generic-password', '-s', service], { stdio: 'ignore' })
+  } catch {}
+}
+
+// with CLAUDE_CONFIG_DIR set, Claude Code on macOS keeps credentials under a per-dir Keychain item
+export function sessionKeychainService(configDir) {
+  return `${KEYCHAIN_SERVICE}-${dirHash(configDir)}`
+}
+
+function keychainService(home) {
+  const dir = claudeConfigDir(home)
+  return dir ? sessionKeychainService(dir) : KEYCHAIN_SERVICE
+}
+
+export function readCredentials(home) {
+  if (useKeychain(home)) return readKeychain(keychainService(home))
   const f = credentialsFile(home)
   return fs.existsSync(f) ? fs.readFileSync(f, 'utf-8') : null
 }
 
 export function writeCredentials(home, data) {
-  if (useKeychain(home)) {
-    const user = os.userInfo().username
-    try {
-      child_process.execFileSync(
-        'security',
-        ['add-generic-password', '-U', '-s', KEYCHAIN_SERVICE, '-a', user, '-w', data],
-        { stdio: ['ignore', 'pipe', 'pipe'] }
-      )
-    } catch (err) {
-      throw new SwapError(`Không ghi được Keychain: ${err.message}`)
-    }
-    return
-  }
+  if (useKeychain(home)) return writeKeychain(keychainService(home), data)
   const f = credentialsFile(home)
   backup(f)
   atomicWrite(f, data)
 }
 
 export function clearCredentials(home) {
-  if (useKeychain(home)) {
-    try {
-      child_process.execFileSync(
-        'security',
-        ['delete-generic-password', '-s', KEYCHAIN_SERVICE],
-        { stdio: 'ignore' }
-      )
-    } catch {}
-    return
-  }
+  if (useKeychain(home)) return deleteKeychain(keychainService(home))
   const f = credentialsFile(home)
   backup(f)
   if (fs.existsSync(f)) {
@@ -215,13 +283,21 @@ export function listProfiles(home) {
   }
 }
 
+// which profile a config dir currently holds; one pointer per config dir (default home → `.current`)
+export function currentFileFor(home, configDir = null) {
+  return path.join(profilesDir(home), configDir ? `.current-${dirHash(configDir)}` : '.current')
+}
+
 export function readCurrent(home) {
-  const f = path.join(profilesDir(home), '.current')
-  try {
-    return fs.existsSync(f) ? fs.readFileSync(f, 'utf-8').trim() : ''
-  } catch {
-    return ''
+  const dir = claudeConfigDir(home)
+  // a user who set CLAUDE_CONFIG_DIR globally before pointers were per-dir still has it in `.current`
+  const files = [currentFileFor(home, dir), ...(dir && !isolatedSession(home) ? [currentFileFor(home)] : [])]
+  for (const f of files) {
+    try {
+      if (fs.existsSync(f)) return fs.readFileSync(f, 'utf-8').trim()
+    } catch {}
   }
+  return ''
 }
 
 export function currentProfile(home) {
@@ -231,7 +307,7 @@ export function currentProfile(home) {
 }
 
 export function setCurrent(home, name) {
-  const f = path.join(profilesDir(home), '.current')
+  const f = currentFileFor(home, claudeConfigDir(home))
   if (name) {
     atomicWrite(f, name)
   } else if (fs.existsSync(f)) {
@@ -296,6 +372,12 @@ export function saveProfile(home, name, force = false) {
 }
 
 export function swapProfile(home, name, options = {}) {
+  const session = isolatedSession(home)
+  if (session) {
+    throw new SwapError(
+      `Đang ở trong session cô lập của profile '${session}' (/profile run). Thoát session đó để đổi tài khoản.`
+    )
+  }
   const resolved = resolveProfileOrAlias(home, name)
   const src = profilePath(home, resolved)
   if (!fs.existsSync(src)) {
@@ -356,15 +438,15 @@ export function swapProfile(home, name, options = {}) {
     cwd: options.cwd || process.cwd(),
   })
 
-  try {
+  trackWebhook(
     sendWebhookNotification(home, {
       event: 'swap',
       profile: resolved,
       previousProfile: cur || null,
       reason: options.reason || '',
       type: options.type || 'manual',
-    }).catch(() => {})
-  } catch {}
+    })
+  )
 }
 
 // ---------------------------------------------------------------- history & stats
@@ -463,19 +545,16 @@ export function deleteProfile(home, name) {
     const sDir = sessionDir(home, resolved)
     if (fs.existsSync(sDir)) {
       fs.rmSync(sDir, { recursive: true, force: true })
+      fs.rmSync(currentFileFor(home, sDir), { force: true })
+      if (process.platform === 'darwin') deleteKeychain(sessionKeychainService(sDir))
     }
   } catch {}
 }
 
 export function openProfilesFolder(home) {
   const d = profilesDir(home)
-  if (process.platform === 'win32') {
-    child_process.spawn('explorer', [d], { detached: true, stdio: 'ignore' }).unref()
-  } else if (process.platform === 'darwin') {
-    child_process.spawn('open', [d], { detached: true, stdio: 'ignore' }).unref()
-  } else {
-    child_process.spawn('xdg-open', [d], { detached: true, stdio: 'ignore' }).unref()
-  }
+  const opener = process.platform === 'win32' ? 'explorer' : process.platform === 'darwin' ? 'open' : 'xdg-open'
+  spawnDetached(opener, [d])
   return d
 }
 
@@ -868,13 +947,14 @@ export function profileListReport(home, color = null, lang = null) {
   const cur = currentProfile(home)
   const cache = loadUsageCache(home)
   const disabledList = loadDisabledProfiles(home)
+  const masking = isMaskingEnabled(home)
   const useColor = shouldColor(color)
   const lines = []
 
   for (const n of profiles) {
     const active = n === cur
     const rawEmail = profileEmail(home, n)
-    const email = maskEmail(rawEmail, isMaskingEnabled(home))
+    const email = maskEmail(rawEmail, masking)
     const icon = active ? '🟢' : '⚪'
     const activeStr = active ? ' (Active)' : ''
 
@@ -1027,6 +1107,19 @@ function limitPct(hit, label) {
 
 function isRateLimited(hit) {
   return Boolean(hit.retry_at && hit.retry_at > Date.now() / 1000)
+}
+
+// cached quota for one profile, for callers outside the auto-switch logic (dashboard, balancing)
+export function quotaSnapshot(home, cache, name) {
+  const hit = cacheHit(home, cache, name)
+  const lim5h = findLimit(hit, LABEL_5H)
+  const resetAt = parseResetTime(hit, lim5h)
+  return {
+    util5h: lim5h ? limitPct(hit, LABEL_5H) : null,
+    util7d: findLimit(hit, LABEL_7D) ? limitPct(hit, LABEL_7D) : null,
+    resetAt: resetAt === Number.MAX_SAFE_INTEGER ? null : resetAt,
+    rateLimited: isRateLimited(hit),
+  }
 }
 
 function parseResetTime(hit, lim) {
@@ -1250,7 +1343,7 @@ export function generatePromptSnippet(shell = 'starship') {
     return [
       '# Thêm hàm sau vào ~/.zshrc:',
       'claude_profile_prompt() {',
-      `  node ${SCRIPT_PATH} statusline 2>/dev/null`,
+      `  node "${SCRIPT_PATH}" statusline 2>/dev/null`,
       '}',
       '# Gắn vào RPROMPT hoặc PROMPT:',
       'RPROMPT=\'$(claude_profile_prompt) \'${RPROMPT:-}',
@@ -1260,7 +1353,7 @@ export function generatePromptSnippet(shell = 'starship') {
     return [
       '# Thêm hàm sau vào ~/.bashrc:',
       'claude_profile_prompt() {',
-      `  node ${SCRIPT_PATH} statusline 2>/dev/null`,
+      `  node "${SCRIPT_PATH}" statusline 2>/dev/null`,
       '}',
       '# Thêm $(claude_profile_prompt) vào biến PS1',
     ].join('\n')
@@ -1268,10 +1361,19 @@ export function generatePromptSnippet(shell = 'starship') {
   if (s === 'tmux') {
     return [
       '# Thêm dòng sau vào ~/.tmux.conf:',
-      `set -g status-right "#(node ${SCRIPT_PATH} statusline) %H:%M %d-%b-%y"`,
+      `set -g status-right "#(node '${SCRIPT_PATH}' statusline) %H:%M %d-%b-%y"`,
     ].join('\n')
   }
-  throw new SwapError(`Shell '${shell}' không được hỗ trợ. Các shell hỗ trợ: starship, zsh, bash, tmux`)
+  if (s === 'powershell' || s === 'pwsh') {
+    return [
+      '# Thêm vào file $PROFILE (mở bằng: notepad $PROFILE):',
+      'function prompt {',
+      `  $claude = node '${SCRIPT_PATH.replace(/'/g, "''")}' statusline 2>$null`,
+      '  "$claude PS $($executionContext.SessionState.Path.CurrentLocation)$(\'>\' * ($nestedPromptLevel + 1)) "',
+      '}',
+    ].join('\n')
+  }
+  throw new SwapError(`Shell '${shell}' không được hỗ trợ. Các shell hỗ trợ: starship, zsh, bash, tmux, powershell`)
 }
 
 // ---------------------------------------------------------------- ephemeral & temporary swap
@@ -1392,6 +1494,8 @@ export function findNextProfile(home, options = {}) {
   const cur = currentProfile(home)
   const cache = options.cache || loadUsageCache(home)
   const disabled = loadDisabledProfiles(home)
+  const balance = options.balance || loadBalanceConfig(home)
+  const pools = [config.pool, balance.enabled ? balance.pool : null].filter(p => p && p !== 'all')
 
   const candidates = []
   for (const name of allProfiles) {
@@ -1402,12 +1506,8 @@ export function findNextProfile(home, options = {}) {
 
     try {
       const profile = JSON.parse(fs.readFileSync(profilePath(home, name), 'utf-8'))
-      if (config.pool && config.pool !== 'all') {
-        const tags = Array.isArray(profile.tags) ? profile.tags : []
-        if (!tags.includes(config.pool)) {
-          continue
-        }
-      }
+      const tags = Array.isArray(profile.tags) ? profile.tags : []
+      if (!pools.every(p => tags.includes(p))) continue
       const hasApiKey = Boolean(profile.claude_json?.primaryApiKey)
       const oauth = JSON.parse(profile.credentials || '{}').claudeAiOauth || {}
       if (!oauth.accessToken && !hasApiKey) continue
@@ -1429,7 +1529,13 @@ export function findNextProfile(home, options = {}) {
     return null
   }
 
-  if (config.order && config.order.length > 0) {
+  // load balancing, when on, decides instead of `order`; least-used is the default sort below
+  if (balance.enabled && balance.mode === 'round-robin') {
+    // stateless rotation: the first eligible profile after the current one, in name order
+    return (candidates.find(c => c.name > (cur || '')) || candidates[0]).name
+  }
+
+  if (!balance.enabled && config.order && config.order.length > 0) {
     for (const orderedName of config.order) {
       const found = candidates.find(c => c.name === orderedName)
       if (found) {
@@ -1692,28 +1798,30 @@ export function saveNotificationConfig(home, config) {
   atomicWrite(f, JSON.stringify(config, null, 2))
 }
 
+// test runs set these; a path heuristic (home containing "test-" or tmpdir) would silence real users too
+function silenced() {
+  return process.env.NODE_ENV === 'test' || process.env.CLAUDE_SWAP_SILENT === '1'
+}
+
 export function sendNotification(home, title, message) {
-  if (
-    process.env.NODE_ENV === 'test' ||
-    process.env.CLAUDE_SWAP_SILENT === '1' ||
-    (home && (home.includes('test-') || home.includes(os.tmpdir())))
-  ) {
-    return
-  }
+  if (silenced()) return
   const config = loadNotificationConfig(home)
   if (!config.enabled) return
 
-  try {
-    if (process.platform === 'linux') {
-      child_process.spawn('notify-send', [title, message], { detached: true, stdio: 'ignore' }).unref()
-    } else if (process.platform === 'darwin') {
-      const script = `display notification "${message.replace(/"/g, '\\"')}" with title "${title.replace(/"/g, '\\"')}"`
-      child_process.spawn('osascript', ['-e', script], { detached: true, stdio: 'ignore' }).unref()
-    } else if (process.platform === 'win32') {
-      const psScript = `[reflection.assembly]::loadwithpartialname('System.Windows.Forms'); [System.Windows.Forms.MessageBox]::Show('${message.replace(/'/g, "''")}', '${title.replace(/'/g, "''")}')`
-      child_process.spawn('powershell', ['-Command', psScript], { detached: true, stdio: 'ignore' }).unref()
-    }
-  } catch {}
+  if (process.platform === 'darwin') {
+    const q = t => `"${t.replace(/[\\"]/g, '\\$&')}"`
+    spawnDetached('osascript', ['-e', `display notification ${q(message)} with title ${q(title)}`])
+  } else if (process.platform === 'win32') {
+    // a tray balloon, not a modal MessageBox that steals focus on every auto-swap
+    const q = t => `'${t.replace(/'/g, "''")}'`
+    const ps =
+      'Add-Type -AssemblyName System.Windows.Forms, System.Drawing; $n = New-Object System.Windows.Forms.NotifyIcon; ' +
+      '$n.Icon = [System.Drawing.SystemIcons]::Information; $n.Visible = $true; ' +
+      `$n.ShowBalloonTip(5000, ${q(title)}, ${q(message)}, 'Info'); Start-Sleep -Seconds 6; $n.Dispose()`
+    spawnDetached('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps])
+  } else {
+    spawnDetached('notify-send', [title, message])
+  }
 }
 
 // ---------------------------------------------------------------- encryption
@@ -2493,7 +2601,8 @@ export function prepareSession(home = os.homedir(), name) {
     throw new SwapError(`Profile '${name}' không tồn tại.`)
   }
   const sDir = sessionDir(home, resolved)
-  fs.mkdirSync(path.join(sDir, '.claude'), { recursive: true, mode: 0o700 })
+  fs.mkdirSync(sDir, { recursive: true, mode: 0o700 })
+  atomicWrite(currentFileFor(home, sDir), resolved)
 
   const pData = JSON.parse(fs.readFileSync(profilePath(home, resolved), 'utf-8'))
   const cj = path.join(sDir, '.claude.json')
@@ -2509,13 +2618,21 @@ export function prepareSession(home = os.homedir(), name) {
   }
   atomicWrite(cj, JSON.stringify(sessionData, null, 2))
 
-  const credFile = path.join(sDir, '.claude', '.credentials.json')
+  // CLAUDE_CONFIG_DIR *is* the ~/.claude equivalent: credentials sit directly in it
+  const credFile = path.join(sDir, '.credentials.json')
+  fs.rmSync(path.join(sDir, '.claude', '.credentials.json'), { force: true }) // pre-0.2.1 location, never read
   if (pData.credentials) {
     atomicWrite(credFile, pData.credentials)
-  } else if (fs.existsSync(credFile)) {
-    try {
-      fs.unlinkSync(credFile)
-    } catch {}
+    // macOS reads the per-dir Keychain item first; overwrite it so a stale token there cannot win.
+    // A locked/missing login keychain (SSH) must not abort `run`: the file above is the fallback.
+    if (process.platform === 'darwin') {
+      try {
+        writeKeychain(sessionKeychainService(sDir), pData.credentials)
+      } catch {}
+    }
+  } else {
+    fs.rmSync(credFile, { force: true })
+    if (process.platform === 'darwin') deleteKeychain(sessionKeychainService(sDir))
   }
   return sDir
 }
@@ -2530,6 +2647,10 @@ export function syncSessionBack(home = os.homedir(), name, sDir) {
     const cj = path.join(sDir, '.claude.json')
     if (fs.existsSync(cj)) {
       const liveJson = JSON.parse(fs.readFileSync(cj, 'utf-8'))
+      // the user may have logged into another account inside the session: don't overwrite this profile with it
+      const liveId = accountId(liveJson.oauthAccount)
+      const savedId = accountId(pData.claude_json?.oauthAccount)
+      if (liveId && savedId && liveId !== savedId) return
       for (const k of AUTH_KEYS) {
         if (k in liveJson) {
           pData.claude_json = pData.claude_json || {}
@@ -2537,10 +2658,11 @@ export function syncSessionBack(home = os.homedir(), name, sDir) {
         }
       }
     }
-    const credFile = path.join(sDir, '.claude', '.credentials.json')
-    if (fs.existsSync(credFile)) {
-      pData.credentials = fs.readFileSync(credFile, 'utf-8')
-    }
+    const credFile = path.join(sDir, '.credentials.json')
+    const live =
+      (process.platform === 'darwin' && readKeychain(sessionKeychainService(sDir))) ||
+      (fs.existsSync(credFile) ? fs.readFileSync(credFile, 'utf-8') : null)
+    if (live) pData.credentials = live
     atomicWrite(target, JSON.stringify(pData, null, 2))
   } catch {}
 }
@@ -2553,7 +2675,7 @@ export function runSession(home = os.homedir(), name, cmdArgs = ['claude']) {
     ...process.env,
     CLAUDE_CONFIG_DIR: sDir,
   }
-  const res = child_process.spawnSync(bin, args, {
+  const res = spawnClaudeSync(bin, args, {
     env,
     stdio: 'inherit',
     cwd: process.cwd(),
@@ -2579,9 +2701,8 @@ export function loadBalanceConfig(home = os.homedir()) {
       if (data && typeof data === 'object') {
         return {
           enabled: Boolean(data.enabled),
-          mode: ['least-used', 'round-robin', 'off'].includes(data.mode) ? data.mode : 'least-used',
+          mode: data.mode === 'round-robin' ? 'round-robin' : 'least-used',
           pool: data.pool || 'all',
-          lastIndex: typeof data.lastIndex === 'number' ? data.lastIndex : 0,
         }
       }
     }
@@ -2590,7 +2711,6 @@ export function loadBalanceConfig(home = os.homedir()) {
     enabled: false,
     mode: 'least-used',
     pool: 'all',
-    lastIndex: 0,
   }
 }
 
@@ -2602,43 +2722,9 @@ export function saveBalanceConfig(home = os.homedir(), config) {
   return merged
 }
 
+// `balance next`: same eligibility rules as auto-switch (quota, expiry, disabled, pools), chosen by balance mode
 export function getNextBalancedProfile(home = os.homedir()) {
-  const config = loadBalanceConfig(home)
-  const all = listProfiles(home)
-  const disabled = loadDisabledProfiles(home)
-  const cur = currentProfile(home)
-
-  let candidates = all.filter(p => !disabled.includes(p))
-  if (config.pool && config.pool !== 'all') {
-    candidates = candidates.filter(p => getProfileTags(home, p).includes(config.pool))
-  }
-  if (candidates.length === 0) return null
-  if (candidates.length === 1) return candidates[0]
-
-  const otherCandidates = candidates.filter(p => p !== cur)
-  const poolToUse = otherCandidates.length > 0 ? otherCandidates : candidates
-
-  if (config.mode === 'round-robin') {
-    const nextIdx = (config.lastIndex + 1) % poolToUse.length
-    config.lastIndex = nextIdx
-    saveBalanceConfig(home, config)
-    return poolToUse[nextIdx]
-  }
-
-  // default: least-used (calculate from usage cache)
-  const cache = loadUsageCache(home)
-  const scored = poolToUse.map(p => {
-    const email = profileEmail(home, p)
-    const hit = cache[`${p}|${email}`] || {}
-    let util = 0
-    const limits = Array.isArray(hit.limits) ? hit.limits : []
-    for (const [lbl, val] of limits) {
-      if (lbl.includes('5') || lbl.toLowerCase().includes('five')) util = Number(val)
-    }
-    return { name: p, util }
-  })
-  scored.sort((a, b) => a.util - b.util)
-  return scored[0].name
+  return findNextProfile(home, { balance: { ...loadBalanceConfig(home), enabled: true } })
 }
 
 export function balanceSwap(home = os.homedir()) {
@@ -2690,85 +2776,51 @@ export function saveWebhookConfig(home = os.homedir(), config) {
   return merged
 }
 
-export function postHttpJson(targetUrl, payload) {
-  return new Promise((resolve, reject) => {
-    try {
-      const parsedUrl = new URL(targetUrl)
-      const isHttps = parsedUrl.protocol === 'https:'
-      const client = isHttps ? https : http
-      const body = JSON.stringify(payload)
-      const req = client.request(
-        parsedUrl,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(body),
-          },
-          timeout: 5000,
-        },
-        res => {
-          res.resume()
-          resolve({ status: res.statusCode })
-        }
-      )
-      req.on('error', reject)
-      req.on('timeout', () => {
-        req.destroy()
-        reject(new Error('Request timed out'))
-      })
-      req.write(body)
-      req.end()
-    } catch (err) {
-      reject(err)
-    }
+export async function postHttpJson(targetUrl, payload) {
+  const res = await fetch(targetUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(5000),
   })
+  return { status: res.status }
+}
+
+// a CLI swap exits right after returning; pending webhook posts are awaited by flushWebhooks() first
+const pendingWebhooks = new Set()
+
+function trackWebhook(promise) {
+  const p = promise.catch(() => {}).finally(() => pendingWebhooks.delete(p))
+  pendingWebhooks.add(p)
+}
+
+export function flushWebhooks() {
+  return Promise.allSettled([...pendingWebhooks])
+}
+
+// webhook URLs embed secrets (Telegram bot token, Discord/Slack keys): show only the host
+export function maskUrl(url) {
+  try {
+    return `${new URL(url).origin}/…`
+  } catch {
+    return '***'
+  }
 }
 
 export async function sendWebhookNotification(home = os.homedir(), payload) {
-  if (
-    payload?.event !== 'test' &&
-    (process.env.NODE_ENV === 'test' ||
-      process.env.CLAUDE_SWAP_SILENT === '1' ||
-      (home && (home.includes('test-') || home.includes(os.tmpdir()))))
-  ) {
-    return
-  }
+  if (payload?.event !== 'test' && silenced()) return // an explicit `webhook test` still sends
   const cfg = loadWebhookConfig(home)
-  const results = []
   const text = payload.text || `[claude-swap] ${payload.event || 'Swap Alert'}: ${payload.profile || 'Profile'} (${payload.reason || 'No reason'})`
-
-  if (cfg.telegram) {
-    try {
-      results.push(postHttpJson(cfg.telegram, { text }).catch(() => null))
-    } catch {}
+  const discord = {
+    embeds: [{ title: '🔀 claude-swap Notification', description: text, color: 0x3b82f6, timestamp: new Date().toISOString() }],
   }
-  if (cfg.discord) {
-    try {
-      const body = {
-        embeds: [
-          {
-            title: '🔀 claude-swap Notification',
-            description: text,
-            color: 0x3b82f6,
-            timestamp: new Date().toISOString(),
-          },
-        ],
-      }
-      results.push(postHttpJson(cfg.discord, body).catch(() => null))
-    } catch {}
-  }
-  if (cfg.slack) {
-    try {
-      results.push(postHttpJson(cfg.slack, { text }).catch(() => null))
-    } catch {}
-  }
-  if (cfg.generic) {
-    try {
-      results.push(postHttpJson(cfg.generic, payload).catch(() => null))
-    } catch {}
-  }
-  await Promise.allSettled(results)
+  const targets = [
+    [cfg.telegram, { text }],
+    [cfg.discord, discord],
+    [cfg.slack, { text }],
+    [cfg.generic, payload],
+  ].filter(([url]) => url)
+  await Promise.allSettled(targets.map(([url, body]) => postHttpJson(url, body)))
 }
 
 export async function testWebhook(home = os.homedir(), type = null) {
@@ -2899,12 +2951,6 @@ export function maskEmail(email, enabled = true) {
   return `${visible}***@${domain}`
 }
 
-export function maskToken(token, enabled = true) {
-  if (!enabled || !token || typeof token !== 'string') return token
-  if (token.length <= 8) return '***'
-  return `${token.slice(0, 4)}***${token.slice(-4)}`
-}
-
 export function exportSafeShare(home = os.homedir(), outputPath = null) {
   const profiles = listProfiles(home)
   const safeProfiles = {}
@@ -2990,7 +3036,7 @@ export const MARKETPLACE = 'claude-swap'
 export const PLUGIN_ID = `profile-swap@${MARKETPLACE}`
 
 // the plugin manager owns the install (a versioned cache dir, not a git checkout), so upgrade goes through it
-export function upgradePlugin(run = child_process.spawnSync) {
+export function upgradePlugin(run = spawnClaudeSync) {
   const outputs = []
   for (const args of [
     ['plugin', 'marketplace', 'update', MARKETPLACE],
@@ -3073,13 +3119,13 @@ export function formatHelpReport(color = null, lang = 'vi') {
       `  ${cmd('/profile balance [mode]')}     Smart Quota load balancing (least-used, round-robin)`,
       `  ${cmd('/profile webhook [set|test]')} Setup external alerts (Telegram, Discord, Slack)`,
       `  ${cmd('/profile budget [set]')}       Monthly budget and cost tracker`,
-      `  ${cmd('/profile mask [on|off]')}      Mask emails and sensitive tokens`,
+      `  ${cmd('/profile mask [on|off]')}      Mask account emails in list & dashboard`,
       `  ${cmd('/profile share [file]')}       Export safe configuration bundle (no tokens)`,
       `  ${cmd('/profile completion [sh]')}    Generate shell autocompletion (bash, zsh, fish)`,
       `  ${cmd('/profile temp <name> [time]')} Temporary swap with auto-revert (e.g. 30m, 1h)`,
       `  ${cmd('/profile untemp')}            Cancel temporary swap and revert immediately`,
       `  ${cmd('/profile statusline')}        Status string for Shell prompt / Tmux`,
-      `  ${cmd('/profile prompt <shell>')}    Config snippet for starship, zsh, bash, tmux`,
+      `  ${cmd('/profile prompt <shell>')}    Config snippet for starship, zsh, bash, tmux, powershell`,
       `  ${cmd('/profile notify on|off')}     Toggle desktop notifications on profile swap`,
       `  ${cmd('/profile history [n]')}       View recent swap history`,
       `  ${cmd('/profile stats')}             Statistics on manual vs automatic swaps`,
@@ -3151,13 +3197,13 @@ export function formatHelpReport(color = null, lang = 'vi') {
     `  ${cmd('/profile balance [mode]')}    Cân bằng tải Quota thông minh (least-used, round-robin)`,
     `  ${cmd('/profile webhook [set|test]')} Cấu hình cảnh báo Telegram, Discord, Slack`,
     `  ${cmd('/profile budget [set|unset]')} Quản lý hạn mức chi tiêu hàng tháng`,
-    `  ${cmd('/profile mask [on|off]')}     Che mờ email & token bảo vệ sự riêng tư`,
+    `  ${cmd('/profile mask [on|off]')}     Che mờ email tài khoản (list & dashboard)`,
     `  ${cmd('/profile share [file]')}      Xuất cấu hình an toàn không chứa token`,
     `  ${cmd('/profile completion [sh]')}   Sinh mã autocomplete cho Bash, Zsh, Fish`,
     `  ${cmd('/profile temp <tên> [tg]')}   Mượn tạm profile (vd: 30m, 1h) rồi tự hoàn lại`,
     `  ${cmd('/profile untemp')}            Hủy mượn tạm và quay về profile gốc ngay`,
     `  ${cmd('/profile statusline')}        Chuỗi trạng thái cho Shell prompt / Tmux`,
-    `  ${cmd('/profile prompt <shell>')}    Snippet cấu hình starship, zsh, bash, tmux`,
+    `  ${cmd('/profile prompt <shell>')}    Snippet cấu hình starship, zsh, bash, tmux, powershell`,
     `  ${cmd('/profile notify on|off')}     Bật / tắt thông báo desktop khi đổi profile`,
     `  ${cmd('/profile history [n]')}       Xem lịch sử các lần chuyển đổi gần nhất`,
     `  ${cmd('/profile stats')}             Thống kê số lần đổi thủ công, tự động`,
@@ -3418,7 +3464,10 @@ export async function runCli(argv, home = os.homedir()) {
 
         if (!sub || sub === 'status') {
           console.log(`🤖 Tự động chuyển profile: ${cfg.enabled ? '🟢 BẬT' : '⚪ TẮT'} (Ngưỡng: ${cfg.threshold}%)`)
-          if (cfg.order && cfg.order.length > 0) {
+          const bal = loadBalanceConfig(home)
+          if (bal.enabled) {
+            console.log(`⚖️ Chọn profile kế tiếp theo cân bằng tải: ${bal.mode}${bal.pool !== 'all' ? ` (pool: ${bal.pool})` : ''}`)
+          } else if (cfg.order && cfg.order.length > 0) {
             console.log(`📋 Thứ tự ưu tiên: ${cfg.order.join(' ➔ ')}`)
           } else {
             console.log('📋 Quy tắc chọn: Tự động (Ưu tiên còn nhiều token hơn, thời gian reset 5h ngắn hơn)')
@@ -3477,6 +3526,10 @@ export async function runCli(argv, home = os.homedir()) {
         }
 
         if (sub === 'check') {
+          if (isolatedSession(home)) {
+            console.log('ℹ️ Bỏ qua auto-switch trong session cô lập (/profile run).')
+            return 0
+          }
           const res = await autoCheckAndSwap(home)
           if (res.swapped) {
             const why = res.isTempRevert
@@ -3914,7 +3967,7 @@ export async function runCli(argv, home = os.homedir()) {
       case 'web':
       case 'dashboard': {
         const sub = filteredArgv[1]
-        const { startWebDashboard, stopWebDashboard } = await import('./web.js')
+        const { startWebDashboard, stopWebDashboard, runningDashboard, openBrowser } = await import('./web.js')
         if (sub === 'stop') {
           const stopped = stopWebDashboard(home)
           console.log(stopped
@@ -3923,25 +3976,40 @@ export async function runCli(argv, home = os.homedir()) {
           return 0
         }
         const portArg = filteredArgv.indexOf('--port')
-        const port = portArg !== -1 ? parseInt(filteredArgv[portArg + 1], 10) : 3737
+        const port = portArg !== -1 ? Number(filteredArgv[portArg + 1]) : 3737
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          throw new SwapError(lang === 'en' ? 'Invalid port. Example: --port 3737' : 'Port không hợp lệ. Ví dụ: --port 3737')
+        }
         const isDaemon = filteredArgv.includes('--daemon')
         const noOpen = filteredArgv.includes('--no-open')
-
-        if (isDaemon) {
-          const child = child_process.spawn(
-            process.execPath,
-            [SCRIPT_PATH, 'web', '--server', '--port', String(port), ...(noOpen ? ['--no-open'] : [])],
-            { detached: true, stdio: 'ignore' }
-          )
-          child.unref()
+        const announce = p =>
           console.log(lang === 'en'
-            ? `🌐 Web Dashboard running in background at: http://localhost:${port}`
-            : `🌐 Web Dashboard đang chạy ngầm tại: http://localhost:${port}`)
+            ? `🌐 Web Dashboard running in background at: http://127.0.0.1:${p}`
+            : `🌐 Web Dashboard đang chạy ngầm tại: http://127.0.0.1:${p}`)
+
+        const running = runningDashboard(home)
+        if (running && !filteredArgv.includes('--server')) {
+          announce(running.port ?? port)
+          if (!noOpen) openBrowser(`http://127.0.0.1:${running.port ?? port}`)
           return 0
         }
 
-        const isServer = filteredArgv.includes('--server')
-        const serverInst = await startWebDashboard(home, { port, open: !noOpen && !isServer })
+        if (isDaemon) {
+          const child = spawnDetached(process.execPath, [
+            SCRIPT_PATH, 'web', '--server', '--port', String(port), ...(noOpen ? ['--no-open'] : []),
+          ])
+          // the server moves to the next port when this one is taken: wait briefly for its real port
+          let state = null
+          for (let i = 0; i < 30 && !(state?.pid === child?.pid); i++) {
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100)
+            state = runningDashboard(home)
+          }
+          announce(state?.port ?? port)
+          return 0
+        }
+
+        // the background child opens the browser itself once it knows its port
+        const serverInst = await startWebDashboard(home, { port, open: !noOpen })
         console.log(lang === 'en'
           ? `🌐 Web Dashboard active at: ${serverInst.url}\n(Press Ctrl+C to stop)`
           : `🌐 Web Dashboard đang hoạt động tại: ${serverInst.url}\n(Nhấn Ctrl+C để dừng)`)
@@ -3960,7 +4028,7 @@ export async function runCli(argv, home = os.homedir()) {
         if (sub === 'on' || sub === 'off') {
           saveBalanceConfig(home, { enabled: sub === 'on' })
           console.log(sub === 'on'
-            ? (lang === 'en' ? '✅ Smart Load Balancing enabled.' : '✅ Đã bật Cân Bằng Tải Quota.')
+            ? (lang === 'en' ? '✅ Smart Load Balancing enabled: auto-switch now picks the next profile by the balance mode.' : '✅ Đã bật Cân Bằng Tải Quota: auto-switch sẽ chọn profile kế tiếp theo thuật toán cân bằng.')
             : (lang === 'en' ? '❌ Smart Load Balancing disabled.' : '❌ Đã tắt Cân Bằng Tải Quota.'))
           return 0
         }
@@ -3991,10 +4059,11 @@ export async function runCli(argv, home = os.homedir()) {
         if (!sub || sub === 'status') {
           const cfg = loadWebhookConfig(home)
           console.log(lang === 'en' ? '🔔 Webhook Notifications Status:' : '🔔 Trạng thái Webhook Cảnh Báo:')
-          console.log(`  • Telegram: ${cfg.telegram || '(chưa đặt)'}`)
-          console.log(`  • Discord:  ${cfg.discord || '(chưa đặt)'}`)
-          console.log(`  • Slack:    ${cfg.slack || '(chưa đặt)'}`)
-          console.log(`  • Generic:  ${cfg.generic || '(chưa đặt)'}`)
+          const show = u => (u ? maskUrl(u) : lang === 'en' ? '(not set)' : '(chưa đặt)')
+          console.log(`  • Telegram: ${show(cfg.telegram)}`)
+          console.log(`  • Discord:  ${show(cfg.discord)}`)
+          console.log(`  • Slack:    ${show(cfg.slack)}`)
+          console.log(`  • Generic:  ${show(cfg.generic)}`)
           return 0
         }
         if (sub === 'set') {
@@ -4012,9 +4081,7 @@ export async function runCli(argv, home = os.homedir()) {
         if (sub === 'unset') {
           const type = filteredArgv[2]
           if (!type) throw new SwapError(lang === 'en' ? 'Usage: /profile webhook unset <type>' : 'Cú pháp: /profile webhook unset <type>')
-          const cfg = loadWebhookConfig(home)
-          delete cfg[type.toLowerCase()]
-          saveWebhookConfig(home, cfg)
+          saveWebhookConfig(home, { [type.toLowerCase()]: null })
           console.log(lang === 'en' ? `🔔 Webhook '${type}' removed.` : `🔔 Đã gỡ webhook '${type}'.`)
           return 0
         }
@@ -4067,8 +4134,8 @@ export async function runCli(argv, home = os.homedir()) {
         if (sub === 'on' || sub === 'off') {
           const enabled = setMasking(home, sub === 'on')
           console.log(enabled
-            ? (lang === 'en' ? '🛡️ Profile masking enabled.' : '🛡️ Đã bật che mờ email & token.')
-            : (lang === 'en' ? '🛡️ Profile masking disabled.' : '🛡️ Đã tắt che mờ email & token.'))
+            ? (lang === 'en' ? '🛡️ Profile masking enabled.' : '🛡️ Đã bật che mờ email.')
+            : (lang === 'en' ? '🛡️ Profile masking disabled.' : '🛡️ Đã tắt che mờ email.'))
           return 0
         }
         throw new SwapError(lang === 'en' ? 'Usage: /profile mask [on|off|status]' : 'Cú pháp: /profile mask [on|off|status]')
@@ -4104,7 +4171,11 @@ export async function runCli(argv, home = os.homedir()) {
 }
 
 // Direct CLI invocation
+// no top-level await: web.js imports this module, and a pending top-level await here would
+// deadlock `await import('./web.js')` (the module graph never finishes evaluating)
 if (process.argv[1] && path.resolve(process.argv[1]) === SCRIPT_PATH) {
-  const code = await runCli(process.argv.slice(2))
-  process.exit(code)
+  runCli(process.argv.slice(2)).then(async code => {
+    await flushWebhooks()
+    process.exit(code)
+  })
 }
