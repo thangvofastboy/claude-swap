@@ -3,3 +3,6 @@ node_modules/
 # local AI-tooling state (personal, not part of the app)
 .claude/
 .remember/
+
+# planning notes from the superpowers skill (kept locally, not shipped with the plugin)
+docs/superpowers/
