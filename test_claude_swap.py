@@ -127,7 +127,7 @@ def test_cli(tmp_path, capsys):
     login(tmp_path, "a", "tok-a")
     assert cs.run_cli(["save", "A"], tmp_path) == 0
     assert cs.run_cli(["save", "A"], tmp_path) == 1
-    assert cs.run_cli(["save", "B"], tmp_path) == 0
+    assert cs.run_cli(["new", "B"], tmp_path) == 0
     assert cs.run_cli(["swap", "A"], tmp_path) == 0
     capsys.readouterr()
     cs.run_cli(["list"], tmp_path)

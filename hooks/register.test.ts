@@ -36,9 +36,17 @@ test('/profile maps subcommands and rejects junk', async ($, on) => {
 
   expect((await $.command.run({ command: 'profile', args: '' })).text).toContain('Chưa có profile')
   await $.command.run({ command: 'profile', args: 'save work --force' })
+  await $.command.run({ command: 'profile', args: 'new personal' })
   expect((await $.command.run({ command: 'profile', args: 'a b' })).text).toContain('Dùng:')
 
-  expect(calls).toEqual([['list'], ['current'], ['save', 'work', '--force'], ['current']])
+  expect(calls).toEqual([
+    ['list'],
+    ['current'],
+    ['save', 'work', '--force'],
+    ['current'],
+    ['new', 'personal'],
+    ['current'],
+  ])
 })
 
 test('/profile import keeps a path with spaces as one argument', async ($, on) => {

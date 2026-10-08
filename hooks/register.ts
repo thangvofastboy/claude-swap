@@ -1,8 +1,8 @@
 import type { EngineInterface, Register } from 'claude-code'
 
-const SUBCOMMANDS = new Set(['list', 'current', 'usage', 'folder', 'save', 'swap', 'delete'])
+const SUBCOMMANDS = new Set(['list', 'current', 'usage', 'folder', 'save', 'swap', 'delete', 'new'])
 const USAGE =
-  'Dùng: /profile | /profile <tên> | /profile usage | /profile folder | /profile import <thư mục> [--force] | /profile save <tên> [--force] | /profile delete <tên>'
+  'Dùng: /profile | /profile <tên> | /profile usage | /profile folder | /profile import <thư mục> [--force] | /profile new <tên> [--force] | /profile save <tên> [--force] | /profile delete <tên>'
 
 // "" → list, "work" → swap work, "save work" → save work, "import ~/a b" → import "~/a b"
 function toArgv(args: string): string[] | undefined {
@@ -42,7 +42,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'profile',
-      description: 'Đổi tài khoản Claude ngay trong session: /profile [tên | usage | save <tên> | delete <tên>]',
+      description: 'Đổi tài khoản Claude ngay trong session: /profile [tên | usage | new <tên> | save <tên> | delete <tên>]',
     })
     void refreshStatus($).catch(() => undefined)
 
@@ -58,6 +58,6 @@ export const register: Register = on => {
     const out = `${ran.stdout}${ran.stderr}`.trim()
     if (out) return { text: out }
 
-    return { text: argv[0] === 'list' ? 'Chưa có profile nào. Lưu bằng: /profile save <tên>' : 'OK' }
+    return { text: argv[0] === 'list' ? 'Chưa có profile nào. Tạo bằng: /profile new <tên>' : 'OK' }
   })
 }

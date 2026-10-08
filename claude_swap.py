@@ -4,6 +4,7 @@
     python claude_swap.py                 # mở GUI
     python claude_swap.py list|current
     python claude_swap.py save <name> [--force]
+    python claude_swap.py new <name> [--force]
     python claude_swap.py swap <name>
     python claude_swap.py delete <name>
     python claude_swap.py usage           # quota 5h/7 ngày của mọi profile
@@ -574,9 +575,10 @@ def run_cli(argv: list[str], home: Path) -> int:
     imp = sub.add_parser("import", help="nhập profile từ một thư mục")
     imp.add_argument("path")
     imp.add_argument("--force", action="store_true", help="ghi đè profile trùng tên")
-    s = sub.add_parser("save")
-    s.add_argument("name")
-    s.add_argument("--force", action="store_true", help="ghi đè nếu đã tồn tại")
+    for cmd in ("save", "new"):
+        s = sub.add_parser(cmd, help="lưu tài khoản đang đăng nhập thành profile")
+        s.add_argument("name")
+        s.add_argument("--force", action="store_true", help="ghi đè nếu đã tồn tại")
     for cmd in ("swap", "delete"):
         sub.add_parser(cmd).add_argument("name")
     a = ap.parse_args(argv)
@@ -603,8 +605,9 @@ def run_cli(argv: list[str], home: Path) -> int:
                 print(f"Trùng tên, bỏ qua (dùng --force để ghi đè): {', '.join(r['exists'])}")
             if r["invalid"]:
                 print(f"Không phải file profile: {', '.join(r['invalid'])}")
-        elif a.cmd == "save":
-            print(f"Đã lưu: {save_profile(home, a.name, a.force)}")
+        elif a.cmd in ("save", "new"):
+            verb = "tạo" if a.cmd == "new" else "lưu"
+            print(f"Đã {verb}: {save_profile(home, a.name, a.force)}")
         elif a.cmd == "swap":
             swap_profile(home, a.name)
             print(f"Đã chuyển sang '{a.name}'. Không cần tắt session; Claude CLI dùng tài khoản mới ở lần "
