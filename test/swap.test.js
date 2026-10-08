@@ -88,6 +88,10 @@ import {
   maskEmail,
   exportSafeShare,
   generateCompletion,
+  keychainWriteCommand,
+  readPasswordArg,
+  positionalArgs,
+  syncConfigFile,
   findNextProfile,
   isolatedSession,
   readCurrent,
@@ -780,6 +784,45 @@ describe('swap.js core functionality', () => {
     assert.equal(await runCli(['sync', 'setup', syncFile, '--password', 'mypassword'], tmpHome), 0)
     assert.equal(await runCli(['sync', 'status'], tmpHome), 0)
     assert.equal(await runCli(['sync', 'push', '--password', 'mypassword'], tmpHome), 0)
+    assert.equal(loadSyncConfig(tmpHome).password, undefined) // never persisted
+
+    // a password saved by an older version is used once, then scrubbed
+    fs.writeFileSync(syncConfigFile(tmpHome), JSON.stringify({ targetPath: syncFile, password: 'mypassword' }))
+    assert.equal(syncPush(tmpHome, null, '').count, 1)
+    assert.equal(JSON.parse(fs.readFileSync(syncConfigFile(tmpHome), 'utf-8')).password, undefined)
+
+    // the env var works end-to-end, so the password need not appear on the command line
+    process.env.CLAUDE_SWAP_PASSWORD = 'mypassword'
+    try {
+      assert.equal(await runCli(['sync', 'pull', syncFile, '--force'], newHome), 0)
+    } finally {
+      delete process.env.CLAUDE_SWAP_PASSWORD
+    }
+  })
+
+  test('secrets stay off the command line: password sources and Keychain stdin command', () => {
+    assert.equal(readPasswordArg(['export', 'f', '--password-stdin'], () => 'from-stdin\n'), 'from-stdin')
+    assert.equal(readPasswordArg(['export', 'f', '--password', 'p1']), 'p1')
+    process.env.CLAUDE_SWAP_PASSWORD = 'from-env'
+    try {
+      assert.equal(readPasswordArg(['export', 'f']), 'from-env')
+      assert.equal(readPasswordArg(['export', 'f', '--password', 'p1']), 'p1')
+    } finally {
+      delete process.env.CLAUDE_SWAP_PASSWORD
+    }
+
+    // a bare --password does not swallow the next flag or count as a path value
+    assert.deepEqual(positionalArgs(['sync', 'push', '--password', 'pw', '/tmp/b.enc'], 2), ['/tmp/b.enc'])
+    assert.deepEqual(positionalArgs(['sync', 'push', '/tmp/b.enc', '--password', '--force'], 2), ['/tmp/b.enc'])
+    assert.equal(readPasswordArg(['sync', 'push', '--password', '--force']), '')
+    assert.throws(() => keychainWriteCommand('evil" -s "x', 'me', 'data'), /Keychain/)
+
+    const secret = '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-SECRET"}}'
+    const line = keychainWriteCommand('Claude Code-credentials', 'me', secret)
+    assert.ok(!line.includes('SECRET')) // hex-encoded, sent on stdin
+    const hex = line.match(/-X "([0-9a-f]+)"/)[1]
+    assert.equal(Buffer.from(hex, 'hex').toString('utf-8'), secret)
+    assert.match(line, /^add-generic-password -U -a "me" -s "Claude Code-credentials" -X "[0-9a-f]+"\n$/)
   })
 
   test('model affinity: assign, list, apply and CLI', async () => {

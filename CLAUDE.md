@@ -42,6 +42,11 @@ State is kept in dotfiles beside the profiles: `.current`, `.aliases.json`, `.au
 - `findNextProfile` filters candidates by disabled list, auto `pool` and balance `pool`, expiry, and quota. When `balance` is on, its mode picks among the survivors (`round-robin` = next name after the current one, stateless; `least-used` = the default sort), and `auto order` is ignored. `balance next` goes through the same function.
 - `autoCheckAndSwap` runs its checks in this order: temp-profile expiry → refresh usage → Git branch binding → auto-return to primary → threshold / 7-day safeguard → `findNextProfile` (config `order`, otherwise lowest 5h usage, then earliest reset).
 
+### Secrets
+
+- Keychain writes go through `security -i` on stdin (`keychainWriteCommand`, hex `-X`), never `-w <token>` on argv where `ps` shows it.
+- Backup/sync passwords are never written to disk (`saveSyncConfig` strips `password`). Read them only with `readPasswordArg` (`--password-stdin` > `--password` > `CLAUDE_SWAP_PASSWORD`).
+
 ### Cross-platform
 
 - Spawn fire-and-forget processes (notifications, `xdg-open`/`open`/`explorer`, the dashboard) through `spawnDetached`. A missing binary otherwise emits an unhandled `'error'` and crashes the process.

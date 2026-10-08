@@ -223,11 +223,13 @@ Khởi chạy giao diện Web Dashboard trực quan và hiện đại ngay trên
 | `/profile history [n]` | Xem lịch sử các lần chuyển đổi gần nhất (mặc định 10 lần) |
 | `/profile stats` | Thống kê số lần chuyển đổi thủ công, tự động và theo dự án |
 | `/profile sync setup <path>` | Cài đặt đường dẫn kho lưu trữ đồng bộ mã hóa |
-| `/profile sync push [--password <pw>]` | Đẩy bản sao lưu mã hóa lên kho đồng bộ |
-| `/profile sync pull [--password <pw>]` | Kéo và giải mã bản sao lưu từ kho đồng bộ |
-| `/profile export <file> --password <pw>` | Xuất file sao lưu mã hóa AES-256-GCM |
-| `/profile import-enc <file> --password <pw>` | Khôi phục profiles từ file mã hóa |
+| `/profile sync push` | Đẩy bản sao lưu mã hóa lên kho đồng bộ |
+| `/profile sync pull` | Kéo và giải mã bản sao lưu từ kho đồng bộ |
+| `/profile export <file>` | Xuất file sao lưu mã hóa AES-256-GCM |
+| `/profile import-enc <file>` | Khôi phục profiles từ file mã hóa |
 | `/profile import <thư_mục> [--force]` | Nhập các profile thô từ thư mục khác |
+
+> 🔑 **Mật khẩu sao lưu** không bao giờ được lưu xuống đĩa. Truyền bằng `--password-stdin` (an toàn nhất: `echo "$PW" | node swap.js export f.enc --password-stdin`), biến môi trường `CLAUDE_SWAP_PASSWORD`, hoặc `--password <pw>` (sẽ nằm trong lịch sử shell / transcript).
 
 ---
 

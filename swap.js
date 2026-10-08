@@ -203,15 +203,31 @@ function readKeychain(service) {
   }
 }
 
+// `security -i` reads the command from stdin, so the token never appears in the process list (`ps`).
+// Same command shape and length fallback as Claude Code's own Keychain writer.
+export function keychainWriteCommand(service, account, data) {
+  // the line is parsed by `security -i`: keep quoted fields free of quotes/backslashes/newlines
+  if (/["\\\n]/.test(account + service)) throw new SwapError(`Tên Keychain không hợp lệ: ${service}`)
+  const hex = Buffer.from(data, 'utf-8').toString('hex')
+  return `add-generic-password -U -a "${account}" -s "${service}" -X "${hex}"\n`
+}
+
+const SECURITY_STDIN_MAX = 4000 // `security -i` line buffer; longer payloads fall back to argv
+
 function writeKeychain(service, data) {
-  try {
-    child_process.execFileSync(
-      'security',
-      ['add-generic-password', '-U', '-s', service, '-a', keychainAccount(), '-w', data],
-      { stdio: ['ignore', 'pipe', 'pipe'] }
-    )
-  } catch (err) {
-    throw new SwapError(`Không ghi được Keychain: ${err.message}`)
+  const account = keychainAccount()
+  const line = keychainWriteCommand(service, account, data)
+  const res =
+    line.length <= SECURITY_STDIN_MAX
+      ? child_process.spawnSync('security', ['-i'], { input: line, encoding: 'utf-8', timeout: 10000 })
+      : child_process.spawnSync(
+          'security',
+          ['add-generic-password', '-U', '-a', account, '-s', service, '-X', Buffer.from(data, 'utf-8').toString('hex')],
+          { encoding: 'utf-8', timeout: 10000 }
+        )
+  if (res.error || res.status !== 0) {
+    const why = res.error?.message || `${res.stderr || res.stdout || ''}`.trim() || `exit ${res.status}`
+    throw new SwapError(`Không ghi được Keychain: ${why}`)
   }
 }
 
@@ -2274,7 +2290,31 @@ export function loadSyncConfig(home) {
 
 export function saveSyncConfig(home, config) {
   const f = syncConfigFile(home)
-  atomicWrite(f, JSON.stringify(config, null, 2))
+  // the backup password is never stored; this also scrubs one saved by older versions
+  const { password, ...rest } = config
+  atomicWrite(f, JSON.stringify(rest, null, 2))
+}
+
+const PASSWORD_HINT = '--password-stdin, biến môi trường CLAUDE_SWAP_PASSWORD hoặc --password <mật_khẩu>'
+
+// --password-stdin > --password <pw> > $CLAUDE_SWAP_PASSWORD. Only the first keeps it out of shell history
+// and the process list; the env var keeps it out of the history/transcript.
+export function readPasswordArg(argv, readStdin = () => fs.readFileSync(0, 'utf-8')) {
+  if (argv.includes('--password-stdin')) return readStdin().replace(/\r?\n$/, '')
+  const i = passwordValueIndex(argv)
+  return i !== -1 ? argv[i] : process.env.CLAUDE_SWAP_PASSWORD || ''
+}
+
+// index of the value after `--password`, or -1; a following `--flag` is not a value
+function passwordValueIndex(argv) {
+  const i = argv.indexOf('--password')
+  return i !== -1 && argv[i + 1] !== undefined && !argv[i + 1].startsWith('--') ? i + 1 : -1
+}
+
+// positional args after the subcommand, minus flags and the --password value
+export function positionalArgs(argv, from) {
+  const skip = passwordValueIndex(argv)
+  return argv.slice(from).filter((a, idx) => !a.startsWith('--') && idx + from !== skip)
 }
 
 export function syncPush(home, targetPath, password) {
@@ -2283,9 +2323,9 @@ export function syncPush(home, targetPath, password) {
   if (!dest) {
     throw new SwapError('Chưa cấu hình đường dẫn đích đồng bộ. Dùng: /profile sync setup <đường_dẫn_file>')
   }
-  const pass = password || config.password
+  const pass = password || config.password // config.password: legacy, removed by the save below
   if (!pass) {
-    throw new SwapError('Vui lòng cung cấp mật khẩu mã hóa với --password <mật_khẩu>.')
+    throw new SwapError(`Vui lòng cung cấp mật khẩu mã hóa qua ${PASSWORD_HINT}.`)
   }
 
   const res = exportEncryptedProfiles(home, dest, pass)
@@ -2301,9 +2341,9 @@ export function syncPull(home, sourcePath, password, force = false) {
   if (!src) {
     throw new SwapError('Chưa cấu hình đường dẫn nguồn đồng bộ. Dùng: /profile sync setup <đường_dẫn_file>')
   }
-  const pass = password || config.password
+  const pass = password || config.password // config.password: legacy, removed by the save below
   if (!pass) {
-    throw new SwapError('Vui lòng cung cấp mật khẩu giải mã với --password <mật_khẩu>.')
+    throw new SwapError(`Vui lòng cung cấp mật khẩu giải mã qua ${PASSWORD_HINT}.`)
   }
 
   const res = importEncryptedProfiles(home, src, pass, force)
@@ -3709,21 +3749,19 @@ export async function runCli(argv, home = os.homedir()) {
         return 0
       }
       case 'export': {
-        const targetPath = filteredArgv[1]
-        if (!targetPath) throw new SwapError('Cú pháp: /profile export <đường dẫn file> [--password <mật khẩu>]')
-        const passIndex = filteredArgv.indexOf('--password')
-        const password = passIndex !== -1 ? filteredArgv[passIndex + 1] : ''
-        if (!password) throw new SwapError('Vui lòng cung cấp mật khẩu với --password <mật khẩu>.')
+        const targetPath = positionalArgs(filteredArgv, 1)[0]
+        if (!targetPath) throw new SwapError(`Cú pháp: /profile export <đường dẫn file> (mật khẩu qua ${PASSWORD_HINT})`)
+        const password = readPasswordArg(filteredArgv)
+        if (!password) throw new SwapError(`Vui lòng cung cấp mật khẩu qua ${PASSWORD_HINT}.`)
         const res = exportEncryptedProfiles(home, targetPath, password)
         console.log(`🔐 Đã xuất ${res.count} profiles đã mã hóa ra: ${res.path}`)
         return 0
       }
       case 'import-enc': {
-        const sourcePath = filteredArgv[1]
-        if (!sourcePath) throw new SwapError('Cú pháp: /profile import-enc <đường dẫn file> [--password <mật khẩu>] [--force]')
-        const passIndex = filteredArgv.indexOf('--password')
-        const password = passIndex !== -1 ? filteredArgv[passIndex + 1] : ''
-        if (!password) throw new SwapError('Vui lòng cung cấp mật khẩu với --password <mật khẩu>.')
+        const sourcePath = positionalArgs(filteredArgv, 1)[0]
+        if (!sourcePath) throw new SwapError(`Cú pháp: /profile import-enc <đường dẫn file> [--force] (mật khẩu qua ${PASSWORD_HINT})`)
+        const password = readPasswordArg(filteredArgv)
+        if (!password) throw new SwapError(`Vui lòng cung cấp mật khẩu qua ${PASSWORD_HINT}.`)
         const force = filteredArgv.includes('--force')
         const res = importEncryptedProfiles(home, sourcePath, password, force)
         console.log(`📦 Đã nhập thành công: ${res.added.join(', ') || '(không có profile mới)'}`)
@@ -3879,29 +3917,27 @@ export async function runCli(argv, home = os.homedir()) {
         }
         if (sub === 'setup') {
           const target = filteredArgv[2]
-          if (!target) throw new SwapError('Cú pháp: /profile sync setup <đường_dẫn_file> [--password <mật_khẩu>]')
-          const passIndex = filteredArgv.indexOf('--password')
-          const password = passIndex !== -1 ? filteredArgv[passIndex + 1] : ''
+          if (!target) throw new SwapError('Cú pháp: /profile sync setup <đường_dẫn_file>')
           const cfg = loadSyncConfig(home)
           cfg.targetPath = path.resolve(target)
-          if (password) cfg.password = password
           saveSyncConfig(home, cfg)
           console.log(`☁️ Đã thiết lập đồng bộ với đường dẫn: ${cfg.targetPath}`)
+          if (filteredArgv.some(a => a.startsWith('--password'))) {
+            console.log(`🔑 Đã bỏ qua mật khẩu: mật khẩu không còn được lưu. Khi push/pull hãy dùng ${PASSWORD_HINT}.`)
+          }
           return 0
         }
         if (sub === 'push') {
-          const passIndex = filteredArgv.indexOf('--password')
-          const password = passIndex !== -1 ? filteredArgv[passIndex + 1] : ''
-          const target = filteredArgv.slice(2).find(a => a !== '--password' && a !== password)
+          const password = readPasswordArg(filteredArgv)
+          const target = positionalArgs(filteredArgv, 2)[0]
           const res = syncPush(home, target, password)
           console.log(`☁️ Đã đẩy bản sao lưu mã hóa (${res.count} profiles) lên: ${res.path}`)
           return 0
         }
         if (sub === 'pull') {
-          const passIndex = filteredArgv.indexOf('--password')
-          const password = passIndex !== -1 ? filteredArgv[passIndex + 1] : ''
+          const password = readPasswordArg(filteredArgv)
           const force = filteredArgv.includes('--force')
-          const target = filteredArgv.slice(2).find(a => a !== '--password' && a !== password && a !== '--force')
+          const target = positionalArgs(filteredArgv, 2)[0]
           const res = syncPull(home, target, password, force)
           console.log(`☁️ Đã tải thành công: ${res.added.join(', ') || '(không có profile mới)'}`)
           return 0
