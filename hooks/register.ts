@@ -1,6 +1,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 
 const SUBCOMMANDS = new Set([
+  'help',
   'list',
   'current',
   'usage',
@@ -28,12 +29,12 @@ const SUBCOMMANDS = new Set([
   'untemp',
 ])
 const USAGE =
-  'Dùng: /profile | /profile <tên> | /profile usage | /profile auto [on|off|threshold <%>|order <ds>|pool <tag>|safeguard|return|primary|check] | /profile cooldown | /profile doctor | /profile temp <tên> [thời_gian] | /profile untemp | /profile bind [tên] | /profile unbind | /profile tag <tên> <tag> | /profile tags | /profile history [n] | /profile stats | /profile notify [on|off] | /profile export <file> --password <pw> | /profile import-enc <file> --password <pw>'
+  'Dùng: /profile | /profile list | /profile <tên> | /profile usage | /profile auto | /profile cooldown | /profile doctor | /profile temp <tên> [thời_gian] | /profile bind [tên]'
 
-// "" → list, "work" → swap work, "save work" → save work, "import ~/a b" → import "~/a b", "auto ..." → auto ...
+// "" → help, "list" → list, "work" → swap work, "save work" → save work, "import ~/a b" → import "~/a b", "auto ..." → auto ...
 function toArgv(args: string): string[] | undefined {
   const words = args.trim().split(/\s+/).filter(Boolean)
-  if (words.length === 0) return ['list']
+  if (words.length === 0) return ['help']
   if (words[0] === 'import') {
     const path = words.slice(1).filter(w => w !== '--force').join(' ')
     if (!path) return undefined

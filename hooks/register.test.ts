@@ -34,7 +34,9 @@ test('/profile maps subcommands including auto and rejects junk', async ($, on) 
   })
   on('ui.status', () => ({ value: undefined }))
 
-  expect((await $.command.run({ command: 'profile', args: '' })).text).toContain('Chưa có profile')
+  // empty args should invoke help
+  await $.command.run({ command: 'profile', args: '' })
+  await $.command.run({ command: 'profile', args: 'list' })
   await $.command.run({ command: 'profile', args: 'save work --force' })
   await $.command.run({ command: 'profile', args: 'new personal' })
   await $.command.run({ command: 'profile', args: 'auto threshold 80' })
@@ -42,6 +44,8 @@ test('/profile maps subcommands including auto and rejects junk', async ($, on) 
   expect((await $.command.run({ command: 'profile', args: 'a b' })).text).toContain('Dùng:')
 
   expect(calls).toEqual([
+    ['help'],
+    ['current'],
     ['list'],
     ['current'],
     ['save', 'work', '--force'],

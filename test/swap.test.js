@@ -30,6 +30,7 @@ import {
   checkTempExpiry,
   cancelTempSwap,
   loadTempProfile,
+  formatHelpReport,
 } from '../swap.js'
 
 function login(home, account, token, extra = {}) {
@@ -586,6 +587,16 @@ describe('swap.js core functionality', () => {
     assert.equal(expRes.expired, true)
     assert.equal(expRes.revertedTo, 'orig')
     assert.equal(currentProfile(tmpHome), 'orig')
+  })
+
+  test('help command and empty args display full command usage guide', async () => {
+    const help = formatHelpReport()
+    assert.match(help, /Hướng dẫn sử dụng các lệnh/)
+    assert.match(help, /\/profile list/)
+    assert.match(help, /\/profile auto/)
+
+    assert.equal(await runCli([], tmpHome), 0)
+    assert.equal(await runCli(['help'], tmpHome), 0)
   })
 })
 

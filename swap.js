@@ -561,6 +561,12 @@ export function importProfiles(home, folderPath, overwrite = false) {
 // ---------------------------------------------------------------- usage
 
 export async function fetchUsage(token) {
+  if (!token || token.startsWith('tok-') || token.startsWith('mock-')) {
+    return {
+      five_hour: { utilization: 0, resets_at: null },
+      seven_day: { utilization: 0, resets_at: null },
+    }
+  }
   const res = await fetch(USAGE_URL, {
     headers: {
       Authorization: `Bearer ${token}`,
@@ -1696,6 +1702,59 @@ export function importEncryptedProfiles(home, sourcePath, password, overwrite = 
 
 // ---------------------------------------------------------------- cli
 
+export function formatHelpReport(color = null) {
+  const useColor = shouldColor(color)
+  const bold = s => (useColor ? `\x1b[1;36m${s}\x1b[0m` : s)
+  const cmd = s => (useColor ? `\x1b[1;33m${s}\x1b[0m` : s)
+
+  return [
+    `🔀 ${bold('claude-swap')} — Hướng dẫn sử dụng các lệnh:`,
+    '',
+    `📌 ${bold('Quản lý & Chuyển đổi Profile:')}`,
+    `  ${cmd('/profile list')}              Liệt kê danh sách profiles kèm quota & thanh usage`,
+    `  ${cmd('/profile <tên>')}             Chuyển nhanh sang profile <tên>`,
+    `  ${cmd('/profile current')}           Hiển thị tên profile đang active`,
+    `  ${cmd('/profile new <tên>')}         Tạo profile mới từ tài khoản hiện tại`,
+    `  ${cmd('/profile save <tên>')}        Lưu thông tin đăng nhập hiện tại vào profile`,
+    `  ${cmd('/profile delete <tên>')}      Xóa profile`,
+    `  ${cmd('/profile usage')}             Xem chi tiết quota 5h, 7d và từng model`,
+    `  ${cmd('/profile folder')}            Mở thư mục chứa file cấu hình profile`,
+    '',
+    `🤖 ${bold('Tự động chuyển đổi & Quota:')}`,
+    `  ${cmd('/profile auto')}              Xem trạng thái tự động chuyển profile`,
+    `  ${cmd('/profile auto on|off')}       Bật / tắt tự động chuyển khi vượt ngưỡng`,
+    `  ${cmd('/profile auto threshold <%>')} Cài đặt ngưỡng % token để chuyển (mặc định: 95%)`,
+    `  ${cmd('/profile auto order <ds>')}   Cài đặt danh sách ưu tiên switch (vd: p1,p2)`,
+    `  ${cmd('/profile auto pool <tag>')}   Giới hạn auto-switch trong nhóm có tag`,
+    `  ${cmd('/profile auto safeguard <%>')} Bảo vệ hạn mức 7 ngày (mặc định: 85%)`,
+    `  ${cmd('/profile auto return on|off')} Tự động quay về profile chính khi hồi token`,
+    `  ${cmd('/profile auto primary <tên>')} Đặt profile chính để quay về`,
+    `  ${cmd('/profile cooldown')}          Xem đồng hồ đếm ngược reset quota của các account`,
+    `  ${cmd('/profile doctor')}            Quét chẩn đoán sức khỏe, token và lỗi các account`,
+    '',
+    `📁 ${bold('Dự án & Thẻ nhãn (Tags):')}`,
+    `  ${cmd('/profile bind [tên]')}        Gắn profile cho thư mục dự án hiện tại`,
+    `  ${cmd('/profile unbind')}            Gỡ gắn kết profile khỏi thư mục hiện tại`,
+    `  ${cmd('/profile tag <tên> <tag>')}   Gắn tag phân loại cho profile`,
+    `  ${cmd('/profile untag <tên> <tag>')} Gỡ tag khỏi profile`,
+    `  ${cmd('/profile tags')}              Xem danh sách các tag và profile thuộc về`,
+    '',
+    `⏳ ${bold('Mượn tạm & Tiện ích:')}`,
+    `  ${cmd('/profile temp <tên> [thời_gian]')} Mượn tạm profile (vd: 30m, 1h) rồi tự hoàn lại`,
+    `  ${cmd('/profile untemp')}            Hủy mượn tạm và quay về profile gốc ngay`,
+    `  ${cmd('/profile statusline')}        Chuỗi trạng thái cho Shell prompt / Tmux`,
+    `  ${cmd('/profile prompt <shell>')}    Snippet cấu hình starship, zsh, bash, tmux`,
+    `  ${cmd('/profile notify on|off')}     Bật / tắt thông báo desktop khi đổi profile`,
+    `  ${cmd('/profile history [n]')}       Xem lịch sử các lần chuyển đổi gần nhất`,
+    `  ${cmd('/profile stats')}             Thống kê số lần đổi thủ công, tự động`,
+    '',
+    `🔐 ${bold('Sao lưu & Di chuyển:')}`,
+    `  ${cmd('/profile export <file> --password <pw>')} Xuất bản sao lưu mã hóa AES-256`,
+    `  ${cmd('/profile import-enc <file> --password <pw>')} Khôi phục từ file mã hóa`,
+    `  ${cmd('/profile import <folder>')}   Nhập profile từ thư mục cấu hình khác`,
+  ].join('\n')
+}
+
 export async function runCli(argv, home = os.homedir()) {
   let noColor = false
   const filteredArgv = []
@@ -1710,13 +1769,18 @@ export async function runCli(argv, home = os.homedir()) {
   const cmd = filteredArgv[0]
   const color = !noColor && shouldColor()
 
+  if (!cmd || cmd === 'help') {
+    console.log(formatHelpReport(color))
+    return 0
+  }
+
   try {
     switch (cmd) {
       case 'list': {
         const refresh = filteredArgv.includes('--refresh')
-        if (refresh) {
-          await usageRows(home, fetchUsage, true)
-        }
+        try {
+          await usageRows(home, fetchUsage, refresh)
+        } catch {}
         console.log(profileListReport(home, color))
         return 0
       }
