@@ -31,6 +31,7 @@ import {
   cancelTempSwap,
   loadTempProfile,
   formatHelpReport,
+  addProfileTag,
 } from '../swap.js'
 
 function login(home, account, token, extra = {}) {
@@ -218,9 +219,10 @@ describe('swap.js core functionality', () => {
     assert.equal(parsed[2][1], 0.15)
   })
 
-  test('profileListReport formats active and inactive indicators', () => {
+  test('profileListReport formats active and inactive indicators and tag badges', () => {
     login(tmpHome, 'a', 'tok-a')
     saveProfile(tmpHome, 'work')
+    addProfileTag(tmpHome, 'work', 'office')
     login(tmpHome, 'b', 'tok-b')
     saveProfile(tmpHome, 'personal')
 
@@ -228,6 +230,7 @@ describe('swap.js core functionality', () => {
     assert.ok(out.includes('⚪ work'))
     assert.ok(out.includes('🟢 personal (Active)'))
     assert.ok(out.includes('👤 b@example.com'))
+    assert.ok(out.includes('🏷️ office'))
   })
 
   test('CLI runs commands successfully', async () => {

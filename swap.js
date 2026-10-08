@@ -800,6 +800,13 @@ export function profileListReport(home, color = null) {
     const icon = active ? '🟢' : '⚪'
     const activeStr = active ? ' (Active)' : ''
 
+    const tags = getProfileTags(home, n)
+    const tagBadge = tags.length
+      ? useColor
+        ? `  \x1b[35m🏷️ ${tags.join(', ')}\x1b[0m`
+        : `  🏷️ ${tags.join(', ')}`
+      : ''
+
     let summary = ''
     const key = `${n}|${email}`
     const hit = cache[key] && typeof cache[key] === 'object' ? cache[key] : {}
@@ -821,9 +828,9 @@ export function profileListReport(home, color = null) {
       const nameAndActive = active ? `${n} (Active)` : n
       const nameColored = active ? `\x1b[1;32m${nameAndActive}\x1b[0m` : `\x1b[1;37m${n}\x1b[0m`
       const emailColored = email ? `  \x1b[38;5;248m👤 ${email}\x1b[0m` : ''
-      lines.push(`${icon} ${nameColored}${emailColored}${summary}`)
+      lines.push(`${icon} ${nameColored}${emailColored}${tagBadge}${summary}`)
     } else {
-      lines.push(`${icon} ${n}${activeStr}${emailStr}${summary}`)
+      lines.push(`${icon} ${n}${activeStr}${emailStr}${tagBadge}${summary}`)
     }
   }
   return lines.join('\n')
@@ -1797,9 +1804,9 @@ export async function runCli(argv, home = os.homedir()) {
         const d = profilesDir(home)
         try {
           openProfilesFolder(home)
-          console.log(`Đã mở: ${d}`)
+          console.log(`📁 Đã mở: ${d}`)
         } catch {
-          console.log(`Không mở được trình quản lý file. Thư mục: ${d}`)
+          console.log(`⚠️ Không mở được trình quản lý file. Thư mục: ${d}`)
         }
         return 0
       }
@@ -1810,12 +1817,12 @@ export async function runCli(argv, home = os.homedir()) {
           throw new SwapError('Thiếu đường dẫn thư mục cần nhập.')
         }
         const r = importProfiles(home, targetPath, force)
-        console.log(`Đã nhập: ${r.added.join(', ') || '(không có)'}`)
+        console.log(`📦 Đã nhập: ${r.added.join(', ') || '(không có)'}`)
         if (r.exists.length > 0) {
-          console.log(`Trùng tên, bỏ qua (dùng --force để ghi đè): ${r.exists.join(', ')}`)
+          console.log(`⚠️ Trùng tên, bỏ qua (dùng --force để ghi đè): ${r.exists.join(', ')}`)
         }
         if (r.invalid.length > 0) {
-          console.log(`Không phải file profile: ${r.invalid.join(', ')}`)
+          console.log(`❌ Không phải file profile: ${r.invalid.join(', ')}`)
         }
         return 0
       }
@@ -1828,7 +1835,7 @@ export async function runCli(argv, home = os.homedir()) {
         }
         const verb = cmd === 'new' ? 'tạo' : 'lưu'
         const saved = saveProfile(home, name, force)
-        console.log(`Đã ${verb}: ${saved}`)
+        console.log(`✨ Đã ${verb}: ${saved}`)
         return 0
       }
       case 'swap': {
@@ -1840,7 +1847,7 @@ export async function runCli(argv, home = os.homedir()) {
           reason: isProject ? 'Project binding' : '',
         })
         console.log(
-          `Đã chuyển sang '${name}'. Không cần tắt session; Claude CLI dùng tài khoản mới ở lần ` +
+          `🔀 Đã chuyển sang '${name}'. Không cần tắt session; Claude CLI dùng tài khoản mới ở lần ` +
             'kiểm tra đăng nhập kế tiếp (có thể chưa ngay prompt sau). Xem /status để chắc chắn.'
         )
         return 0
@@ -1849,7 +1856,7 @@ export async function runCli(argv, home = os.homedir()) {
         const name = filteredArgv[1]
         if (!name) throw new SwapError('Thiếu tên profile.')
         deleteProfile(home, name)
-        console.log(`Đã xoá '${name}'.`)
+        console.log(`🗑️ Đã xoá '${name}'.`)
         return 0
       }
       case 'auto': {
@@ -1857,11 +1864,20 @@ export async function runCli(argv, home = os.homedir()) {
         const cfg = loadAutoSwitchConfig(home)
 
         if (!sub || sub === 'status') {
-          console.log(`Tự động chuyển profile: ${cfg.enabled ? '🟢 BẬT' : '⚪ TẮT'} (Ngưỡng: ${cfg.threshold}%)`)
+          console.log(`🤖 Tự động chuyển profile: ${cfg.enabled ? '🟢 BẬT' : '⚪ TẮT'} (Ngưỡng: ${cfg.threshold}%)`)
           if (cfg.order && cfg.order.length > 0) {
-            console.log(`Thứ tự ưu tiên: ${cfg.order.join(' -> ')}`)
+            console.log(`📋 Thứ tự ưu tiên: ${cfg.order.join(' ➔ ')}`)
           } else {
-            console.log('Quy tắc chọn: Tự động (Ưu tiên còn nhiều token hơn, thời gian reset 5h ngắn hơn)')
+            console.log('📋 Quy tắc chọn: Tự động (Ưu tiên còn nhiều token hơn, thời gian reset 5h ngắn hơn)')
+          }
+          if (cfg.pool) {
+            console.log(`🏷️ Nhóm (pool): ${cfg.pool}`)
+          }
+          if (cfg.safeguardThreshold) {
+            console.log(`🚨 Bảo vệ 7 ngày: ${cfg.safeguardThreshold}%`)
+          }
+          if (cfg.autoReturn) {
+            console.log(`🔄 Tự động quay về profile chính: ${cfg.primaryProfile || '(chưa đặt)'}`)
           }
           return 0
         }
@@ -1869,26 +1885,26 @@ export async function runCli(argv, home = os.homedir()) {
         if (sub === 'on') {
           cfg.enabled = true
           saveAutoSwitchConfig(home, cfg)
-          console.log('Đã BẬT tự động chuyển profile.')
+          console.log('🟢 Đã BẬT tự động chuyển profile.')
           return 0
         }
 
         if (sub === 'off') {
           cfg.enabled = false
           saveAutoSwitchConfig(home, cfg)
-          console.log('Đã TẮT tự động chuyển profile.')
+          console.log('⚪ Đã TẮT tự động chuyển profile.')
           return 0
         }
 
         if (sub === 'threshold') {
           const val = parseFloat(filteredArgv[2])
           if (isNaN(val) || val < 1 || val > 100) {
-            console.error('Ngưỡng không hợp lệ. Vui lòng nhập số từ 1 đến 100.')
+            console.error('❌ Ngưỡng không hợp lệ. Vui lòng nhập số từ 1 đến 100.')
             return 1
           }
           cfg.threshold = Math.round(val)
           saveAutoSwitchConfig(home, cfg)
-          console.log(`Đã đặt ngưỡng tự động chuyển sang profile khác: ${cfg.threshold}%.`)
+          console.log(`⚙️ Đã đặt ngưỡng tự động chuyển sang profile khác: ${cfg.threshold}%.`)
           return 0
         }
 
@@ -1897,26 +1913,26 @@ export async function runCli(argv, home = os.homedir()) {
           if (!val || val === 'default' || val === 'none') {
             cfg.order = []
             saveAutoSwitchConfig(home, cfg)
-            console.log('Đã chuyển về quy tắc chọn profile tự động (nhiều token hơn, reset sớm hơn).')
+            console.log('📋 Đã chuyển về quy tắc chọn profile tự động (nhiều token hơn, reset sớm hơn).')
             return 0
           }
           const names = val.split(',').map(s => s.trim()).filter(Boolean)
           cfg.order = names
           saveAutoSwitchConfig(home, cfg)
-          console.log(`Đã đặt thứ tự chuyển profile: ${names.join(' -> ')}.`)
+          console.log(`📋 Đã đặt thứ tự chuyển profile: ${names.join(' ➔ ')}.`)
           return 0
         }
 
         if (sub === 'check') {
           const res = await autoCheckAndSwap(home)
           if (res.swapped) {
-            console.log(`[auto-swap] Đã tự động chuyển từ '${res.from}' sang '${res.to}' (mức dùng: ${res.util}% >= ngưỡng ${res.threshold}%).`)
+            console.log(`[auto-swap] 🔀 Đã tự động chuyển từ '${res.from}' sang '${res.to}' (mức dùng: ${res.util}% >= ngưỡng ${res.threshold}%).`)
           } else if (res.reason === 'no_candidate') {
-            console.log(`[auto-swap] Profile '${res.current}' đạt mức ${res.util}% nhưng không có profile thay thế khả dụng.`)
+            console.log(`[auto-swap] ⚠️ Profile '${res.current}' đạt mức ${res.util}% nhưng không có profile thay thế khả dụng.`)
           } else if (res.reason === 'disabled') {
-            console.log('Tự động chuyển profile đang tắt.')
+            console.log('ℹ️ Tự động chuyển profile đang tắt.')
           } else {
-            console.log(`Không cần chuyển profile (mức dùng: ${res.util}%, ngưỡng: ${res.threshold}%).`)
+            console.log(`✅ Không cần chuyển profile (mức dùng: ${res.util}%, ngưỡng: ${res.threshold}%).`)
           }
           return 0
         }
@@ -1926,12 +1942,12 @@ export async function runCli(argv, home = os.homedir()) {
           if (!val || val === 'all' || val === 'default' || val === 'none') {
             cfg.pool = null
             saveAutoSwitchConfig(home, cfg)
-            console.log('Đã mở auto-switch cho tất cả các profile (không giới hạn pool).')
+            console.log('🏷️ Đã mở auto-switch cho tất cả các profile (không giới hạn pool).')
             return 0
           }
           cfg.pool = val.trim()
           saveAutoSwitchConfig(home, cfg)
-          console.log(`Đã đặt nhóm (pool) cho auto-switch: '${cfg.pool}'.`)
+          console.log(`🏷️ Đã đặt nhóm (pool) cho auto-switch: '${cfg.pool}'.`)
           return 0
         }
 
@@ -1940,23 +1956,23 @@ export async function runCli(argv, home = os.homedir()) {
           if (state === 'on') {
             cfg.autoReturn = true
             saveAutoSwitchConfig(home, cfg)
-            console.log('Đã BẬT tự động quay về profile chính (auto-return).')
+            console.log('🔄 Đã BẬT tự động quay về profile chính (auto-return).')
             return 0
           }
           if (state === 'off') {
             cfg.autoReturn = false
             saveAutoSwitchConfig(home, cfg)
-            console.log('Đã TẮT tự động quay về profile chính (auto-return).')
+            console.log('⚪ Đã TẮT tự động quay về profile chính (auto-return).')
             return 0
           }
-          console.log(`Tự động quay về profile chính: ${cfg.autoReturn ? '🟢 BẬT' : '⚪ TẮT'}`)
+          console.log(`🔄 Tự động quay về profile chính: ${cfg.autoReturn ? '🟢 BẬT' : '⚪ TẮT'}`)
           return 0
         }
 
         if (sub === 'primary') {
           const name = filteredArgv[2]
           if (!name) {
-            console.log(`Profile chính hiện tại: ${cfg.primaryProfile || '(chưa đặt)'}`)
+            console.log(`⭐ Profile chính hiện tại: ${cfg.primaryProfile || '(chưa đặt)'}`)
             return 0
           }
           if (!profileExists(home, name)) {
@@ -1964,26 +1980,26 @@ export async function runCli(argv, home = os.homedir()) {
           }
           cfg.primaryProfile = name
           saveAutoSwitchConfig(home, cfg)
-          console.log(`Đã đặt profile chính cho auto-return: '${name}'.`)
+          console.log(`⭐ Đã đặt profile chính cho auto-return: '${name}'.`)
           return 0
         }
 
         if (sub === 'safeguard') {
           const val = filteredArgv[2]
           if (!val) {
-            console.log(`Bảo vệ hạn mức 7 ngày: ${cfg.safeguardThreshold ? `🟢 BẬT (${cfg.safeguardThreshold}%)` : '⚪ TẮT'}`)
+            console.log(`🚨 Bảo vệ hạn mức 7 ngày: ${cfg.safeguardThreshold ? `🟢 BẬT (${cfg.safeguardThreshold}%)` : '⚪ TẮT'}`)
             return 0
           }
           if (val === 'on') {
             cfg.safeguardThreshold = 85
             saveAutoSwitchConfig(home, cfg)
-            console.log('Đã BẬT bảo vệ hạn mức 7 ngày (ngưỡng: 85%).')
+            console.log('🚨 Đã BẬT bảo vệ hạn mức 7 ngày (ngưỡng: 85%).')
             return 0
           }
           if (val === 'off' || val === 'none') {
             cfg.safeguardThreshold = null
             saveAutoSwitchConfig(home, cfg)
-            console.log('Đã TẮT bảo vệ hạn mức 7 ngày.')
+            console.log('⚪ Đã TẮT bảo vệ hạn mức 7 ngày.')
             return 0
           }
           const num = parseInt(val, 10)
@@ -1992,11 +2008,11 @@ export async function runCli(argv, home = os.homedir()) {
           }
           cfg.safeguardThreshold = num
           saveAutoSwitchConfig(home, cfg)
-          console.log(`Đã đặt ngưỡng bảo vệ hạn mức 7 ngày: ${num}%.`)
+          console.log(`🚨 Đã đặt ngưỡng bảo vệ hạn mức 7 ngày: ${num}%.`)
           return 0
         }
 
-        console.error(`Lệnh auto không hợp lệ: ${sub}. Dùng: /profile auto [on|off|threshold <%>|order <ds>|pool <tag|all>|safeguard [on|off|<%>]|return [on|off]|primary <tên>|check]`)
+        console.error(`❌ Lệnh auto không hợp lệ: ${sub}. Dùng: /profile auto [on|off|threshold <%>|order <ds>|pool <tag|all>|safeguard [on|off|<%>]|return [on|off]|primary <tên>|check]`)
         return 1
       }
       case 'bind': {
@@ -2005,9 +2021,9 @@ export async function runCli(argv, home = os.homedir()) {
           const targetDir = filteredArgv[2] || process.cwd()
           const bound = getBoundProfile(home, targetDir)
           if (bound) {
-            console.log(`Thư mục '${targetDir}' đang liên kết với profile: ${bound.profile} (${bound.source})`)
+            console.log(`🔗 Thư mục '${targetDir}' đang liên kết với profile: ${bound.profile} (${bound.source})`)
           } else {
-            console.log(`Thư mục '${targetDir}' chưa liên kết với profile nào.`)
+            console.log(`ℹ️ Thư mục '${targetDir}' chưa liên kết với profile nào.`)
           }
           return 0
         }
@@ -2015,35 +2031,35 @@ export async function runCli(argv, home = os.homedir()) {
         const targetDir = filteredArgv[2] || process.cwd()
         if (!profileName) throw new SwapError('Thiếu tên profile để liên kết.')
         const res = bindProfile(home, targetDir, profileName)
-        console.log(`Đã liên kết thư mục '${res.dir}' với profile '${res.profile}'.`)
+        console.log(`🔗 Đã liên kết thư mục '${res.dir}' với profile '${res.profile}'.`)
         return 0
       }
       case 'unbind': {
         const targetDir = filteredArgv[1] || process.cwd()
         const res = unbindProfile(home, targetDir)
-        console.log(`Đã gỡ liên kết profile cho thư mục '${res.dir}'.`)
+        console.log(`🔓 Đã gỡ liên kết profile cho thư mục '${res.dir}'.`)
         return 0
       }
       case 'notify': {
         const sub = filteredArgv[1]
         const cfg = loadNotificationConfig(home)
         if (!sub || sub === 'status') {
-          console.log(`Thông báo hệ thống: ${cfg.enabled ? '🟢 BẬT' : '⚪ TẮT'}`)
+          console.log(`🔔 Thông báo hệ thống: ${cfg.enabled ? '🟢 BẬT' : '⚪ TẮT'}`)
           return 0
         }
         if (sub === 'on') {
           cfg.enabled = true
           saveNotificationConfig(home, cfg)
-          console.log('Đã BẬT thông báo hệ thống.')
+          console.log('🔔 Đã BẬT thông báo hệ thống.')
           return 0
         }
         if (sub === 'off') {
           cfg.enabled = false
           saveNotificationConfig(home, cfg)
-          console.log('Đã TẮT thông báo hệ thống.')
+          console.log('🔕 Đã TẮT thông báo hệ thống.')
           return 0
         }
-        console.error(`Lệnh notify không hợp lệ: ${sub}. Dùng: /profile notify [on|off]`)
+        console.error(`❌ Lệnh notify không hợp lệ: ${sub}. Dùng: /profile notify [on|off]`)
         return 1
       }
       case 'tag': {
@@ -2051,7 +2067,7 @@ export async function runCli(argv, home = os.homedir()) {
         const tag = filteredArgv[2]
         if (!name || !tag) throw new SwapError('Cú pháp: /profile tag <tên profile> <tag>')
         const tags = addProfileTag(home, name, tag)
-        console.log(`Đã gắn tag '${tag}' cho profile '${name}'. Tags hiện tại: ${tags.join(', ')}`)
+        console.log(`🏷️ Đã gắn tag '${tag}' cho profile '${name}'. Tags hiện tại: ${tags.join(', ')}`)
         return 0
       }
       case 'untag': {
@@ -2059,14 +2075,14 @@ export async function runCli(argv, home = os.homedir()) {
         const tag = filteredArgv[2]
         if (!name || !tag) throw new SwapError('Cú pháp: /profile untag <tên profile> <tag>')
         const tags = removeProfileTag(home, name, tag)
-        console.log(`Đã gỡ tag '${tag}' khỏi profile '${name}'. Tags hiện tại: ${tags.join(', ') || '(không có)'}`)
+        console.log(`🏷️ Đã gỡ tag '${tag}' khỏi profile '${name}'. Tags hiện tại: ${tags.join(', ') || '(không có)'}`)
         return 0
       }
       case 'tags': {
         const map = listAllTags(home)
         const entries = Object.entries(map)
         if (entries.length === 0) {
-          console.log('Chưa có tag nào được tạo. Dùng: /profile tag <profile> <tag>')
+          console.log('🏷️ Chưa có tag nào được tạo. Dùng: /profile tag <profile> <tag>')
           return 0
         }
         for (const [tag, profiles] of entries) {
@@ -2081,7 +2097,7 @@ export async function runCli(argv, home = os.homedir()) {
         const password = passIndex !== -1 ? filteredArgv[passIndex + 1] : ''
         if (!password) throw new SwapError('Vui lòng cung cấp mật khẩu với --password <mật khẩu>.')
         const res = exportEncryptedProfiles(home, targetPath, password)
-        console.log(`Đã xuất ${res.count} profiles đã mã hóa ra: ${res.path}`)
+        console.log(`🔐 Đã xuất ${res.count} profiles đã mã hóa ra: ${res.path}`)
         return 0
       }
       case 'import-enc': {
@@ -2092,9 +2108,9 @@ export async function runCli(argv, home = os.homedir()) {
         if (!password) throw new SwapError('Vui lòng cung cấp mật khẩu với --password <mật khẩu>.')
         const force = filteredArgv.includes('--force')
         const res = importEncryptedProfiles(home, sourcePath, password, force)
-        console.log(`Đã nhập thành công: ${res.added.join(', ') || '(không có profile mới)'}`)
+        console.log(`📦 Đã nhập thành công: ${res.added.join(', ') || '(không có profile mới)'}`)
         if (res.exists.length > 0) {
-          console.log(`Bỏ qua profile đã tồn tại (dùng --force để ghi đè): ${res.exists.join(', ')}`)
+          console.log(`⚠️ Bỏ qua profile đã tồn tại (dùng --force để ghi đè): ${res.exists.join(', ')}`)
         }
         return 0
       }
@@ -2132,29 +2148,29 @@ export async function runCli(argv, home = os.homedir()) {
           const state = loadTempProfile(home)
           if (state) {
             const remMin = Math.max(0, Math.round((state.expiresAt - Date.now()) / 60000))
-            console.log(`Đang mượn tạm profile '${state.tempProfile}' (gốc: '${state.originalProfile}', còn ${remMin} phút).`)
+            console.log(`⏳ Đang mượn tạm profile '${state.tempProfile}' (gốc: '${state.originalProfile}', còn ${remMin} phút).`)
           } else {
-            console.log('Hiện không ở chế độ profile tạm thời. Dùng: /profile temp <tên> [thời_gian]')
+            console.log('ℹ️ Hiện không ở chế độ profile tạm thời. Dùng: /profile temp <tên> [thời_gian]')
           }
           return 0
         }
         const res = tempSwap(home, name, dur)
         const expTime = new Date(res.expiresAt).toLocaleTimeString('vi-VN')
-        console.log(`Đã chuyển tạm thời sang '${res.tempProfile}' trong ${dur} (hết hạn lúc ${expTime}).`)
+        console.log(`⏳ Đã chuyển tạm thời sang '${res.tempProfile}' trong ${dur} (hết hạn lúc ${expTime}).`)
         return 0
       }
       case 'untemp': {
         const res = cancelTempSwap(home)
-        console.log(`Đã hoàn tất profile tạm thời và quay về '${res.revertedTo}'.`)
+        console.log(`🔄 Đã hoàn tất profile tạm thời và quay về '${res.revertedTo}'.`)
         return 0
       }
       default:
-        console.error(`Lệnh không hợp lệ: ${cmd}`)
+        console.error(`❌ Lệnh không hợp lệ: ${cmd}`)
         return 1
     }
   } catch (err) {
     if (err instanceof SwapError) {
-      console.error(`Lỗi: ${err.message}`)
+      console.error(`❌ Lỗi: ${err.message}`)
       return 1
     }
     throw err
