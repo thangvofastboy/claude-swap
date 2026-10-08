@@ -4,6 +4,9 @@ import os from 'node:os'
 import path from 'node:path'
 import child_process from 'node:child_process'
 import crypto from 'node:crypto'
+import { fileURLToPath } from 'node:url'
+
+const SCRIPT_PATH = fileURLToPath(import.meta.url)
 
 export const AUTH_KEYS = ['oauthAccount', 'primaryApiKey', 'customApiKeyResponses']
 export const KEYCHAIN_SERVICE = 'Claude Code-credentials'
@@ -11,9 +14,11 @@ export const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage?cedar_ember=
 export const WARN_PCT = 80
 export const USAGE_TTL = 300 // seconds
 export const USAGE_BACKOFF = 600 // seconds
+export const LABEL_5H = '5 giờ'
+export const LABEL_7D = '7 ngày'
 export const USAGE_LIMITS = [
-  ['five_hour', '5 giờ'],
-  ['seven_day', '7 ngày'],
+  ['five_hour', LABEL_5H],
+  ['seven_day', LABEL_7D],
   ['seven_day_opus', '7 ngày Opus'],
   ['seven_day_sonnet', '7 ngày Sonnet'],
 ]
@@ -32,12 +37,16 @@ export function credentialsFile(home) {
   return path.join(home, '.claude', '.credentials.json')
 }
 
+const readyDirs = new Set()
+
 export function profilesDir(home) {
   const d = path.join(home, '.config', 'claude-cli-profiles')
+  if (readyDirs.has(d)) return d
   fs.mkdirSync(d, { recursive: true, mode: 0o700 })
   try {
     fs.chmodSync(d, 0o700)
   } catch {}
+  readyDirs.add(d)
   return d
 }
 
@@ -650,7 +659,7 @@ export function parseLimits(data) {
   for (const [key, label] of USAGE_LIMITS) {
     const lim = data[key]
     if (lim && typeof lim === 'object' && lim.utilization !== undefined && lim.utilization !== null) {
-      out.set(label, [label, Number(lim.utilization), fmtReset(lim.resets_at)])
+      out.set(label, [label, Number(lim.utilization), fmtReset(lim.resets_at), lim.resets_at || null])
     }
   }
   const limitsArr = Array.isArray(data.limits) ? data.limits : []
@@ -661,7 +670,7 @@ export function parseLimits(data) {
     const model = lim.scope?.model?.display_name
     if (model) {
       const label = `7 ngày ${model}`
-      out.set(label, [label, Number(lim.percent), fmtReset(lim.resets_at)])
+      out.set(label, [label, Number(lim.percent), fmtReset(lim.resets_at), lim.resets_at || null])
     }
   }
   return Array.from(out.values())
@@ -727,29 +736,34 @@ export async function profileUsage(
   if (!token) {
     return { ...row, note: 'không có token OAuth (API key không có quota gói)' }
   }
-  if (typeof expires === 'number' && expires / 1000 < Date.now() / 1000) {
-    return {
-      ...row,
-      note: `token đã hết hạn — chuyển sang profile này (swap ${name}) để CLI làm mới`,
-    }
-  }
 
   const key = `${name}|${row.email}`
   const hit = cache[key] && typeof cache[key] === 'object' ? cache[key] : {}
   const cached = Array.isArray(hit.limits) ? hit.limits : []
   const now = Date.now() / 1000
 
+  if (typeof expires === 'number' && expires < Date.now()) {
+    const note = `token đã hết hạn — chuyển sang profile này (swap ${name}) để CLI làm mới`
+    cache[key] = { ...hit, note }
+    return { ...row, note }
+  }
+
   if (hit.retry_at && hit.retry_at > now) {
     return { ...row, limits: cached, note: rateLimitedNote(hit, cached.length > 0) }
   }
-  if (cached.length > 0 && !force && now - (hit.at || 0) < USAGE_TTL) {
-    return { ...row, limits: cached }
+  // failures are cached too, so an offline machine does not refetch on every prompt
+  if (!force && now - (hit.at || 0) < USAGE_TTL) {
+    return { ...row, limits: cached, note: cached.length ? '' : hit.note || '' }
   }
 
   try {
     const data = await fetchFn(token)
     const limits = parseLimits(data)
     cache[key] = { limits, at: now }
+    if (limits.length) {
+      const entry = { limits }
+      recordUsageSnapshot(home, name, limitPct(entry, LABEL_5H), limitPct(entry, LABEL_7D))
+    }
     return { ...row, limits, note: limits.length ? '' : 'không có dữ liệu quota' }
   } catch (err) {
     if (err.status === 429) {
@@ -763,6 +777,7 @@ export async function profileUsage(
         : err.status
         ? `lỗi HTTP ${err.status}`
         : `lỗi mạng: ${err.message}`
+    cache[key] = { ...hit, at: now, note }
     return { ...row, note }
   }
 }
@@ -799,16 +814,20 @@ export function shouldColor(color) {
   return true
 }
 
+function pctColor(pct) {
+  if (pct >= 95) return '\x1b[1;31m'
+  if (pct >= WARN_PCT) return '\x1b[1;38;5;208m'
+  if (pct >= 50) return '\x1b[1;33m'
+  return '\x1b[1;32m'
+}
+
 export function chartBar(pct, width = 8, color = false) {
   const filled = Math.round((Math.max(0, Math.min(pct, 100)) / 100) * width)
   const empty = width - filled
   if (!color) {
     return `[${'█'.repeat(filled)}${'░'.repeat(empty)}]`
   }
-  let c = '\x1b[1;32m'
-  if (pct >= 95) c = '\x1b[1;31m'
-  else if (pct >= WARN_PCT) c = '\x1b[1;38;5;208m'
-  else if (pct >= 50) c = '\x1b[1;33m'
+  const c = pctColor(pct)
   return `\x1b[90m[\x1b[0m${c}${'█'.repeat(filled)}\x1b[0m\x1b[38;5;240m${'░'.repeat(empty)}\x1b[90m]\x1b[0m`
 }
 
@@ -821,10 +840,7 @@ export function formatLimitChart(label, pct, color = false) {
   if (!color) {
     return `${lbl} ${barStr} ${pctInt}%${warn}`
   }
-  let c = '\x1b[1;32m'
-  if (pctInt >= 95) c = '\x1b[1;31m'
-  else if (pctInt >= WARN_PCT) c = '\x1b[1;38;5;208m'
-  else if (pctInt >= 50) c = '\x1b[1;33m'
+  const c = pctColor(pctInt)
   const warnColored = pctInt >= WARN_PCT ? '\x1b[1;31m ⚠\x1b[0m' : ''
   return `\x1b[1;36m${lbl}\x1b[0m ${barStr} ${c}${pctInt}%\x1b[0m${warnColored}`
 }
@@ -839,6 +855,7 @@ export function profileListReport(home, color = null, lang = null) {
   }
   const cur = currentProfile(home)
   const cache = loadUsageCache(home)
+  const disabledList = loadDisabledProfiles(home)
   const useColor = shouldColor(color)
   const lines = []
 
@@ -870,7 +887,7 @@ export function profileListReport(home, color = null, lang = null) {
       summary = useColor ? `  \x1b[38;5;214m(${hit.note})\x1b[0m` : `  (${hit.note})`
     }
 
-    const disabled = isProfileDisabled(home, n)
+    const disabled = disabledList.includes(n)
     const disabledBadge = disabled
       ? useColor
         ? '  \x1b[33m(disabled)\x1b[0m'
@@ -917,13 +934,8 @@ export async function usageReport(home, fetchFn = fetchUsage, force = false, col
       const resetStr = reset ? `  reset ${reset}` : ''
 
       if (color) {
-        let c = '\x1b[1;32m'
-        if (pctVal >= 95) c = '\x1b[1;31m'
-        else if (pctVal >= WARN_PCT) c = '\x1b[1;38;5;208m'
-        else if (pctVal >= 50) c = '\x1b[1;33m'
-        const filled = Math.round((pctVal / 100) * 20)
-        const empty = 20 - filled
-        const barColored = `\x1b[90m[\x1b[0m${c}${'█'.repeat(filled)}\x1b[0m\x1b[38;5;240m${'░'.repeat(empty)}\x1b[90m]\x1b[0m`
+        const c = pctColor(pctVal)
+        const barColored = chartBar(pctVal, 20, true)
         const lblColored = `\x1b[1;36m${label.padEnd(12)}\x1b[0m`
         const pctColored = `${c}${String(pctInt).padStart(3)}%\x1b[0m`
         const warnColored = pctInt >= WARN_PCT ? '\x1b[1;31m ⚠\x1b[0m' : ''
@@ -985,19 +997,38 @@ export function saveAutoSwitchConfig(home, config) {
   atomicWrite(f, JSON.stringify(config, null, 2))
 }
 
+function cacheHit(home, cache, name) {
+  const hit = cache[`${name}|${profileEmail(home, name)}`]
+  return hit && typeof hit === 'object' ? hit : {}
+}
+
+function findLimit(hit, label) {
+  return Array.isArray(hit.limits) ? hit.limits.find(l => l[0] === label) : undefined
+}
+
+// the usage API already reports utilization as a 0–100 percentage
+function limitPct(hit, label) {
+  const lim = findLimit(hit, label)
+  return lim ? Number(lim[1]) || 0 : 0
+}
+
+function isRateLimited(hit) {
+  return Boolean(hit.retry_at && hit.retry_at > Date.now() / 1000)
+}
+
 function parseResetTime(hit, lim) {
-  if (hit?.resets_at_epoch) return Number(hit.resets_at_epoch)
-  if (hit?.resets_at) {
-    const t = new Date(hit.resets_at).getTime()
+  for (const raw of [lim?.[3], hit?.resets_at_epoch, hit?.resets_at]) {
+    const t = raw ? new Date(typeof raw === 'string' ? raw : Number(raw)).getTime() : NaN
     if (!isNaN(t)) return t
   }
-  if (lim && lim[2]) {
-    const match = String(lim[2]).match(/(\d{1,2}):(\d{2})/)
-    if (match) {
-      const d = new Date()
-      d.setHours(parseInt(match[1], 10), parseInt(match[2], 10), 0, 0)
-      return d.getTime()
-    }
+  // caches written before the raw timestamp was kept only have "DD/MM HH:MM"
+  const match = lim?.[2] && String(lim[2]).match(/(?:(\d{1,2})\/(\d{1,2})\s+)?(\d{1,2}):(\d{2})/)
+  if (match) {
+    const d = new Date()
+    if (match[1]) d.setMonth(Number(match[2]) - 1, Number(match[1]))
+    d.setHours(Number(match[3]), Number(match[4]), 0, 0)
+    if (d.getTime() < Date.now() - 180 * 86400000) d.setFullYear(d.getFullYear() + 1) // "01/01" seen on 31/12
+    return d.getTime()
   }
   return Number.MAX_SAFE_INTEGER
 }
@@ -1020,18 +1051,12 @@ export function formatCooldowns(home, cache = null, lang = null) {
   const c = cache || loadUsageCache(home)
   const lines = [currentLang === 'en' ? '⏱️ 5-hour quota reset countdowns:' : '⏱️ Thời gian reset quota 5 giờ:']
   for (const name of profiles) {
-    const email = profileEmail(home, name)
-    const key = `${name}|${email}`
-    const hit = c[key] && typeof c[key] === 'object' ? c[key] : {}
-    const limits = Array.isArray(hit.limits) ? hit.limits : []
-    const fiveHour = limits.find(l => l[0] === '5 giờ') || limits[0]
-    const rawUtil = fiveHour ? Number(fiveHour[1]) : 0
-    const util = Math.round(rawUtil <= 1 && rawUtil > 0 ? rawUtil * 100 : rawUtil)
-    const resetTime = parseResetTime(hit, fiveHour)
-    const isRateLimited = Boolean(hit.retry_at && hit.retry_at > Date.now() / 1000)
+    const hit = cacheHit(home, c, name)
+    const util = Math.round(limitPct(hit, LABEL_5H))
+    const resetTime = parseResetTime(hit, findLimit(hit, LABEL_5H))
 
     let timeDesc = ''
-    if (isRateLimited) {
+    if (isRateLimited(hit)) {
       const waitSec = Math.max(0, Math.ceil(hit.retry_at - Date.now() / 1000))
       timeDesc = `⏳ Rate limited (thử lại sau ${waitSec}s)`
     } else if (resetTime === Number.MAX_SAFE_INTEGER) {
@@ -1119,23 +1144,16 @@ export function diagnoseProfiles(home) {
       const wait = Math.ceil(hit.retry_at - Date.now() / 1000)
       report.warnings.push(`Đang bị tạm khóa do HTTP 429 rate limit (chờ ${wait}s).`)
     }
-    const limits = Array.isArray(hit.limits) ? hit.limits : []
-    const fiveH = limits.find(l => l[0] === '5 giờ')
-    if (fiveH) {
-      const u = Number(fiveH[1]) <= 1 && Number(fiveH[1]) > 0 ? Number(fiveH[1]) * 100 : Number(fiveH[1])
-      report.quota5h = Math.round(u)
+    for (const [label, field, text] of [
+      [LABEL_5H, 'quota5h', '5h'],
+      [LABEL_7D, 'quota7d', '7 ngày'],
+    ]) {
+      if (!findLimit(hit, label)) continue
+      const u = Math.round(limitPct(hit, label))
+      report[field] = u
       if (u >= 95) {
         if (report.status === 'ok') report.status = 'warn'
-        report.warnings.push(`Quota 5h đã chạm ngưỡng cạn kiệt (${Math.round(u)}%).`)
-      }
-    }
-    const sevenD = limits.find(l => l[0] === '7 ngày')
-    if (sevenD) {
-      const u = Number(sevenD[1]) <= 1 && Number(sevenD[1]) > 0 ? Number(sevenD[1]) * 100 : Number(sevenD[1])
-      report.quota7d = Math.round(u)
-      if (u >= 95) {
-        if (report.status === 'ok') report.status = 'warn'
-        report.warnings.push(`Quota 7 ngày đã chạm ngưỡng cạn kiệt (${Math.round(u)}%).`)
+        report.warnings.push(`Quota ${text} đã chạm ngưỡng cạn kiệt (${u}%).`)
       }
     }
 
@@ -1188,20 +1206,14 @@ export function formatDiagnostics(diag, color = null, lang = 'vi') {
 export function getStatusline(home) {
   const cur = currentProfile(home)
   if (!cur) return '[Claude: ⚪ (none)]'
-  const email = profileEmail(home, cur)
-  const key = `${cur}|${email}`
-  const cache = loadUsageCache(home)
-  const hit = cache[key] && typeof cache[key] === 'object' ? cache[key] : {}
+  const hit = cacheHit(home, loadUsageCache(home), cur)
 
-  if (hit.retry_at && hit.retry_at > Date.now() / 1000) {
+  if (isRateLimited(hit)) {
     return `[Claude: ⏳ ${cur} (429)]`
   }
 
-  const limits = Array.isArray(hit.limits) ? hit.limits : []
-  const fiveHour = limits.find(l => l[0] === '5 giờ') || limits[0]
-  if (fiveHour) {
-    const rawUtil = Number(fiveHour[1])
-    const util = Math.round(rawUtil <= 1 && rawUtil > 0 ? rawUtil * 100 : rawUtil)
+  if (findLimit(hit, LABEL_5H)) {
+    const util = Math.round(limitPct(hit, LABEL_5H))
     const icon = util >= 95 ? '🔴' : util >= 80 ? '🟡' : '🟢'
     return `[Claude: ${icon} ${cur} (${util}%)]`
   }
@@ -1215,7 +1227,7 @@ export function generatePromptSnippet(shell = 'starship') {
     return [
       '# Thêm đoạn sau vào ~/.config/starship.toml:',
       '[custom.claude_profile]',
-      'command = "node /path/to/claude-swap/swap.js statusline"',
+      `command = "node ${SCRIPT_PATH} statusline"`,
       'when = true',
       'format = "[$output]($style) "',
       'style = "bold cyan"',
@@ -1225,7 +1237,7 @@ export function generatePromptSnippet(shell = 'starship') {
     return [
       '# Thêm hàm sau vào ~/.zshrc:',
       'claude_profile_prompt() {',
-      '  node /path/to/claude-swap/swap.js statusline 2>/dev/null',
+      `  node ${SCRIPT_PATH} statusline 2>/dev/null`,
       '}',
       '# Gắn vào RPROMPT hoặc PROMPT:',
       'RPROMPT=\'$(claude_profile_prompt) \'${RPROMPT:-}',
@@ -1235,7 +1247,7 @@ export function generatePromptSnippet(shell = 'starship') {
     return [
       '# Thêm hàm sau vào ~/.bashrc:',
       'claude_profile_prompt() {',
-      '  node /path/to/claude-swap/swap.js statusline 2>/dev/null',
+      `  node ${SCRIPT_PATH} statusline 2>/dev/null`,
       '}',
       '# Thêm $(claude_profile_prompt) vào biến PS1',
     ].join('\n')
@@ -1243,7 +1255,7 @@ export function generatePromptSnippet(shell = 'starship') {
   if (s === 'tmux') {
     return [
       '# Thêm dòng sau vào ~/.tmux.conf:',
-      'set -g status-right "#(node /path/to/claude-swap/swap.js statusline) %H:%M %d-%b-%y"',
+      `set -g status-right "#(node ${SCRIPT_PATH} statusline) %H:%M %d-%b-%y"`,
     ].join('\n')
   }
   throw new SwapError(`Shell '${shell}' không được hỗ trợ. Các shell hỗ trợ: starship, zsh, bash, tmux`)
@@ -1293,7 +1305,8 @@ export function loadTempProfile(home) {
   return null
 }
 
-export function tempSwap(home, name, durationStr) {
+export function tempSwap(home, nameOrAlias, durationStr) {
+  const name = resolveProfileOrAlias(home, nameOrAlias)
   if (!profileExists(home, name)) {
     throw new SwapError(`Profile '${name}' không tồn tại.`)
   }
@@ -1365,15 +1378,14 @@ export function findNextProfile(home, options = {}) {
   const allProfiles = listProfiles(home)
   const cur = currentProfile(home)
   const cache = options.cache || loadUsageCache(home)
+  const disabled = loadDisabledProfiles(home)
 
   const candidates = []
   for (const name of allProfiles) {
     if (name === cur) continue
-    if (isProfileDisabled(home, name)) continue
+    if (disabled.includes(name)) continue
 
-    const email = profileEmail(home, name)
-    const key = `${name}|${email}`
-    const hit = cache[key] && typeof cache[key] === 'object' ? cache[key] : {}
+    const hit = cacheHit(home, cache, name)
 
     try {
       const profile = JSON.parse(fs.readFileSync(profilePath(home, name), 'utf-8'))
@@ -1393,23 +1405,10 @@ export function findNextProfile(home, options = {}) {
       continue
     }
 
-    const limits = Array.isArray(hit.limits) ? hit.limits : []
-    const fiveHour = limits.find(l => l[0] === '5 giờ') || limits[0]
-    const rawUtil = fiveHour ? Number(fiveHour[1]) : 0
-    const util = rawUtil <= 1 && rawUtil > 0 ? rawUtil * 100 : rawUtil
+    if (isExhausted(hit, config)) continue
 
-    if (util >= config.threshold) {
-      continue
-    }
-
-    const sevenDay = limits.find(l => l[0] === '7 ngày')
-    const raw7d = sevenDay ? Number(sevenDay[1]) : 0
-    const util7d = raw7d <= 1 && raw7d > 0 ? raw7d * 100 : raw7d
-    if (config.safeguardThreshold && util7d >= config.safeguardThreshold) {
-      continue
-    }
-
-    const resetTime = parseResetTime(hit, fiveHour)
+    const util = limitPct(hit, LABEL_5H)
+    const resetTime = parseResetTime(hit, findLimit(hit, LABEL_5H))
     candidates.push({ name, util, resetTime })
   }
 
@@ -1436,6 +1435,13 @@ export function findNextProfile(home, options = {}) {
   return candidates[0].name
 }
 
+function isExhausted(hit, config) {
+  return (
+    limitPct(hit, LABEL_5H) >= config.threshold ||
+    Boolean(config.safeguardThreshold && limitPct(hit, LABEL_7D) >= config.safeguardThreshold)
+  )
+}
+
 export async function autoCheckAndSwap(home, options = {}) {
   // Check if temp profile expired
   const tempRes = checkTempExpiry(home)
@@ -1458,9 +1464,23 @@ export async function autoCheckAndSwap(home, options = {}) {
     return { swapped: false, reason: 'no_current' }
   }
 
-  // Check branch binding
+  if (!options.cache) {
+    // refresh quota (cached for USAGE_TTL) so the decision is not made on stale numbers
+    try {
+      await usageRows(home, options.fetchFn || fetchUsage)
+    } catch {}
+  }
+  const cache = options.cache || loadUsageCache(home)
+
+  // Check branch binding; skip an exhausted bound profile, or we would swap back and forth every prompt
   const branchBound = getBoundBranchProfile(home, process.cwd())
-  if (branchBound && branchBound.profile !== cur && profileExists(home, branchBound.profile)) {
+  const boundHit = branchBound ? cacheHit(home, cache, branchBound.profile) : {}
+  if (
+    branchBound &&
+    branchBound.profile !== cur &&
+    !isRateLimited(boundHit) &&
+    !isExhausted(boundHit, config)
+  ) {
     swapProfile(home, branchBound.profile, {
       type: 'project',
       reason: `Branch binding (${branchBound.branch})`,
@@ -1475,9 +1495,6 @@ export async function autoCheckAndSwap(home, options = {}) {
     }
   }
 
-  const email = profileEmail(home, cur)
-  const cache = options.cache || loadUsageCache(home)
-
   // Check auto-return to primary profile
   if (
     config.autoReturn &&
@@ -1485,16 +1502,10 @@ export async function autoCheckAndSwap(home, options = {}) {
     cur !== config.primaryProfile &&
     profileExists(home, config.primaryProfile)
   ) {
-    const priEmail = profileEmail(home, config.primaryProfile)
-    const priKey = `${config.primaryProfile}|${priEmail}`
-    const priHit = cache[priKey] && typeof cache[priKey] === 'object' ? cache[priKey] : {}
-    const priLimits = Array.isArray(priHit.limits) ? priHit.limits : []
-    const pri5h = priLimits.find(l => l[0] === '5 giờ') || priLimits[0]
-    const priRawUtil = pri5h ? Number(pri5h[1]) : 0
-    const priUtil = priRawUtil <= 1 && priRawUtil > 0 ? priRawUtil * 100 : priRawUtil
-    const priRateLimited = Boolean(priHit.retry_at && priHit.retry_at > Date.now() / 1000)
+    const priHit = cacheHit(home, cache, config.primaryProfile)
+    const priUtil = limitPct(priHit, LABEL_5H)
 
-    if (!priRateLimited && priUtil < config.threshold) {
+    if (!isRateLimited(priHit) && !isExhausted(priHit, config)) {
       swapProfile(home, config.primaryProfile, {
         type: 'auto',
         reason: 'Auto return to primary profile',
@@ -1516,27 +1527,16 @@ export async function autoCheckAndSwap(home, options = {}) {
     }
   }
 
-  const key = `${cur}|${email}`
-  const hit = cache[key] && typeof cache[key] === 'object' ? cache[key] : {}
-
-  const limits = Array.isArray(hit.limits) ? hit.limits : []
-  const fiveHour = limits.find(l => l[0] === '5 giờ') || limits[0]
-  const rawUtil = fiveHour ? Number(fiveHour[1]) : 0
-  const util = rawUtil <= 1 && rawUtil > 0 ? rawUtil * 100 : rawUtil
-
-  const sevenDay = limits.find(l => l[0] === '7 ngày')
-  const raw7d = sevenDay ? Number(sevenDay[1]) : 0
-  const util7d = raw7d <= 1 && raw7d > 0 ? raw7d * 100 : raw7d
+  const hit = cacheHit(home, cache, cur)
+  const util = limitPct(hit, LABEL_5H)
+  const util7d = limitPct(hit, LABEL_7D)
   const isSafeguardTriggered = Boolean(config.safeguardThreshold && util7d >= config.safeguardThreshold)
-  recordUsageSnapshot(home, cur, util, util7d)
 
-  const isRateLimited = Boolean(hit.retry_at && hit.retry_at > Date.now() / 1000)
-  if (isRateLimited || util >= config.threshold || isSafeguardTriggered) {
+  // retry_at is a 429 from the usage endpoint (polling limit), not the account's quota: judge by the last known numbers
+  if (util >= config.threshold || isSafeguardTriggered) {
     const next = findNextProfile(home, { config, cache })
     if (next && next !== cur) {
-      const reasonText = isRateLimited
-        ? 'Rate limited'
-        : isSafeguardTriggered
+      const reasonText = isSafeguardTriggered
         ? `Mức dùng 7 ngày ${util7d}% >= ngưỡng bảo vệ ${config.safeguardThreshold}%`
         : `Mức dùng ${util}% >= ngưỡng ${config.threshold}%`
       swapProfile(home, next, {
@@ -1551,7 +1551,7 @@ export async function autoCheckAndSwap(home, options = {}) {
         to: next,
         util,
         threshold: config.threshold,
-        rateLimited: isRateLimited,
+        reason: reasonText,
         safeguardTriggered: isSafeguardTriggered,
       }
     }
@@ -1732,8 +1732,7 @@ export function exportEncryptedProfiles(home, targetPath, password) {
   }
 
   const resolved = path.resolve(targetPath)
-  fs.mkdirSync(path.dirname(resolved), { recursive: true })
-  fs.writeFileSync(resolved, JSON.stringify(container, null, 2), 'utf-8')
+  atomicWrite(resolved, JSON.stringify(container, null, 2))
   return { path: resolved, count: Object.keys(profiles).length }
 }
 
@@ -1865,7 +1864,7 @@ export function saveBranchBindings(home, bindings) {
 export function getCurrentGitBranch(dir = process.cwd()) {
   try {
     return child_process
-      .execSync('git rev-parse --abbrev-ref HEAD', {
+      .execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
         cwd: dir,
         stdio: ['ignore', 'pipe', 'ignore'],
         timeout: 3000,
@@ -1922,6 +1921,7 @@ export function unbindBranch(home, repoDir, pattern = null) {
 export function getBoundBranchProfile(home, startDir = process.cwd(), currentBranch = null) {
   let cur = path.resolve(startDir)
   const bindings = loadBranchBindings(home)
+  if (Object.keys(bindings).length === 0) return null
   const branch = currentBranch || getCurrentGitBranch(cur)
   if (!branch) return null
 
@@ -1985,7 +1985,9 @@ export function calculateForecast(home, profileName, threshold = 95) {
     }
   }
 
-  const first = entries[0]
+  let start = entries.length - 1
+  while (start > 0 && entries[start - 1].util5h <= entries[start].util5h) start--
+  const first = entries[start]
   const last = entries[entries.length - 1]
   const deltaMs = last.timestamp - first.timestamp
   const deltaHours = deltaMs / (3600 * 1000)
@@ -2384,7 +2386,7 @@ export function enableProfile(home = os.homedir(), name) {
   const resolved = resolveProfileOrAlias(home, name)
   const list = loadDisabledProfiles(home)
   const filtered = list.filter(p => p !== resolved)
-  saveDisabledProfiles(home, filtered)
+  if (filtered.length !== list.length) saveDisabledProfiles(home, filtered)
   return resolved
 }
 
@@ -2543,6 +2545,28 @@ export function runSession(home = os.homedir(), name, cmdArgs = ['claude']) {
   return res.status ?? 0
 }
 
+// ---------------------------------------------------------------- self-upgrade
+
+export const MARKETPLACE = 'claude-swap'
+export const PLUGIN_ID = `profile-swap@${MARKETPLACE}`
+
+// the plugin manager owns the install (a versioned cache dir, not a git checkout), so upgrade goes through it
+export function upgradePlugin(run = child_process.spawnSync) {
+  const outputs = []
+  for (const args of [
+    ['plugin', 'marketplace', 'update', MARKETPLACE],
+    ['plugin', 'update', PLUGIN_ID],
+  ]) {
+    const cmdline = `claude ${args.join(' ')}`
+    const res = run('claude', args, { encoding: 'utf-8', timeout: 120000 })
+    if (res.error) throw new SwapError(`Không chạy được '${cmdline}': ${res.error.message}`)
+    const out = `${res.stdout || ''}${res.stderr || ''}`.trim()
+    if (res.status !== 0) throw new SwapError(`'${cmdline}' thất bại (mã ${res.status})${out ? `:\n${out}` : ''}`)
+    if (out) outputs.push(out)
+  }
+  return outputs.join('\n')
+}
+
 // ---------------------------------------------------------------- cli
 
 export function formatHelpReport(color = null, lang = 'vi') {
@@ -2570,6 +2594,7 @@ export function formatHelpReport(color = null, lang = 'vi') {
       `  ${cmd('/profile lang [vi|en]')}      View or switch language (Vietnamese / English)`,
       `  ${cmd('/profile run <name> [-- cmd]')} Run isolated Claude Code session in parallel`,
       `  ${cmd('/profile add-token <tok> [n]')} Register profile from setup-token or API key`,
+      `  ${cmd('/profile upgrade')}            Update plugin to the latest release (restart to apply)`,
       `  ${cmd('/profile disable <name>')}     Exclude profile from auto-switch rotation`,
       `  ${cmd('/profile enable <name>')}      Re-enable profile in auto-switch rotation`,
       `  ${cmd('/profile disabled')}           List profiles excluded from auto-switch`,
@@ -2640,6 +2665,7 @@ export function formatHelpReport(color = null, lang = 'vi') {
     `  ${cmd('/profile lang [vi|en]')}      Xem hoặc đổi ngôn ngữ (Tiếng Việt / English)`,
     `  ${cmd('/profile run <tên> [-- cmd]')} Chạy session Claude Code độc lập song song`,
     `  ${cmd('/profile add-token <tok> [tên]')} Tạo profile từ setup-token hoặc API key`,
+    `  ${cmd('/profile upgrade')}            Cập nhật plugin lên bản mới nhất (khởi động lại để áp dụng)`,
     `  ${cmd('/profile disable <tên>')}     Tạm dừng auto-switch đối với profile`,
     `  ${cmd('/profile enable <tên>')}      Bật lại auto-switch cho profile`,
     `  ${cmd('/profile disabled')}           Xem danh sách profile đang bị tạm dừng auto`,
@@ -2712,7 +2738,8 @@ export async function runCli(argv, home = os.homedir()) {
   }
 
   if (cmd === 'version' || cmd === '--version' || cmd === '-v') {
-    console.log('claude-swap v0.1.5')
+    const { version } = JSON.parse(fs.readFileSync(path.join(path.dirname(SCRIPT_PATH), 'package.json'), 'utf-8'))
+    console.log(`claude-swap v${version}`)
     return 0
   }
 
@@ -2841,6 +2868,16 @@ export async function runCli(argv, home = os.homedir()) {
           lang === 'en'
             ? `🔑 Successfully registered profile '${res.name}' (${res.type}).`
             : `🔑 Đã tạo thành công profile '${res.name}' (loại: ${res.type === 'api_key' ? 'API Key' : 'OAuth Token'}).`
+        )
+        return 0
+      }
+      case 'upgrade': {
+        const out = upgradePlugin()
+        if (out) console.log(out)
+        console.log(
+          lang === 'en'
+            ? '⬆️ Plugin updated. Restart Claude Code to load the new version.'
+            : '⬆️ Đã cập nhật plugin. Khởi động lại Claude Code để nạp bản mới.'
         )
         return 0
       }
@@ -2989,7 +3026,14 @@ export async function runCli(argv, home = os.homedir()) {
         if (sub === 'check') {
           const res = await autoCheckAndSwap(home)
           if (res.swapped) {
-            console.log(`[auto-swap] 🔀 Đã tự động chuyển từ '${res.from}' sang '${res.to}' (mức dùng: ${res.util}% >= ngưỡng ${res.threshold}%).`)
+            const why = res.isTempRevert
+              ? 'hết hạn mượn tạm'
+              : res.isBranchBinding
+              ? 'theo nhánh Git'
+              : res.isAutoReturn
+              ? 'quay về profile chính'
+              : res.reason
+            console.log(`[auto-swap] 🔀 Đã tự động chuyển từ '${res.from}' sang '${res.to}' (${why}).`)
           } else if (res.reason === 'no_candidate') {
             console.log(`[auto-swap] ⚠️ Profile '${res.current}' đạt mức ${res.util}% nhưng không có profile thay thế khả dụng.`)
           } else if (res.reason === 'disabled') {
@@ -3428,7 +3472,7 @@ export async function runCli(argv, home = os.homedir()) {
 }
 
 // Direct CLI invocation
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)) {
+if (process.argv[1] && path.resolve(process.argv[1]) === SCRIPT_PATH) {
   const code = await runCli(process.argv.slice(2))
   process.exit(code)
 }

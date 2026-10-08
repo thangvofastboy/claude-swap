@@ -66,6 +66,7 @@ import {
   syncSessionBack,
   sessionDir,
   profilePath,
+  upgradePlugin,
 } from '../swap.js'
 
 function login(home, account, token, extra = {}) {
@@ -82,6 +83,13 @@ function login(home, account, token, extra = {}) {
     path.join(credDir, '.credentials.json'),
     JSON.stringify({ claudeAiOauth: { accessToken: token } }, null, 2)
   )
+}
+
+// `auto check` refetches entries older than USAGE_TTL, so fixtures must look freshly fetched
+function writeFreshCache(file, data) {
+  const at = Date.now() / 1000
+  const fresh = Object.fromEntries(Object.entries(data).map(([k, v]) => [k, { at, ...v }]))
+  fs.writeFileSync(file, JSON.stringify(fresh))
 }
 
 function readClaudeJson(home) {
@@ -317,7 +325,7 @@ describe('swap.js core functionality', () => {
     }
     // Save cache
     const cacheFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json')
-    fs.writeFileSync(cacheFile, JSON.stringify(mockUsageData))
+    writeFreshCache(cacheFile, mockUsageData)
 
     // Set order: candidate1 first, even though candidate2 has lower usage
     const configFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.auto-switch.json')
@@ -346,7 +354,7 @@ describe('swap.js core functionality', () => {
       'acc_same_util_reset_earlier|d@example.com': { limits: [['5 giờ', 40, '20:00']], resets_at: '2026-10-08T20:00:00Z' },
     }
     const cacheFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json')
-    fs.writeFileSync(cacheFile, JSON.stringify(mockUsageData))
+    writeFreshCache(cacheFile, mockUsageData)
 
     // No custom order -> rule-based
     const configFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.auto-switch.json')
@@ -413,7 +421,7 @@ describe('swap.js core functionality', () => {
       'p_other_work|c@example.com': { limits: [['5 giờ', 50, '20:00']] },
     }
     const cacheFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json')
-    fs.writeFileSync(cacheFile, JSON.stringify(mockUsageData))
+    writeFreshCache(cacheFile, mockUsageData)
 
     // Check: should pick p_other_work because of pool=company, even though p_personal has lower usage
     const res = await runCli(['auto', 'check'], tmpHome)
@@ -918,6 +926,56 @@ describe('swap.js core functionality', () => {
     deleteProfile(tmpHome, 'to_del')
     assert.ok(!fs.existsSync(sessionDir(tmpHome, 'to_del')))
     assert.ok(!isProfileDisabled(tmpHome, 'to_del'))
+  })
+
+  test('utilization is a 0-100 percentage and reset times keep their date', async () => {
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'one')
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'two')
+    const config = { enabled: true, threshold: 95, safeguardThreshold: 85 }
+
+    // 1% used must not read as 100%
+    const low = { 'two|b@example.com': { limits: [['5 giờ', 1, ''], ['7 ngày', 1, '']] } }
+    const res = await autoCheckAndSwap(tmpHome, { cache: low, config })
+    assert.equal(res.swapped, false)
+    assert.equal(res.util, 1)
+
+    // a reset 2h from now (possibly after midnight) is still pending, from the raw ISO or the old "DD/MM HH:MM" form
+    const later = new Date(Date.now() + 2 * 3600 * 1000)
+    const ddmm = `${String(later.getDate()).padStart(2, '0')}/${String(later.getMonth() + 1).padStart(2, '0')}`
+    const hhmm = `${String(later.getHours()).padStart(2, '0')}:${String(later.getMinutes()).padStart(2, '0')}`
+    for (const lim of [['5 giờ', 40, '', later.toISOString()], ['5 giờ', 40, `${ddmm} ${hhmm}`]]) {
+      const report = formatCooldowns(tmpHome, { 'two|b@example.com': { limits: [lim] } }, 'vi')
+      assert.match(report, /two: 40% 🟢 \(Reset lúc .* - còn (1 giờ 5\d|2 giờ 0) phút\)/)
+    }
+    assert.equal(parseLimits({ five_hour: { utilization: 3, resets_at: later.toISOString() } })[0][3], later.toISOString())
+
+    // a failed fetch backs off for USAGE_TTL instead of retrying on every prompt
+    let calls = 0
+    const failing = async () => {
+      calls++
+      throw new Error('offline')
+    }
+    await autoCheckAndSwap(tmpHome, { fetchFn: failing, config })
+    await autoCheckAndSwap(tmpHome, { fetchFn: failing, config })
+    assert.equal(calls, 2) // one per profile, first call only
+  })
+
+  test('upgrade refreshes the marketplace, then updates the plugin, and stops on failure', () => {
+    const seen = []
+    const ok = (bin, args) => (seen.push([bin, ...args]), { status: 0, stdout: `${args[1]} ok\n`, stderr: '' })
+    assert.equal(upgradePlugin(ok), 'marketplace ok\nupdate ok')
+    assert.deepEqual(seen, [
+      ['claude', 'plugin', 'marketplace', 'update', 'claude-swap'],
+      ['claude', 'plugin', 'update', 'profile-swap@claude-swap'],
+    ])
+
+    let n = 0
+    const failFirst = () => (n++, { status: 1, stdout: '', stderr: 'network down' })
+    assert.throws(() => upgradePlugin(failFirst), /marketplace update claude-swap' thất bại \(mã 1\):\nnetwork down/)
+    assert.equal(n, 1)
+    assert.throws(() => upgradePlugin(() => ({ error: new Error('ENOENT') })), /Không chạy được/)
   })
 })
 

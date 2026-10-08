@@ -126,6 +126,7 @@ claude --plugin-dir /path/to/claude-swap
 | `/profile run <tên> [-- cmd]` | Chạy session Claude Code độc lập song song cho profile chỉ định |
 | `/profile add-token <tok> [tên]` | Tạo profile trực tiếp từ setup-token hoặc API key |
 | `echo $TOK \| node swap.js add-token - [tên]` | Nhập token an toàn từ `stdin` không lưu vào history shell |
+| `/profile upgrade` | Cập nhật plugin lên bản mới nhất từ marketplace (khởi động lại Claude Code để áp dụng) |
 | `/profile disable <tên>` | Tạm dừng đưa profile vào vòng xoay auto-switch |
 | `/profile enable <tên>` | Bật lại profile vào vòng xoay auto-switch |
 | `/profile disabled [--json]` | Xem danh sách các profile đang bị tạm dừng auto |
@@ -287,7 +288,7 @@ export CLAUDE_SWAP_LANG=en
 Dự án có bộ test suite toàn diện kiểm tra mọi tính năng:
 
 ```bash
-npm test                   # Chạy 38 unit tests của swap.js (node --test)
+npm test                   # Chạy 40 unit tests của swap.js (node --test)
 claude plugin validate .   # Kiểm tra tính hợp lệ của manifest và hooks
 claude plugin test .       # Chạy 10 tests kiểm thử plugin hook của Claude Code
 ```
@@ -303,7 +304,7 @@ claude-swap/
 │   ├── register.ts       # Hook session.start, prompt.submit & command.run cho /profile
 │   └── register.test.ts  # Test suite cho plugin hooks
 ├── test/
-│   └── swap.test.js      # Unit tests cho swap.js (38 tests)
+│   └── swap.test.js      # Unit tests cho swap.js (40 tests)
 ├── LICENSE               # Giấy phép mã nguồn mở MIT
 └── .claude-plugin/       # Plugin manifest & marketplace config
 ```
