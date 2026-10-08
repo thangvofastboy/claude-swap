@@ -28,6 +28,7 @@ Chỉ **một file Python** (`claude_swap.py`) gồm GUI (pywebview), icon trên
 | | |
 | --- | --- |
 | 💾 **Tạo / chuyển / xoá** | Mỗi profile là một tài khoản Claude đã đăng nhập. Hỗ trợ `/profile new <tên>`. |
+| 📋 **Danh sách trực quan** | Icon 🟢 Active / ⚪ Inactive, email 👤, hiển thị nhanh quota và màu sắc nổi bật trên terminal. |
 | 📊 **Usage từng profile** | Quota 5 giờ, 7 ngày và theo model (Opus, Sonnet, Fable…). Thanh màu theo mức: 🟢 < 50% · 🟡 < 80% · 🟠 < 95% · 🔴 ≥ 95%, kèm ⚠ từ 80%. |
 | 📥 **Nhập profile** | Từ file `*.json` của app, hoặc thư mục cấu hình Claude khác (vd `~/.claude-work`). Tự gợi ý các thư mục `~/.claude*`, kể cả thư mục ẩn. |
 | 🧭 **Tray + bảng nhanh** | Đổi profile và xem usage chỉ với một cú bấm. |
@@ -79,15 +80,22 @@ python3 claude_swap.py --foreground   # gắn với terminal, xem log khi debug
 ### ⌨️ CLI
 
 ```bash
-python3 claude_swap.py list                    # danh sách, đánh dấu (Active)
+python3 claude_swap.py list                    # danh sách trực quan (icon 🟢/⚪, email 👤, quota cache)
 python3 claude_swap.py current
 python3 claude_swap.py new <tên> [--force]     # tạo profile mới từ tài khoản đang đăng nhập
 python3 claude_swap.py save <tên> [--force]    # lưu tài khoản đang đăng nhập
 python3 claude_swap.py swap <tên>
 python3 claude_swap.py delete <tên>
-python3 claude_swap.py usage [--refresh]       # quota mọi profile
+python3 claude_swap.py usage [--refresh]       # quota mọi profile (màu sắc & cảnh báo ⚠)
 python3 claude_swap.py import <thư mục> [--force]
 python3 claude_swap.py folder                  # mở thư mục lưu profile
+```
+
+Ví dụ hiển thị khi chạy `list` hoặc `/profile`:
+```text
+🟢 work (Active)  👤 work@company.com  [5h 32% · 7d 64%]
+⚪ personal       👤 user@gmail.com    [5h 85% ⚠ · 7d 40%]
+⚪ dev
 ```
 
 ## 🔌 Lệnh `/profile` trong Claude Code
@@ -103,7 +111,7 @@ Cài (gõ trong terminal đang chạy `claude`; trả lời `y` để thêm mark
 
 | Lệnh | Việc làm |
 | --- | --- |
-| `/profile` | liệt kê profile, đánh dấu (Active) |
+| `/profile` | liệt kê profile kèm icon 🟢/⚪, email 👤, và quota cache |
 | `/profile <tên>` | chuyển sang profile `<tên>` |
 | `/profile usage` | quota 5 giờ / 7 ngày / theo model của mọi profile |
 | `/profile new <tên> [--force]` | tạo profile mới từ tài khoản đang đăng nhập |
