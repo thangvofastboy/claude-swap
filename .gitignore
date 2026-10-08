@@ -1,9 +1,5 @@
-__pycache__/
-.pytest_cache/
-*.pyc
-build/
-dist/
-*.spec
+node_modules/
+.DS_Store
 # local AI-tooling state (personal, not part of the app)
 .claude/
 .remember/

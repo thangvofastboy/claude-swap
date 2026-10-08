@@ -4,7 +4,7 @@ const ok = (stdout: string) => ({
   value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
 })
 
-test('/profile <name> swaps through claude_swap.py and shows it on the status line', async ($, on) => {
+test('/profile <name> swaps through swap.js and shows it on the status line', async ($, on) => {
   const calls: string[][] = []
   const scripts = new Set<string>()
   const statuses: (string | undefined)[] = []
@@ -22,7 +22,7 @@ test('/profile <name> swaps through claude_swap.py and shows it on the status li
 
   expect(ran.text).toContain("'work'")
   expect(calls).toEqual([['swap', 'work'], ['current']])
-  expect([...scripts]).toEqual(['claude_swap.py'])
+  expect([...scripts]).toEqual(['swap.js'])
   expect(statuses).toEqual(['● work'])
 })
 

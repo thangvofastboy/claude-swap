@@ -1,0 +1,8 @@
+{
+  "name": "profile-swap",
+  "version": "0.1.5",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}

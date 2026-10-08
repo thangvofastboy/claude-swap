@@ -18,18 +18,18 @@ function toArgv(args: string): string[] | undefined {
   return undefined
 }
 
-// the plugin is the repo itself: claude_swap.py sits next to .claude-plugin/ and hooks/
+// the plugin is the repo itself: swap.js sits next to .claude-plugin/ and hooks/
 async function runSwap($: EngineInterface, argv: string[]) {
-  const script = `${$.plugin.root}/claude_swap.py`
+  const script = `${$.plugin.root}/swap.js`
   let failure: unknown
-  for (const python of ['python3', 'python']) {
+  for (const node of ['node', 'nodejs']) {
     try {
-      return await $.process.run([python, script, ...argv])
+      return await $.process.run([node, script, ...argv])
     } catch (error) {
-      failure = error // not on PATH (Windows ships `python`), try the next one
+      failure = error
     }
   }
-  throw new Error(`Không chạy được python3/python: ${String(failure)}`)
+  throw new Error(`Không chạy được node: ${String(failure)}`)
 }
 
 async function refreshStatus($: EngineInterface) {
