@@ -1113,6 +1113,72 @@ export function formatDiagnostics(diag) {
   return lines.join('\n').trim()
 }
 
+// ---------------------------------------------------------------- statusline & prompt integration
+
+export function getStatusline(home) {
+  const cur = currentProfile(home)
+  if (!cur) return '[Claude: ⚪ (none)]'
+  const email = profileEmail(home, cur)
+  const key = `${cur}|${email}`
+  const cache = loadUsageCache(home)
+  const hit = cache[key] && typeof cache[key] === 'object' ? cache[key] : {}
+
+  if (hit.retry_at && hit.retry_at > Date.now() / 1000) {
+    return `[Claude: ⏳ ${cur} (429)]`
+  }
+
+  const limits = Array.isArray(hit.limits) ? hit.limits : []
+  const fiveHour = limits.find(l => l[0] === '5 giờ') || limits[0]
+  if (fiveHour) {
+    const rawUtil = Number(fiveHour[1])
+    const util = Math.round(rawUtil <= 1 && rawUtil > 0 ? rawUtil * 100 : rawUtil)
+    const icon = util >= 95 ? '🔴' : util >= 80 ? '🟡' : '🟢'
+    return `[Claude: ${icon} ${cur} (${util}%)]`
+  }
+
+  return `[Claude: 🟢 ${cur}]`
+}
+
+export function generatePromptSnippet(shell = 'starship') {
+  const s = String(shell).toLowerCase()
+  if (s === 'starship') {
+    return [
+      '# Thêm đoạn sau vào ~/.config/starship.toml:',
+      '[custom.claude_profile]',
+      'command = "node /path/to/claude-swap/swap.js statusline"',
+      'when = true',
+      'format = "[$output]($style) "',
+      'style = "bold cyan"',
+    ].join('\n')
+  }
+  if (s === 'zsh') {
+    return [
+      '# Thêm hàm sau vào ~/.zshrc:',
+      'claude_profile_prompt() {',
+      '  node /path/to/claude-swap/swap.js statusline 2>/dev/null',
+      '}',
+      '# Gắn vào RPROMPT hoặc PROMPT:',
+      'RPROMPT=\'$(claude_profile_prompt) \'${RPROMPT:-}',
+    ].join('\n')
+  }
+  if (s === 'bash') {
+    return [
+      '# Thêm hàm sau vào ~/.bashrc:',
+      'claude_profile_prompt() {',
+      '  node /path/to/claude-swap/swap.js statusline 2>/dev/null',
+      '}',
+      '# Thêm $(claude_profile_prompt) vào biến PS1',
+    ].join('\n')
+  }
+  if (s === 'tmux') {
+    return [
+      '# Thêm dòng sau vào ~/.tmux.conf:',
+      'set -g status-right "#(node /path/to/claude-swap/swap.js statusline) %H:%M %d-%b-%y"',
+    ].join('\n')
+  }
+  throw new SwapError(`Shell '${shell}' không được hỗ trợ. Các shell hỗ trợ: starship, zsh, bash, tmux`)
+}
+
 export function findNextProfile(home, options = {}) {
   const config = options.config || loadAutoSwitchConfig(home)
   const allProfiles = listProfiles(home)
@@ -1862,6 +1928,15 @@ export async function runCli(argv, home = os.homedir()) {
       case 'doctor': {
         const diag = diagnoseProfiles(home)
         console.log(formatDiagnostics(diag))
+        return 0
+      }
+      case 'statusline': {
+        console.log(getStatusline(home))
+        return 0
+      }
+      case 'prompt': {
+        const shell = filteredArgv[1] || 'starship'
+        console.log(generatePromptSnippet(shell))
         return 0
       }
       default:

@@ -23,6 +23,8 @@ import {
   formatCooldowns,
   autoCheckAndSwap,
   diagnoseProfiles,
+  getStatusline,
+  generatePromptSnippet,
 } from '../swap.js'
 
 function login(home, account, token, extra = {}) {
@@ -521,6 +523,23 @@ describe('swap.js core functionality', () => {
     })
     assert.equal(res.swapped, true)
     assert.equal(res.to, 'cand_safe')
+  })
+
+  test('statusline and prompt integrator', async () => {
+    login(tmpHome, 'dev', 'tok-dev')
+    saveProfile(tmpHome, 'dev')
+
+    const line = getStatusline(tmpHome)
+    assert.match(line, /dev/)
+
+    const starship = generatePromptSnippet('starship')
+    assert.match(starship, /custom\.claude_profile/)
+
+    const zsh = generatePromptSnippet('zsh')
+    assert.match(zsh, /PROMPT/)
+
+    assert.equal(await runCli(['statusline'], tmpHome), 0)
+    assert.equal(await runCli(['prompt', 'starship'], tmpHome), 0)
   })
 })
 
