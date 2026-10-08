@@ -426,14 +426,24 @@ export function formatSwapStats(home) {
 }
 
 export function deleteProfile(home, name) {
-  const f = profilePath(home, name)
+  const resolved = resolveProfileOrAlias(home, name)
+  const f = profilePath(home, resolved)
   if (!fs.existsSync(f)) {
     throw new SwapError(`Không có profile '${name}'.`)
   }
   fs.unlinkSync(f)
-  if (readCurrent(home) === name) {
+  if (readCurrent(home) === resolved) {
     setCurrent(home, null)
   }
+  try {
+    enableProfile(home, resolved)
+  } catch {}
+  try {
+    const sDir = sessionDir(home, resolved)
+    if (fs.existsSync(sDir)) {
+      fs.rmSync(sDir, { recursive: true, force: true })
+    }
+  } catch {}
 }
 
 export function openProfilesFolder(home) {
@@ -2386,7 +2396,14 @@ export function isProfileDisabled(home = os.homedir(), name) {
 // ---------------------------------------------------------------- direct token / api key registration
 
 export function addTokenProfile(home = os.homedir(), token, name = null, options = {}) {
-  const trimmedToken = (token || '').trim()
+  let trimmedToken = (token || '').trim()
+  if (trimmedToken === '-') {
+    try {
+      trimmedToken = fs.readFileSync(0, 'utf-8').trim()
+    } catch (err) {
+      throw new SwapError(`Không đọc được token từ stdin: ${err.message}`)
+    }
+  }
   if (!trimmedToken) {
     throw new SwapError('Vui lòng cung cấp token hoặc API key.')
   }
@@ -2459,12 +2476,24 @@ export function prepareSession(home = os.homedir(), name) {
   const pData = JSON.parse(fs.readFileSync(profilePath(home, resolved), 'utf-8'))
   const cj = path.join(sDir, '.claude.json')
   const baseClaudeJson = fs.existsSync(claudeJson(home)) ? loadClaudeJson(home) : {}
-  const sessionData = { ...baseClaudeJson, ...(pData.claude_json || {}) }
+  const sessionData = { ...baseClaudeJson }
+  for (const k of AUTH_KEYS) {
+    delete sessionData[k]
+  }
+  for (const k of AUTH_KEYS) {
+    if (pData.claude_json && k in pData.claude_json) {
+      sessionData[k] = pData.claude_json[k]
+    }
+  }
   atomicWrite(cj, JSON.stringify(sessionData, null, 2))
 
+  const credFile = path.join(sDir, '.claude', '.credentials.json')
   if (pData.credentials) {
-    const credFile = path.join(sDir, '.claude', '.credentials.json')
     atomicWrite(credFile, pData.credentials)
+  } else if (fs.existsSync(credFile)) {
+    try {
+      fs.unlinkSync(credFile)
+    } catch {}
   }
   return sDir
 }
@@ -2508,6 +2537,9 @@ export function runSession(home = os.homedir(), name, cmdArgs = ['claude']) {
     cwd: process.cwd(),
   })
   syncSessionBack(home, resolved, sDir)
+  if (res.error) {
+    throw new SwapError(`Không chạy được lệnh '${bin}': ${res.error.message}`)
+  }
   return res.status ?? 0
 }
 
@@ -2674,8 +2706,13 @@ export async function runCli(argv, home = os.homedir()) {
   const cmd = filteredArgv[0]
   const color = !noColor && shouldColor()
 
-  if (!cmd || cmd === 'help') {
+  if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
     console.log(formatHelpReport(color, lang))
+    return 0
+  }
+
+  if (cmd === 'version' || cmd === '--version' || cmd === '-v') {
+    console.log('claude-swap v0.1.5')
     return 0
   }
 

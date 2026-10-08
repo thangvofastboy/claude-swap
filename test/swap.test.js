@@ -899,5 +899,25 @@ describe('swap.js core functionality', () => {
     assert.equal(await runCli(['list', '--json'], tmpHome), 0)
     assert.equal(await runCli(['current', '--json'], tmpHome), 0)
   })
+
+  test('version and help flags, deleteProfile session cleanup', async () => {
+    assert.equal(await runCli(['--version'], tmpHome), 0)
+    assert.equal(await runCli(['-v'], tmpHome), 0)
+    assert.equal(await runCli(['version'], tmpHome), 0)
+    assert.equal(await runCli(['--help'], tmpHome), 0)
+    assert.equal(await runCli(['-h'], tmpHome), 0)
+
+    // Test deleteProfile cleaning up session directory and disabled list
+    login(tmpHome, 'to_del', 'tok-del')
+    saveProfile(tmpHome, 'to_del')
+    disableProfile(tmpHome, 'to_del')
+    prepareSession(tmpHome, 'to_del')
+    assert.ok(fs.existsSync(sessionDir(tmpHome, 'to_del')))
+    assert.ok(isProfileDisabled(tmpHome, 'to_del'))
+
+    deleteProfile(tmpHome, 'to_del')
+    assert.ok(!fs.existsSync(sessionDir(tmpHome, 'to_del')))
+    assert.ok(!isProfileDisabled(tmpHome, 'to_del'))
+  })
 })
 

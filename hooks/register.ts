@@ -47,14 +47,16 @@ const SUBCOMMANDS = new Set([
   'disabled',
   'add-token',
   'run',
+  'version',
 ])
 const USAGE =
   'Dùng: /profile | /profile list | /profile <tên|alias> | /profile pick | /profile lang [vi|en] | /profile run <tên> | /profile add-token <tok> | /profile disable <tên> | /profile auto | /profile sync'
 
-// "" → help, "list" → list, "work" → swap work, "save work" → save work, "import ~/a b" → import "~/a b", "auto ..." → auto ...
+// "" → help, "list" → list, "work" → swap work, "save work" → save work, "import ~/a b" → import ~/a b, "auto ..." → auto ...
 function toArgv(args: string): string[] | undefined {
   const words = args.trim().split(/\s+/).filter(Boolean)
-  if (words.length === 0) return ['help']
+  if (words.length === 0 || words[0] === '--help' || words[0] === '-h') return ['help']
+  if (words[0] === 'version' || words[0] === '--version' || words[0] === '-v') return ['version']
   if (words[0] === 'import') {
     const path = words.slice(1).filter(w => w !== '--force').join(' ')
     if (!path) return undefined
@@ -62,6 +64,7 @@ function toArgv(args: string): string[] | undefined {
   }
   if (SUBCOMMANDS.has(words[0])) return words
   if (words.length === 1) return ['swap', words[0]]
+  if (words.length === 2 && words[1] === '--project') return ['swap', words[0], '--project']
   return undefined
 }
 
@@ -96,7 +99,7 @@ export const register: Register = on => {
       const targetDir = e.cwd || process.cwd()
       const boundRan = await runSwap($, ['bind', 'get', targetDir])
       const boundOut = boundRan.stdout.trim()
-      const match = boundOut.match(/đang liên kết với profile:\s*([^\s(]+)/)
+      const match = boundOut.match(/(?:đang liên kết với profile|bound to profile|profile):\s*([^\s()]+)/i)
       if (match && match[1]) {
         const boundProfile = match[1]
         const curRan = await runSwap($, ['current'])
@@ -116,7 +119,7 @@ export const register: Register = on => {
     try {
       const ran = await runSwap($, ['auto', 'check'])
       const out = `${ran.stdout}${ran.stderr}`.trim()
-      if (out.includes('[auto-swap]') || out.includes('quay về')) {
+      if (out.includes('[auto-swap]') || out.includes('quay về') || out.includes('revert')) {
         await refreshStatus($)
       }
     } catch {}
