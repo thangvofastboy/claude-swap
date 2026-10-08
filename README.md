@@ -75,6 +75,7 @@ python3 claude_swap.py --foreground   # gắn với terminal, xem log khi debug
 ```bash
 python3 claude_swap.py list                    # danh sách, đánh dấu (Active)
 python3 claude_swap.py current
+python3 claude_swap.py new <tên> [--force]     # tạo profile mới từ tài khoản đang đăng nhập
 python3 claude_swap.py save <tên> [--force]    # lưu tài khoản đang đăng nhập
 python3 claude_swap.py swap <tên>
 python3 claude_swap.py delete <tên>
@@ -99,6 +100,7 @@ Cài (gõ trong terminal đang chạy `claude`; trả lời `y` để thêm mark
 | `/profile` | liệt kê profile, đánh dấu (Active) |
 | `/profile <tên>` | chuyển sang profile `<tên>` |
 | `/profile usage` | quota 5 giờ / 7 ngày / theo model của mọi profile |
+| `/profile new <tên> [--force]` | tạo profile mới từ tài khoản đang đăng nhập |
 | `/profile save <tên> [--force]` | lưu tài khoản đang đăng nhập |
 | `/profile delete <tên>` | xoá profile |
 | `/profile import <thư mục> [--force]` | nhập profile từ thư mục khác (đường dẫn có dấu cách dùng được) |
