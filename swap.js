@@ -1104,12 +1104,12 @@ export function profileListReport(home, color = null, lang = null) {
     const quota = limits.length
       ? [at(LABEL_5H).shown, at(LABEL_7D).shown, paint('36', resetCell(LABEL_5H)), paint('36', resetCell(LABEL_7D).trimEnd())].join('  ')
       : hit.note
-        ? paint('33', `(${hit.note})`)
+        ? paint('1;33', `(${hit.note})`)
         : paint('90', '—'.padEnd(CELL_W) + '  ' + '—'.padEnd(CELL_W) + '  ' + '—'.padEnd(RESET_W) + '  —')
     const badges = []
     const tags = getProfileTags(home, n)
-    if (tags.length) badges.push(paint('35', `🏷️ ${tags.join(', ')}`))
-    if (disabledList.includes(n)) badges.push(paint('33', '(disabled)'))
+    if (tags.length) badges.push(paint('36', `🏷️ ${tags.join(', ')}`))
+    if (disabledList.includes(n)) badges.push(paint('1;33', '(disabled)'))
     return { n, email, quota, badges, active: n === cur }
   })
 
@@ -1118,7 +1118,7 @@ export function profileListReport(home, color = null, lang = null) {
   const head = paint('1;36', `   ${'PROFILE'.padEnd(nameW)}  ${'EMAIL'.padEnd(emailW)}  ${'5H'.padEnd(CELL_W)}  ${'7D'.padEnd(CELL_W)}  ${'RESET 5H'.padEnd(RESET_W)}  RESET 7D`)
   const lines = rows.map(r => {
     const name = paint(r.active ? '1;32' : '1;37', r.n.padEnd(nameW))
-    const email = paint('37', r.email.padEnd(emailW))
+    const email = r.email.padEnd(emailW)
     return `${r.active ? '🟢' : '⚪'} ${name}  ${email}  ${r.quota}${r.badges.length ? '  ' + r.badges.join('  ') : ''}`.trimEnd()
   })
   const rule = paint('90', '─'.repeat(3 + nameW + emailW + CELL_W * 2 + RESET_W + 8 + 10))
@@ -1137,7 +1137,7 @@ export async function usageReport(home, fetchFn = fetchUsage, force = false, col
     if (color) {
       const icon = active ? '🟢' : '⚪'
       const nameColored = active ? `\x1b[1;32m${name} (Active)\x1b[0m` : `\x1b[1;37m${name}\x1b[0m`
-      const emailColored = email ? `  \x1b[37m👤 ${email}\x1b[0m` : ''
+      const emailColored = email ? `  👤 ${email}` : ''
       lines.push(`${icon} ${nameColored}${emailColored}`)
     } else {
       lines.push(`${name}${active ? ' (Active)' : ''}  ${email}`.trimEnd())
@@ -1164,7 +1164,7 @@ export async function usageReport(home, fetchFn = fetchUsage, force = false, col
     }
 
     if (r.note) {
-      const noteStr = color ? `  \x1b[33m⚠ ${r.note}\x1b[0m` : `  ${r.note}`
+      const noteStr = color ? `  \x1b[1;33m⚠ ${r.note}\x1b[0m` : `  ${r.note}`
       lines.push(noteStr)
     }
   }
@@ -3489,15 +3489,15 @@ export function colorizeLine(line) {
   let out = line
     .replace(/(^|[\s(])'([^'\s]{1,60})'(?=$|[\s.,;:)])/g, (_, pre, n) => `${pre}${sgr('1;33', `'${n}'`)}`) // 'profile-name', not an apostrophe in prose
     .replace(/\b(\d{1,3})%/g, (m, n) => sgr(pctCode(Number(n)), m))
-    .replace(/ (➔|➜|→) /g, (_, a) => ` ${sgr('1;35', a)} `)
+    .replace(/ (➔|➜|→) /g, (_, a) => ` ${sgr('1;36', a)} `)
     .replace(/\b(BẬT|ON|bật)\b/g, m => sgr('1;32', m))
     .replace(/\b(TẮT|OFF|off|tắt)\b/g, m => sgr('1;31', m))
     .replace(/(\[(?:auto-swap|manual|auto|project|branch)\])/g, m => sgr('36', m))
   const lead = line.trimStart()
   if (/^(❌|🚫.*lỗi)/.test(lead)) return sgr('1;31', out)
-  if (/^(✨|✅|🎉)/.test(lead)) return sgr('32', out)
-  if (/^(⚠️|🚨|⏳)/.test(lead)) return sgr('33', out)
-  if (/^(ℹ️|💡)/.test(lead)) return sgr('2', out)
+  if (/^(✨|✅|🎉)/.test(lead)) return sgr('1;32', out)
+  if (/^(⚠️|🚨|⏳)/.test(lead)) return sgr('1;33', out)
+  if (/^(ℹ️|💡)/.test(lead)) return sgr('90', out)
   if (!/^\s/.test(line) && /^\p{Extended_Pictographic}/u.test(lead) && /[:：]$/.test(lead)) return sgr('1;36', out) // a title
   if (!/^\s/.test(line) && /^(🔀|↩️|🔤|🏷️|🧹|📟|🔔|🛡️|⚖️|🤖|🧠|⬆️|📈|📊|📜|⏱️|🔑)/u.test(lead)) return sgr('1;36', out)
   return out

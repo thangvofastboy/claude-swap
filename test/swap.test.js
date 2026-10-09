@@ -77,6 +77,7 @@ import {
   loadAutoSwitchConfig,
   saveAutoSwitchConfig,
   colorizeLine,
+  usageReport,
   statusLineText,
   isStatuslineEnabled,
   forecastWarning,
@@ -1165,15 +1166,18 @@ describe('swap.js core functionality', () => {
     assert.match(statusLineText(tmpHome), /^● sl/)
   })
 
-  test('coloured output sticks to the SGR codes the host is known to draw', () => {
+  test('coloured output sticks to the SGR codes the host is known to draw', async () => {
     login(tmpHome, 'k_a', 'tok-a')
     saveProfile(tmpHome, 'k1')
     writeFreshCache(path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json'), {
       'k1|k_a@example.com': { limits: [['5 giờ', 85, ''], ['7 ngày', 10, '']] },
     })
-    const out = profileListReport(tmpHome, true)
-    // the host printed `[38;5;248m` as text; only 208 (orange) and 240 (dark grey) are seen to work
-    assert.doesNotMatch(out, /38;5;(?!208m|240m)/)
+    const lines = ["❌ Lỗi: 'x'", '✨ ok', '⚠️ w', 'ℹ️ i', '📜 Lịch sử:', '• 1 | 👤 [manual] a ➔ b', 'BẬT TẮT 55%', '🏷️ t']
+    const out = [profileListReport(tmpHome, true), await usageReport(tmpHome, async () => ({}), false, true), ...lines.map(colorizeLine)].join('\n')
+    // the host printed `[37m` and `[38;5;248m` as text; only these were seen drawn properly
+    const seen = new Set(['0', '1;31', '1;32', '1;33', '1;36', '1;37', '36', '90', '1;38;5;208', '38;5;240'])
+    const used = new Set([...out.matchAll(/\x1b\[([0-9;]*)m/g)].map(m => m[1]))
+    assert.deepEqual([...used].filter(c => !seen.has(c)), [])
   })
 
   test('a limit with no reset time shows a dash, not a huge countdown', () => {
