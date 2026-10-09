@@ -8,6 +8,7 @@ const SUBCOMMANDS = new Set([
   'folder',
   'save',
   'swap',
+  'rename',
   'delete',
   'new',
   'auto',

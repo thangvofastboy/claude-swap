@@ -51,7 +51,7 @@ const WEBHOOK_TYPES = ['telegram', 'discord', 'slack', 'generic']
 const SWAP_JS = fileURLToPath(new URL('./swap.js', import.meta.url))
 // subcommands the "All features" tab may run; interactive ones (run, pick, web) stay CLI-only
 const WEB_CLI = new Set([
-  'list', 'current', 'usage', 'swap', 'new', 'save', 'delete', 'import', 'folder', 'version', 'upgrade',
+  'list', 'current', 'usage', 'swap', 'new', 'save', 'rename', 'delete', 'import', 'folder', 'version', 'upgrade',
   'alias', 'unalias', 'aliases', 'tag', 'untag', 'tags', 'disable', 'enable', 'disabled',
   'auto', 'balance', 'forecast', 'cooldown', 'doctor', 'cleanup', 'temp', 'untemp',
   'bind', 'unbind', 'bind-branch', 'unbind-branch', 'branch-bindings',

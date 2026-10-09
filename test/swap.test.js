@@ -70,6 +70,12 @@ import {
   prepareSession,
   keepLiveMcpOAuth,
   undoSwap,
+  renameProfile,
+  bindProfile,
+  loadProjectBindings,
+  loadBranchBindings,
+  loadAutoSwitchConfig,
+  saveAutoSwitchConfig,
   colorizeLine,
   statusLineText,
   isStatuslineEnabled,
@@ -1024,6 +1030,75 @@ describe('swap.js core functionality', () => {
     prepareSession(tmpHome, 'share-acc') // second run must not fail on existing links
   })
 
+  test('rename moves the profile and everything that points at it', async () => {
+    login(tmpHome, 'rn_a', 'tok-a')
+    saveProfile(tmpHome, 'old-name')
+    login(tmpHome, 'rn_b', 'tok-b')
+    saveProfile(tmpHome, 'other')
+    swapProfile(tmpHome, 'old-name')
+    const repo = path.join(tmpHome, 'repo')
+    fs.mkdirSync(repo)
+    setAlias(tmpHome, 'o', 'old-name')
+    bindProfile(tmpHome, repo, 'old-name')
+    bindBranch(tmpHome, repo, 'feat/*', 'old-name')
+    disableProfile(tmpHome, 'old-name')
+    setBudgetLimit(tmpHome, 'old-name', 50)
+    saveAutoSwitchConfig(tmpHome, { ...loadAutoSwitchConfig(tmpHome), order: ['other', 'old-name'], primaryProfile: 'old-name' })
+    swapProfile(tmpHome, 'other')
+    swapProfile(tmpHome, 'old-name')
+    const cacheFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json')
+    fs.writeFileSync(cacheFile, JSON.stringify({ 'old-name|rn_a@example.com': { limits: [] }, 'other|rn_b@example.com': { limits: [] } }))
+
+    assert.throws(() => renameProfile(tmpHome, 'old-name', 'other'), /đã tồn tại/)
+    assert.throws(() => renameProfile(tmpHome, 'old-name', 'o'), /alias/)
+    assert.throws(() => renameProfile(tmpHome, 'old-name', 'bad name'), /không hợp lệ/)
+    assert.throws(() => renameProfile(tmpHome, 'nope', 'x'), /Không có profile/)
+
+    assert.deepEqual(renameProfile(tmpHome, 'old-name', 'new-name'), { from: 'old-name', to: 'new-name' })
+    assert.ok(!fs.existsSync(profilePath(tmpHome, 'old-name')))
+    assert.deepEqual(listProfiles(tmpHome).sort(), ['new-name', 'other'])
+    assert.equal(currentProfile(tmpHome), 'new-name')
+    assert.equal(loadAliases(tmpHome).o, 'new-name')
+    assert.equal(Object.values(loadProjectBindings(tmpHome))[0], 'new-name')
+    assert.equal(fs.readFileSync(path.join(repo, '.claude-profile'), 'utf-8').trim(), 'new-name')
+    assert.equal(Object.values(loadBranchBindings(tmpHome))[0][0].profile, 'new-name')
+    assert.deepEqual(loadDisabledProfiles(tmpHome), ['new-name'])
+    assert.deepEqual(Object.keys(loadBudgetConfig(tmpHome).limits), ['new-name'])
+    const auto = loadAutoSwitchConfig(tmpHome)
+    assert.deepEqual(auto.order, ['other', 'new-name'])
+    assert.equal(auto.primaryProfile, 'new-name')
+    assert.ok(loadSwapHistory(tmpHome).every(h => h.from !== 'old-name' && h.to !== 'old-name'))
+    assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(cacheFile, 'utf-8'))).sort(), ['new-name|rn_a@example.com', 'other|rn_b@example.com'])
+    assert.equal(undoSwap(tmpHome).to, 'other') // history still resolves after the rename
+    assert.equal(await runCli(['rename', 'new-name', 'final', '--no-color'], tmpHome), 0)
+    assert.equal(await runCli(['rename', 'final'], tmpHome), 1) // missing the new name
+  })
+
+  test('rename survives corrupt state files and a stale session dir', () => {
+    login(tmpHome, 'cs_a', 'tok-a')
+    saveProfile(tmpHome, 'cs-old')
+    const dir = path.join(tmpHome, '.config', 'claude-cli-profiles')
+    fs.writeFileSync(path.join(dir, '.aliases.json'), '{ not json')
+    fs.mkdirSync(path.join(dir, '.sessions', 'cs-new'), { recursive: true })
+    fs.writeFileSync(path.join(dir, '.sessions', 'cs-new', 'stale'), 'x')
+    prepareSession(tmpHome, 'cs-old')
+    renameProfile(tmpHome, 'cs-old', 'cs-new')
+    assert.equal(fs.readFileSync(path.join(dir, '.aliases.json'), 'utf-8'), '{ not json') // left untouched
+    assert.ok(!fs.existsSync(path.join(dir, '.sessions', 'cs-new', 'stale')))
+    assert.ok(fs.existsSync(path.join(dir, '.sessions', 'cs-new', '.credentials.json')))
+    renameProfile(tmpHome, 'cs-new', 'CS-new') // case-only change
+    assert.deepEqual(listProfiles(tmpHome).filter(n => /cs-new/i.test(n)), ['CS-new'])
+  })
+
+  test('rename carries the isolated run session along', () => {
+    login(tmpHome, 'rs_a', 'tok-a')
+    saveProfile(tmpHome, 'sess-old')
+    const oldDir = prepareSession(tmpHome, 'sess-old')
+    renameProfile(tmpHome, 'sess-old', 'sess-new')
+    assert.ok(!fs.existsSync(oldDir))
+    assert.ok(fs.existsSync(path.join(sessionDir(tmpHome, 'sess-new'), '.credentials.json')))
+  })
+
   test('undo goes back to the profile before the last swap, and again', () => {
     login(tmpHome, 'u_a', 'tok-a')
     saveProfile(tmpHome, 'un-a')
@@ -1088,6 +1163,27 @@ describe('swap.js core functionality', () => {
     assert.equal(await runCli(['statusline', 'toggle'], tmpHome), 0) // off -> on
     assert.equal(isStatuslineEnabled(tmpHome), true)
     assert.match(statusLineText(tmpHome), /^● sl/)
+  })
+
+  test('coloured output sticks to the SGR codes the host is known to draw', () => {
+    login(tmpHome, 'k_a', 'tok-a')
+    saveProfile(tmpHome, 'k1')
+    writeFreshCache(path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json'), {
+      'k1|k_a@example.com': { limits: [['5 giờ', 85, ''], ['7 ngày', 10, '']] },
+    })
+    const out = profileListReport(tmpHome, true)
+    // the host printed `[38;5;248m` as text; only 208 (orange) and 240 (dark grey) are seen to work
+    assert.doesNotMatch(out, /38;5;(?!208m|240m)/)
+  })
+
+  test('a limit with no reset time shows a dash, not a huge countdown', () => {
+    login(tmpHome, 'nr_a', 'tok-a')
+    saveProfile(tmpHome, 'nr')
+    writeFreshCache(path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json'), {
+      'nr|nr_a@example.com': { limits: [['5 giờ', 10, ''], ['7 ngày', 20, '']] },
+    })
+    assert.doesNotMatch(profileListReport(tmpHome, false), /\d{6,}/)
+    assert.equal(statusLineText(tmpHome), '● nr │ 5h [█░░░░░░░] 10% │ 7d [██░░░░░░] 20%')
   })
 
   test('list shows both reset columns', () => {

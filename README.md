@@ -155,6 +155,7 @@ Phần này nghiêm túc hơn một chút, vì gõ sai lệnh thì không vui.
 | `/profile aliases` | Danh bạ biệt danh |
 | `/profile new <tên> [--force]` | Chụp ảnh tài khoản đang đăng nhập rồi cất thành profile mới |
 | `/profile save <tên> [--force]`| Ghi tài khoản đang đăng nhập vào profile, rất hợp sau khi vừa `/login` lại |
+| `/profile rename <cũ> <mới>` | Đổi tên profile. Alias, liên kết dự án/nhánh, lịch sử, ngân sách đều đi theo, không bỏ rơi ai |
 | `/profile delete <tên>` | Chia tay dứt khoát: xóa profile và dọn đồ đạc liên quan. Không có thùng rác |
 | `/profile folder` | Mở thư mục chứa profile. Ngó thì được, đừng sửa tay |
 | `/profile lang [vi\|en]` | Xem hoặc đổi ngôn ngữ. Song ngữ, khỏi cần phiên dịch |

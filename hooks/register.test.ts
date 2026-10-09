@@ -377,7 +377,9 @@ test('bare /profile statusline toggles, and the list keeps its colour', async ($
   on('ui.status', () => ({ value: undefined }))
   await $.command.run({ command: 'profile', args: 'statusline' })
   await $.command.run({ command: 'profile', args: 'statusline off' })
+  await $.command.run({ command: 'profile', args: 'rename a b' })
   expect(calls[0]).toEqual(['statusline', 'toggle'])
   expect(calls[2]).toEqual(['statusline', 'off'])
+  expect(calls[4]).toEqual(['rename', 'a', 'b']) // a known subcommand, not "swap to a profile called rename"
   expect(envs.every(e => e === undefined)).toBe(true) // no NO_COLOR: escape codes are meant to be drawn
 })

@@ -583,6 +583,86 @@ export function deleteProfile(home, name) {
   } catch {}
 }
 
+// Runs `edit` over a state file's JSON and saves the result when it changed; a missing or corrupt file is left alone.
+function editStateFile(file, edit) {
+  try {
+    if (!fs.existsSync(file)) return
+    const before = fs.readFileSync(file, 'utf-8')
+    const after = JSON.stringify(edit(JSON.parse(before)), null, 2)
+    if (after !== JSON.stringify(JSON.parse(before), null, 2)) atomicWrite(file, after)
+  } catch {}
+}
+
+// Every dotfile beside the profiles that is keyed by or points at a profile name must be handled here.
+export function renameProfile(home, oldName, newName) {
+  const from = resolveProfileOrAlias(home, oldName)
+  const to = checkName(newName)
+  const src = profilePath(home, from)
+  if (!fs.existsSync(src)) throw new SwapError(`Không có profile '${oldName}'.`)
+  if (from === to) throw new SwapError('Tên mới trùng tên cũ.')
+  const target = profilePath(home, to)
+  // "Work" -> "work" on a case-insensitive disk resolves to the very same file: that is a rename, not a clash
+  const sameFile = () => fs.statSync(target).ino === fs.statSync(src).ino
+  if (fs.existsSync(target) && !(from.toLowerCase() === to.toLowerCase() && sameFile())) {
+    throw new SwapError(`Profile '${to}' đã tồn tại.`)
+  }
+  if (loadAliases(home)[to]) throw new SwapError(`'${to}' đang là alias của '${loadAliases(home)[to]}'. Xóa alias trước (/profile unalias ${to}).`)
+  const session = isolatedSession(home)
+  if (session === from) throw new SwapError(`Đang ở trong session cô lập của '${from}'. Thoát session đó rồi đổi tên.`)
+
+  renameWithRetry(src, target)
+
+  const dir = profilesDir(home)
+  const swap = v => (v === from ? to : v)
+  const swapKeys = obj => Object.fromEntries(Object.entries(obj).map(([k, v]) => [k === from ? to : k, v]))
+  // pointers to the active profile (the default one and one per CLAUDE_CONFIG_DIR)
+  for (const f of fs.readdirSync(dir).filter(f => f === '.current' || f.startsWith('.current-'))) {
+    try {
+      if (fs.readFileSync(path.join(dir, f), 'utf-8').trim() === from) atomicWrite(path.join(dir, f), to)
+    } catch {}
+  }
+  const state = f => path.join(dir, f)
+  editStateFile(state('.aliases.json'), a => Object.fromEntries(Object.entries(a).map(([k, v]) => [k, swap(v)])))
+  editStateFile(state('.model-affinity.json'), a => Object.fromEntries(Object.entries(a).map(([k, v]) => [k, swap(v)])))
+  editStateFile(state('.project-bindings.json'), b => Object.fromEntries(Object.entries(b).map(([k, v]) => [k, swap(v)])))
+  editStateFile(state('.branch-bindings.json'), b =>
+    Object.fromEntries(Object.entries(b).map(([k, v]) => [k, Array.isArray(v) ? v.map(x => ({ ...x, profile: swap(x.profile) })) : v]))
+  )
+  editStateFile(state('.disabled.json'), l => (Array.isArray(l) ? l.map(swap) : l))
+  editStateFile(state('.auto-switch.json'), c => ({
+    ...c,
+    ...(Array.isArray(c.order) ? { order: c.order.map(swap) } : {}),
+    ...(c.primaryProfile ? { primaryProfile: swap(c.primaryProfile) } : {}),
+  }))
+  editStateFile(state('.temp-profile.json'), t => ({ ...t, tempProfile: swap(t.tempProfile), originalProfile: swap(t.originalProfile) }))
+  editStateFile(state('.swap-history.json'), h => (Array.isArray(h) ? h.map(e => ({ ...e, from: swap(e.from), to: swap(e.to) })) : h))
+  editStateFile(state('.budget.json'), b => ({ ...b, ...(b.limits ? { limits: swapKeys(b.limits) } : {}) }))
+  editStateFile(state('.usage-history.json'), swapKeys)
+  editStateFile(state('.usage-cache.json'), c =>
+    Object.fromEntries(Object.entries(c).map(([k, v]) => [k.startsWith(`${from}|`) ? `${to}|${k.slice(from.length + 1)}` : k, v]))
+  )
+  // the `.claude-profile` marker a project bind leaves in the project folder
+  for (const [projectDir, bound] of Object.entries(loadProjectBindings(home))) {
+    const marker = path.join(projectDir, '.claude-profile')
+    try {
+      if (bound === to && fs.readFileSync(marker, 'utf-8').trim() === from) fs.writeFileSync(marker, `${to}\n`, 'utf-8')
+    } catch {}
+  }
+  // the isolated `run` session keeps its tokens under the old name: move it (its Keychain item is per directory)
+  try {
+    const oldDir = sessionDir(home, from)
+    if (fs.existsSync(oldDir)) {
+      const newDir = sessionDir(home, to)
+      fs.rmSync(newDir, { recursive: true, force: true }) // a leftover of a profile that used to have this name
+      fs.renameSync(oldDir, newDir)
+      fs.rmSync(currentFileFor(home, oldDir), { force: true })
+      atomicWrite(currentFileFor(home, newDir), to)
+      if (process.platform === 'darwin') deleteKeychain(sessionKeychainService(oldDir))
+    }
+  } catch {}
+  return { from, to }
+}
+
 export function openProfilesFolder(home) {
   const d = profilesDir(home)
   const opener = process.platform === 'win32' ? 'explorer' : process.platform === 'darwin' ? 'open' : 'xdg-open'
@@ -973,6 +1053,12 @@ export function chartBar(pct, width = 8, color = false) {
   return `\x1b[90m[\x1b[0m${c}${'█'.repeat(filled)}\x1b[0m\x1b[38;5;240m${'░'.repeat(empty)}\x1b[90m]\x1b[0m`
 }
 
+// time left until this limit resets as "2h15m", or '' when the cache has no (usable) reset time
+function resetIn(hit, lim) {
+  const at = lim ? parseResetTime(hit, lim) : NaN
+  return Number.isFinite(at) && at !== Number.MAX_SAFE_INTEGER ? shortDuration(at - Date.now()) : ''
+}
+
 // 2h15m, 45m, 3d4h: the time left until a quota window resets
 function shortDuration(ms) {
   if (ms <= 0) return 'now'
@@ -1014,15 +1100,11 @@ export function profileListReport(home, color = null, lang = null) {
     const hit = cache[`${n}|${email}`] && typeof cache[`${n}|${email}`] === 'object' ? cache[`${n}|${email}`] : {}
     const limits = Array.isArray(hit.limits) ? hit.limits : []
     const at = cell(hit)
-    const resetIn = label => {
-      const lim = findLimit(hit, label)
-      const at = lim ? parseResetTime(hit, lim) : NaN
-      return (Number.isFinite(at) ? shortDuration(at - Date.now()) : '—').padEnd(RESET_W)
-    }
+    const resetCell = label => (resetIn(hit, findLimit(hit, label)) || '—').padEnd(RESET_W)
     const quota = limits.length
-      ? [at(LABEL_5H).shown, at(LABEL_7D).shown, paint('36', resetIn(LABEL_5H)), paint('36', resetIn(LABEL_7D).trimEnd())].join('  ')
+      ? [at(LABEL_5H).shown, at(LABEL_7D).shown, paint('36', resetCell(LABEL_5H)), paint('36', resetCell(LABEL_7D).trimEnd())].join('  ')
       : hit.note
-        ? paint('38;5;214', `(${hit.note})`)
+        ? paint('33', `(${hit.note})`)
         : paint('90', '—'.padEnd(CELL_W) + '  ' + '—'.padEnd(CELL_W) + '  ' + '—'.padEnd(RESET_W) + '  —')
     const badges = []
     const tags = getProfileTags(home, n)
@@ -1036,7 +1118,7 @@ export function profileListReport(home, color = null, lang = null) {
   const head = paint('1;36', `   ${'PROFILE'.padEnd(nameW)}  ${'EMAIL'.padEnd(emailW)}  ${'5H'.padEnd(CELL_W)}  ${'7D'.padEnd(CELL_W)}  ${'RESET 5H'.padEnd(RESET_W)}  RESET 7D`)
   const lines = rows.map(r => {
     const name = paint(r.active ? '1;32' : '1;37', r.n.padEnd(nameW))
-    const email = paint('38;5;248', r.email.padEnd(emailW))
+    const email = paint('37', r.email.padEnd(emailW))
     return `${r.active ? '🟢' : '⚪'} ${name}  ${email}  ${r.quota}${r.badges.length ? '  ' + r.badges.join('  ') : ''}`.trimEnd()
   })
   const rule = paint('90', '─'.repeat(3 + nameW + emailW + CELL_W * 2 + RESET_W + 8 + 10))
@@ -1055,7 +1137,7 @@ export async function usageReport(home, fetchFn = fetchUsage, force = false, col
     if (color) {
       const icon = active ? '🟢' : '⚪'
       const nameColored = active ? `\x1b[1;32m${name} (Active)\x1b[0m` : `\x1b[1;37m${name}\x1b[0m`
-      const emailColored = email ? `  \x1b[38;5;248m👤 ${email}\x1b[0m` : ''
+      const emailColored = email ? `  \x1b[37m👤 ${email}\x1b[0m` : ''
       lines.push(`${icon} ${nameColored}${emailColored}`)
     } else {
       lines.push(`${name}${active ? ' (Active)' : ''}  ${email}`.trimEnd())
@@ -1074,7 +1156,7 @@ export async function usageReport(home, fetchFn = fetchUsage, force = false, col
         const lblColored = `\x1b[1;36m${label.padEnd(12)}\x1b[0m`
         const pctColored = `${c}${String(pctInt).padStart(3)}%\x1b[0m`
         const warnColored = pctInt >= WARN_PCT ? '\x1b[1;31m ⚠\x1b[0m' : ''
-        const resetColored = reset ? `  \x1b[38;5;245mreset ${reset}\x1b[0m` : ''
+        const resetColored = reset ? `  \x1b[90mreset ${reset}\x1b[0m` : ''
         lines.push(`  ${icon} ${lblColored} ${barColored} ${pctColored}${warnColored}${resetColored}`)
       } else {
         lines.push(`  ${icon} ${label.padEnd(12)}${bar(pct)} ${String(pctInt).padStart(3)}%${warn}${resetStr}`)
@@ -1082,7 +1164,7 @@ export async function usageReport(home, fetchFn = fetchUsage, force = false, col
     }
 
     if (r.note) {
-      const noteStr = color ? `  \x1b[38;5;214m⚠ ${r.note}\x1b[0m` : `  ${r.note}`
+      const noteStr = color ? `  \x1b[33m⚠ ${r.note}\x1b[0m` : `  ${r.note}`
       lines.push(noteStr)
     }
   }
@@ -1410,11 +1492,8 @@ export function statusLineText(home) {
       const lim = findLimit(hit, label)
       if (!lim) continue
       const pct = Math.max(0, Math.min(Number(lim[1]) || 0, 100))
-      const at = parseResetTime(hit, lim)
-      parts.push(
-        `${name} ${chartBar(pct, 8)} ${Math.round(pct)}%${pct >= WARN_PCT ? '🔥' : ''}` +
-          (Number.isFinite(at) ? ` ↻${shortDuration(at - Date.now())}` : '')
-      )
+      const left = resetIn(hit, lim)
+      parts.push(`${name} ${chartBar(pct, 8)} ${Math.round(pct)}%${pct >= WARN_PCT ? '🔥' : ''}${left ? ` ↻${left}` : ''}`)
     }
   }
   const warning = forecastWarning(home)
@@ -3155,7 +3234,7 @@ export function exportSafeShare(home = os.homedir(), outputPath = null) {
 export function generateCompletion(shell = 'bash') {
   const subcommands = [
     'list', 'swap', 'new', 'save', 'delete', 'usage', 'auto', 'run', 'add-token',
-    'disable', 'enable', 'disabled', 'upgrade', 'web', 'dashboard', 'balance',
+    'rename', 'disable', 'enable', 'disabled', 'upgrade', 'web', 'dashboard', 'balance',
     'webhook', 'budget', 'cost', 'mask', 'share', 'completion', 'alias', 'unalias',
     'aliases', 'bind', 'unbind', 'bind-branch', 'unbind-branch', 'branch-bindings',
     'tag', 'untag', 'tags', 'affinity', 'unaffinity', 'affinities', 'temp', 'untemp',
@@ -3241,6 +3320,7 @@ export function formatHelpReport(color = null, lang = 'vi') {
       `  ${cmd('/profile current')}           Show currently active profile`,
       `  ${cmd('/profile new <name>')}        Create new profile from current login`,
       `  ${cmd('/profile save <name>')}       Save current credentials to profile`,
+      `  ${cmd('/profile rename <old> <new>')} Rename a profile (aliases, bindings, history follow)`,
       `  ${cmd('/profile delete <name>')}     Delete profile`,
       `  ${cmd('/profile usage')}             Detailed 5h, 7d and per-model quotas`,
       `  ${cmd('/profile folder')}            Open profile config directory`,
@@ -3320,6 +3400,7 @@ export function formatHelpReport(color = null, lang = 'vi') {
     `  ${cmd('/profile current')}           Hiển thị tên profile đang active`,
     `  ${cmd('/profile new <tên>')}         Tạo profile mới từ tài khoản hiện tại`,
     `  ${cmd('/profile save <tên>')}        Lưu thông tin đăng nhập hiện tại vào profile`,
+    `  ${cmd('/profile rename <cũ> <mới>')} Đổi tên profile (alias, liên kết, lịch sử đi theo)`,
     `  ${cmd('/profile delete <tên>')}      Xóa profile`,
     `  ${cmd('/profile usage')}             Xem chi tiết quota 5h, 7d và từng model`,
     `  ${cmd('/profile folder')}            Mở thư mục chứa file cấu hình profile`,
@@ -3391,7 +3472,7 @@ export function formatHelpReport(color = null, lang = 'vi') {
 const ESC = '\x1b'
 // commands whose output is for people only; the others (current, bind get, auto check, statusline, export...) are parsed by the hook or shells
 const PRETTY_CMDS = new Set([
-  'swap', 'undo', 'save', 'new', 'delete', 'tag', 'untag', 'tags', 'history', 'stats', 'cooldown', 'forecast',
+  'swap', 'undo', 'save', 'new', 'rename', 'delete', 'tag', 'untag', 'tags', 'history', 'stats', 'cooldown', 'forecast',
   'auto', 'balance', 'disable', 'enable', 'disabled', 'alias', 'unalias', 'aliases', 'notify', 'mask', 'cleanup',
   'temp', 'untemp', 'budget', 'cost', 'upgrade', 'affinity', 'unaffinity', 'affinities', 'unbind', 'bind-branch',
   'unbind-branch', 'branch-bindings', 'lang', 'language', 'webhook', 'sync', 'import', 'add-token', 'run',
@@ -3677,6 +3758,12 @@ async function runCliInner(argv, home) {
         })
         console.log(`🔀 Đã chuyển sang '${currentProfile(home) || name}'`)
         console.log('ℹ️ Không cần thoát session: Claude dùng tài khoản mới ở lần kiểm tra đăng nhập kế tiếp (xem /status).')
+        return 0
+      }
+      case 'rename': {
+        if (!filteredArgv[1] || !filteredArgv[2]) throw new SwapError('Cú pháp: /profile rename <tên_cũ> <tên_mới>')
+        const res = renameProfile(home, filteredArgv[1], filteredArgv[2])
+        console.log(`✏️ Đã đổi tên profile '${res.from}' ➔ '${res.to}'`)
         return 0
       }
       case 'delete': {

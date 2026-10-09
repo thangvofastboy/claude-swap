@@ -155,6 +155,7 @@ This part is a bit more serious, because typos in commands aren't fun.
 | `/profile aliases` | Your nickname phone book |
 | `/profile new <name> [--force]` | Snapshot the logged-in account and file it as a new profile |
 | `/profile save <name> [--force]`| Write the logged-in account into a profile, handy right after a fresh `/login` |
+| `/profile rename <old> <new>` | Rename a profile. Aliases, project/branch bindings, history and budgets follow it, nothing is left behind |
 | `/profile delete <name>` | A clean break: delete the profile and everything that belongs to it. There is no recycle bin |
 | `/profile folder` | Open the profiles folder. Look, don't touch |
 | `/profile lang [vi\|en]` | Show or change the language. Bilingual, no interpreter needed |
