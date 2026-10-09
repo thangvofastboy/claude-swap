@@ -689,6 +689,27 @@ describe('swap.js core functionality', () => {
     assert.equal(currentProfile(tmpHome), 'orig')
   })
 
+  test('an expired temp loan does not drag you back after you switched away on purpose', async () => {
+    login(tmpHome, 'tl_a', 'tok-a')
+    saveProfile(tmpHome, 'tl-orig')
+    login(tmpHome, 'tl_b', 'tok-b')
+    saveProfile(tmpHome, 'tl-temp')
+    login(tmpHome, 'tl_c', 'tok-c')
+    saveProfile(tmpHome, 'tl-other')
+    swapProfile(tmpHome, 'tl-orig')
+    tempSwap(tmpHome, 'tl-temp', '10ms')
+    swapProfile(tmpHome, 'tl-other') // the user moves on by hand
+    await new Promise(r => setTimeout(r, 20))
+
+    const res = checkTempExpiry(tmpHome)
+    assert.equal(res.expired, true)
+    assert.equal(res.revertedTo, null)
+    assert.equal(currentProfile(tmpHome), 'tl-other') // left alone
+    assert.equal(loadTempProfile(tmpHome), null) // but the loan is closed
+    const auto = await autoCheckAndSwap(tmpHome, { config: { enabled: true, threshold: 95 }, cache: {} })
+    assert.notEqual(auto.isTempRevert, true) // and auto check does not report a revert that never happened
+  })
+
   test('help command and empty args display full command usage guide', async () => {
     const help = formatHelpReport()
     assert.match(help, /Hướng dẫn sử dụng các lệnh/)
@@ -1156,7 +1177,7 @@ describe('swap.js core functionality', () => {
       'sl|sl_a@example.com': { limits: [['5 giờ', 34, '', soon], ['7 ngày', 90, '', later]] },
     })
     const text = statusLineText(tmpHome)
-    assert.match(text, /^● sl │ 5h \[███░░░░░\] 34% ↻2h0\dm │ 7d \[███████░\] 90%🔥 ↻3d1h$/)
+    assert.match(text, /^● sl │ 5h \[███░░░░░\] 34% ⏳2h0\dm │ 7d \[███████░\] 90%🔥 ⏳3d1h$/)
     assert.equal(isStatuslineEnabled(tmpHome), true)
 
     assert.equal(await runCli(['statusline', 'off'], tmpHome), 0)

@@ -21,6 +21,7 @@
 [Web Dashboard](#-web-dashboard) ·
 [Bảng lệnh](#-bảng-lệnh-profile) ·
 [Session song song](#-chạy-session-song-song) ·
+[Xử lý sự cố](#-xử-lý-sự-cố) ·
 [Bên trong có gì](#-bên-trong-có-gì) ·
 [Đa ngôn ngữ](#-đa-ngôn-ngữ) ·
 [Phát triển & Test](#️-phát-triển--kiểm-thử)
@@ -43,6 +44,10 @@ Plugin chạy bằng chính **Node.js** mà Claude Code đã mang theo: **không
 | --- | --- |
 | 🌐 **Web Dashboard** | `/profile web` mở một trang điều khiển trên trình duyệt: bấm một cái là đổi tài khoản, kéo thanh trượt để chỉnh cấu hình, có cả trang hướng dẫn. Dành cho những ngày không muốn gõ lệnh. |
 | 💾 **Quản lý Profile** | Tạo, lưu, đổi, xóa: `/profile new`, `save`, `delete`. Bộ tứ cơ bản. |
+| ✏️ **Đổi tên & hoàn tác** | `/profile rename cũ mới` đổi tên mà alias, liên kết, lịch sử đi theo. `/profile undo` quay về profile trước khi lỡ tay đổi nhầm. |
+| 🔌 **Giữ nguyên MCP** | Đăng nhập của các MCP server thuộc về máy, không thuộc tài khoản: đổi profile xong không phải đăng nhập lại Linear, Notion, Vercel... |
+| 📟 **Status line chi tiết** | Trên khung nhập luôn có một dải màu với profile, thanh 5h/7d, giờ reset và cảnh báo sắp cạn (`/profile statusline` để tắt/bật). |
+| 🎨 **Output có màu** | Lỗi đỏ, thành công xanh, bảng `list` thẳng cột kèm giờ reset 5h và 7d. Đọc một cái là biết. |
 | 🔤 **Alias** | Lười gõ `work-company-production-2`? Đặt `w` rồi `/profile w`. |
 | 🎛️ **Picker tương tác** | `/profile pick` cho chọn bằng phím `↑` `↓`, dành cho người không nhớ nổi tên profile của mình. |
 | ⚖️ **Cân bằng tải** | Chia đều công việc cho các tài khoản theo `least-used` (ai còn nhiều quota thì làm) hoặc `round-robin` (lần lượt từng người). Không tài khoản nào phải gánh team. |
@@ -50,7 +55,7 @@ Plugin chạy bằng chính **Node.js** mà Claude Code đã mang theo: **không
 | 💰 **Ngân sách** | Đặt trần chi tiêu hàng tháng cho từng profile (`/profile budget`). Ví tiền sẽ cảm ơn bạn. |
 | 🛡️ **Che email & chia sẻ an toàn** | Email hiện thành `us***@domain.com` khi bạn share màn hình, và xuất cấu hình không kèm token (`/profile mask`, `/profile share`). |
 | ⌨️ **Tab completion** | Sinh script gợi ý lệnh cho Bash, Zsh, Fish (`/profile completion`). Gõ nửa chữ rồi bấm Tab. |
-| 🚀 **Session song song** | `/profile run <tên>` chạy thêm một Claude Code tách biệt với tài khoản khác. Hai Claude, hai tài khoản, không ai giẫm chân ai. |
+| 🚀 **Session song song** | `/profile run <tên>` chạy thêm một Claude Code tách biệt với tài khoản khác. Hai Claude, hai tài khoản, không ai giẫm chân ai. Vẫn dùng chung skill, agent, plugin, settings và memory của bạn. |
 | 🔑 **Setup-token & API key** | Tạo profile thẳng từ token, không cần trình duyệt (`/profile add-token`), đọc được cả từ `stdin` để token không nằm trong lịch sử shell. |
 | 🚫 **Cho nghỉ phép** | `/profile disable <tên>` tạm loại một profile khỏi auto-switch mà không cần xóa. |
 | 🌿 **Theo nhánh Git** | Nhánh `work-*` dùng tài khoản công ty, `feat/*` dùng tài khoản dev, tự động. Chẳng còn cảnh lỡ tay dùng tài khoản công ty cho side project. |
@@ -60,13 +65,13 @@ Plugin chạy bằng chính **Node.js** mà Claude Code đã mang theo: **không
 | 🤖 **Tự đổi tài khoản** | Chạm ngưỡng % hoặc dính rate limit thì tự nhảy sang tài khoản còn nhiều quota nhất hoặc reset sớm nhất. Bạn chỉ việc code tiếp. |
 | 🚨 **Bảo vệ hạn mức 7 ngày** | Không nhảy vào tài khoản đã dùng gần hết quota tuần (mặc định 85%). |
 | 🧠 **Model affinity** | Opus chạy tài khoản này, Sonnet chạy tài khoản kia (`/profile affinity`). |
-| 🩺 **Doctor & Cleanup** | Khám token hết hạn, profile trùng tài khoản, file hỏng (`/profile doctor`, `/profile cleanup`). Thầy thuốc cho credentials. |
+| 🩺 **Doctor & Cleanup** | Khám token hết hạn, đăng nhập MCP hết hạn, profile trùng tài khoản, file hỏng (`/profile doctor`, `/profile cleanup`). Thầy thuốc cho credentials. |
 | ☁️ **Sync mã hóa** | Đẩy và kéo bản sao lưu mã hóa AES-256 giữa các máy (`/profile sync push` / `pull`). |
 | 💻 **Shell prompt & Tmux** | Hiện profile đang dùng kèm % usage trên Starship, Zsh, Bash, Tmux, chạy dưới 5ms. |
 | ⏳ **Mượn tạm** | Mượn một profile trong `30m` hay `1h` rồi tự trả. Như mượn sạc của đồng nghiệp, nhưng lần này có người nhắc trả. |
 | 📊 **JSON** | `--json` cho `list`, `current`, `disabled`, để script và CI đọc được. |
 | 🌐 **Song ngữ** | Tiếng Việt hoặc tiếng Anh, `/profile lang [vi\|en]`. |
-| ⚡ **Không tốn token** | Mọi lệnh `/profile` chạy local qua plugin hook, **không gửi gì cho model và không tốn lượt nào**. |
+| ⚡ **Không tốn token** | Mọi lệnh `/profile` chạy local qua plugin hook, **không gửi gì cho model và không tốn lượt nào**. Chạy ngay cả khi Claude đang bận trả lời, khỏi chờ. |
 
 ---
 
@@ -146,7 +151,7 @@ Phần này nghiêm túc hơn một chút, vì gõ sai lệnh thì không vui.
 | Lệnh | Mô tả |
 | --- | --- |
 | `/profile` | Hiện bảng hướng dẫn đầy đủ. Lạc đường thì gõ cái này |
-| `/profile list [--json]` | Điểm danh cả đội: icon 🟢/⚪, email 👤, nhãn 🏷️ và thanh quota |
+| `/profile list [--json]` | Điểm danh cả đội: bảng thẳng cột gồm 🟢/⚪, email, thanh quota 5h/7d, giờ reset và nhãn 🏷️ |
 | `/profile current [--json]` | Câu hỏi triết học "mình là ai?", trả lời bằng tên profile đang dùng |
 | `/profile <tên\|alias>` | Đổi sang profile hoặc alias `<tên>`. Claude còn không biết mình vừa đổi chủ |
 | `/profile pick` | Chọn bằng phím `↑` `↓`, cho ai không nhớ nổi tên profile của chính mình |
@@ -186,7 +191,7 @@ Phần này nghiêm túc hơn một chút, vì gõ sai lệnh thì không vui.
 
 | Lệnh | Mô tả |
 | --- | --- |
-| `/profile run <tên> [-- cmd]` | Mở thêm một Claude Code chạy tài khoản khác, song song mà không giẫm chân nhau |
+| `/profile run <tên> [-- cmd]` | Mở thêm một Claude Code chạy tài khoản khác, song song mà không giẫm chân nhau. Dùng chung skill, agent, plugin, settings, memory |
 | `/profile add-token <tok> [tên]` | Tạo profile thẳng từ setup-token hoặc API key, không cần trình duyệt |
 | `echo $TOK \| node swap.js add-token - [tên]` | Đưa token qua `stdin` để nó không nằm lại trong lịch sử shell |
 | `/profile upgrade` | Kéo bản mới nhất về và tự nạp lại, khỏi khởi động lại Claude Code |
@@ -207,10 +212,10 @@ Phần này nghiêm túc hơn một chút, vì gõ sai lệnh thì không vui.
 | `/profile auto safeguard [on\|off\|<%>]` | Không nhảy vào tài khoản đã gần cạn quota tuần (mặc định `85%`) |
 | `/profile auto return [on\|off]` | Tự quay về profile chính khi nó hồi sức |
 | `/profile auto primary <tên>` | Chọn "nhà" để auto-return quay về |
-| `/profile auto check` | Khỏi chờ prompt kế tiếp: kiểm tra ngay, chạm ngưỡng là đổi |
+| `/profile auto check` | Khỏi chờ prompt kế tiếp: kiểm tra ngay, chạm ngưỡng là đổi. Mỗi prompt chỉ hỏi quota của profile đang dùng, chỉ hỏi cả đội khi cần chọn người thay |
 | `/profile forecast` | Bói xem bao giờ cạn quota, dựa trên tốc độ tiêu thụ thật |
 | `/profile cooldown` | Đếm ngược tới lúc quota 5h hồi sức |
-| `/profile doctor` | Khám tổng quát: token OAuth, file cấu hình, kết nối |
+| `/profile doctor` | Khám tổng quát: token OAuth, đăng nhập MCP, file cấu hình, kết nối |
 | `/profile cleanup [--force]` | Tìm profile trùng email/UUID hoặc token hỏng. Thêm `--force` là dọn thật |
 
 ### 📁 Dự án, nhánh Git, tag & model
@@ -258,17 +263,34 @@ Phần này nghiêm túc hơn một chút, vì gõ sai lệnh thì không vui.
 ### `/profile list`:
 
 ```text
-🟢 work (Active)  👤 work@company.com  5h [███░░░░░] 32%   7d [█████░░░] 64%
-⚪ personal       👤 user@gmail.com    5h [███████░] 85% ⚠   7d [███░░░░░] 40%
-⚪ dev-account
+   PROFILE   EMAIL                5H                 7D                 RESET 5H  RESET 7D
+───────────────────────────────────────────────────────────────────────────────────────────
+🟢 work      work@company.com     [███░░░░░]  32%    [█████░░░]  64%    2h10m     3d4h
+⚪ personal  user@gmail.com       [███████░]  85%🔥  [███░░░░░]  40%    48m       1d9h  🏷️ side
+⚪ dev       dev@example.com      —                  —                  —         —     (disabled)
 ```
 
+Cột reset cho biết còn bao lâu nữa thì cửa sổ quota đó hồi sức, để biết nên chờ hay nên đổi.
+
 *Màu thanh usage, như đèn giao thông:*
-- 🟢 `< 50%`: thoải mái
-- 🟡 `< 80%`: bắt đầu để ý
-- 🟠 `< 95%`: liệu mà tiết kiệm
-- 🔴 `≥ 95%`: auto-switch đang xỏ giày
-- Từ `80%` trở lên sẽ có thêm ⚠️ cho chắc.
+- 🟢 xanh lá `< 50%`: thoải mái
+- 🟡 vàng `< 80%`: bắt đầu để ý
+- 🟠 cam `< 95%`: liệu mà tiết kiệm, từ `80%` có thêm 🔥
+- 🔴 đỏ `≥ 95%`: auto-switch đang xỏ giày
+
+### Status line chi tiết (`/profile statusline`):
+
+Bật mặc định, là một dải nhiều màu ngay trên khung nhập (không phải dòng trạng thái một màu của Claude Code, vì dòng đó chỉ vẽ được chữ thường). Cập nhật mỗi khi bạn gửi prompt, thanh và phần trăm đổi màu theo mức tải:
+
+```text
+● work │ 5h [███░░░░░] 32% ⏳2h10m │ 7d [█████░░░] 64% ⏳3d4h │ ⚠ 5h ~12p
+```
+
+`⏳` là thời gian còn lại tới lúc reset. `⚠ 5h ~12p` chỉ hiện khi tốc độ tiêu thụ cho thấy profile này sẽ chạm ngưỡng auto-switch trong khoảng 30 phút. Gõ `/profile statusline` để tắt/bật.
+
+### Màu sắc trong output
+
+Các lệnh dành cho người đọc (`swap`, `undo`, `history`, `stats`, `forecast`, `tag`, `alias`...) được tô màu theo ý nghĩa: lỗi đỏ, thành công xanh, tên profile vàng, tiêu đề cyan. Lệnh mà hook hay shell phải đọc (`current`, `statusline`, `auto check`, `--json`) luôn là chữ thường. Muốn tắt màu: `--no-color` hoặc biến môi trường `NO_COLOR=1`.
 
 ### Gọi từ terminal thường, ngoài Claude Code:
 
@@ -294,7 +316,7 @@ node swap.js run work
 node swap.js run work -- claude --model sonnet
 ```
 
-Mỗi session sống ở `~/.config/claude-cli-profiles/.sessions/<tên>` và dùng `CLAUDE_CONFIG_DIR` riêng. Khi session kết thúc, token đã được refresh sẽ được đồng bộ ngược về profile. Nếu bên trong session có ai đó đăng nhập sang tài khoản khác, plugin sẽ không chép nhầm tài khoản đó vào profile.
+Mỗi session sống ở `~/.config/claude-cli-profiles/.sessions/<tên>` và dùng `CLAUDE_CONFIG_DIR` riêng. Skill, agent, plugin, settings, `CLAUDE.md` và memory được nối (symlink) từ `~/.claude` sang, nên session phụ vẫn "đủ đồ nghề"; chỉ có đăng nhập là riêng theo profile. Khi session kết thúc, token đã được refresh sẽ được đồng bộ ngược về profile. Nếu bên trong session có ai đó đăng nhập sang tài khoản khác, plugin sẽ không chép nhầm tài khoản đó vào profile.
 
 ---
 
@@ -305,10 +327,13 @@ Mỗi profile là một file `~/.config/claude-cli-profiles/<tên>.json` (quyề
 - Các khóa đăng nhập trong `~/.claude.json`: `oauthAccount`, `primaryApiKey`, `customApiKeyResponses`.
 - Token OAuth trong `~/.claude/.credentials.json`, hoặc Keychain trên macOS.
 
+Skill, agent, plugin, settings và memory nằm trong `~/.claude/` nên **không thuộc về profile nào**: đổi tài khoản không làm mất cái gì trong số đó.
+
 **Khi bạn đổi profile:**
 - Plugin chỉ thay đúng mấy khóa đăng nhập. **Cấu hình dự án, cài đặt và lịch sử trong `~/.claude.json` giữ nguyên.** Như thay chìa khóa xe, không ai tháo luôn cả cái xe.
 - Trước khi đổi, plugin lưu lại token mới nhất của profile hiện tại, phòng khi Claude Code vừa âm thầm refresh nó.
 - Mọi file được ghi qua file tạm rồi mới đổi tên (atomic write), kèm bản `.bak`. Mất điện giữa chừng cũng không mất profile.
+- File credentials còn chứa `mcpOAuth`, tức đăng nhập của các MCP server. Phần này thuộc về máy chứ không thuộc tài khoản, nên khi đổi profile plugin giữ nguyên bản đang dùng thay vì trả về bản chụp cũ của profile. Nhờ vậy MCP không bị đăng nhập lại.
 - Nếu bạn đặt `CLAUDE_CONFIG_DIR`, plugin làm việc với thư mục đó thay cho `~/.claude`.
 - Trên macOS, token được đưa vào Keychain qua `stdin` chứ không nằm trên dòng lệnh, nên `ps` không nhìn thấy.
 
@@ -317,6 +342,20 @@ Mỗi profile là một file `~/.config/claude-cli-profiles/<tên>.json` (quyề
 - URL webhook (thứ chứa bot token Telegram hay secret của Discord/Slack) được lưu đầy đủ, nhưng dashboard chỉ hiện phần domain. Muốn đổi thì gõ URL mới, để trống là giữ nguyên.
 - File profile bị hỏng sẽ báo "JSON không hợp lệ" chứ không trích nội dung file vào thông báo lỗi, nên không có mẩu token nào lọt ra terminal.
 - Bản `.bak` được tạo với quyền `0600` ngay từ đầu, không có khoảnh khắc nào để người khác đọc trộm.
+
+---
+
+## 🩹 Xử lý sự cố
+
+| Triệu chứng | Nguyên nhân và cách xử lý |
+| --- | --- |
+| Chạy `/profile upgrade` xong vẫn thấy giao diện cũ | Claude Code chỉ nạp lại bản đã cài. Từ v0.4.1 plugin tự gọi `/reload-plugins` sau khi cập nhật. Nếu bản bạn đang chạy cũ hơn, tự gõ `/reload-plugins` một lần (hoặc khởi động lại), các lần sau sẽ tự động. |
+| `/profile foo bar` báo "Dùng: ..." | Lệnh `foo` chưa có trong bản đang chạy. Kiểm tra `/profile version`, rồi `/profile upgrade`. |
+| Trước email có chữ lạ kiểu `[38;5;248m` | Khung chat của Claude Code không hiểu một số mã màu. Từ v0.4.2 plugin chỉ dùng các mã đã kiểm chứng. Lên bản mới là hết. |
+| Đổi profile xong MCP đòi đăng nhập lại | Từ v0.4.0 đăng nhập MCP được giữ nguyên khi đổi profile. Riêng các connector `claude.ai ...` gắn với tài khoản nên đổi tài khoản là đổi theo, không giữ được. Chạy `/profile doctor` để xem MCP nào hết hạn mà không có refresh token. |
+| Bảng `list` hiện `—` ở cột quota | Chưa có số liệu cho profile đó (chưa lấy được quota, token hết hạn, hoặc là API key). `/profile list --refresh` để hỏi lại. |
+| Status line không hiện | Dải màu cần bản v0.4.3 trở lên. Có thể bạn đã tắt: gõ `/profile statusline` để bật lại. Nó cập nhật khi bạn gửi prompt. |
+| Muốn thấy dashboard bản mới | `/profile web stop` rồi `/profile web`, và mở đúng link có `#token`. |
 
 ---
 
@@ -342,9 +381,9 @@ export CLAUDE_SWAP_LANG=en
 ## 🛠️ Phát triển & kiểm thử
 
 ```bash
-npm test                   # 50 unit test cho swap.js & web.js (node --test)
+npm test                   # 66 unit test cho swap.js & web.js (node --test)
 claude plugin validate .   # kiểm tra manifest và hooks
-claude plugin test .       # 11 test cho plugin hook
+claude plugin test .       # 15 test cho plugin hook
 ```
 
 Test dùng thư mục tạm và token giả, nên chạy bao nhiêu lần cũng không đụng tới tài khoản thật của bạn.
@@ -358,10 +397,10 @@ claude-swap/
 ├── package.json          # Metadata và script test
 ├── hooks/
 │   ├── hooks.json        # Đăng ký hook với Claude Code
-│   ├── register.ts       # session.start, prompt.submit và lệnh /profile
-│   └── register.test.ts  # Test cho plugin hook (11 test)
+│   ├── register.tsx      # session.start, prompt.submit và lệnh /profile
+│   └── register.test.ts  # Test cho plugin hook (15 test)
 ├── test/
-│   └── swap.test.js      # Unit test cho swap.js & web.js (50 test)
+│   └── swap.test.js      # Unit test cho swap.js & web.js (66 test)
 ├── LICENSE               # MIT
 └── .claude-plugin/       # Manifest plugin & marketplace
 ```

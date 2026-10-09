@@ -99,18 +99,45 @@ async function runSwap($: EngineInterface, argv: string[]) {
   throw new Error(`Không chạy được node: ${String(failure)}`)
 }
 
-// the status line text swap.js last produced; `auto check` reprints it on every prompt, so only a change redraws
-let lastStatus: string | undefined
+// What `statusLineData` in swap.js returns. Drawn as a coloured band above the prompt: the host's own status line
+// takes plain text only (one colour, prefixed with the plugin name).
+type StatusData = { profile: string; rateLimited: boolean; windows: { name: string; pct: number; left: string }[]; warn: string }
 
-function showStatus($: EngineInterface, text: string) {
-  lastStatus = text
-  $.ui.status(text || undefined)
+// The data swap.js last produced. `auto check` reprints it on every prompt, so only a change redraws.
+// A reload loses it; the next prompt brings it back.
+let status: StatusData | null = null
+let lastRaw: string | undefined
+
+function parseStatus(raw: string): StatusData | null {
+  try {
+    const data = JSON.parse(raw)
+    return data && typeof data.profile === 'string' && Array.isArray(data.windows) ? data : null
+  } catch {
+    return null
+  }
+}
+
+function showStatus($: EngineInterface, raw: string) {
+  lastRaw = raw
+  status = parseStatus(raw)
+  $.ui.invalidate('ui.render')
 }
 
 async function refreshStatus($: EngineInterface) {
-  const { stdout } = await runSwap($, ['statusline', 'text'])
+  const { stdout } = await runSwap($, ['statusline', 'json'])
   showStatus($, stdout.trim())
 }
+
+// commands that only read: they cannot change what the band shows, so they skip the extra `statusline json` process
+const READ_ONLY = new Set([
+  'help', 'list', 'current', 'usage', 'folder', 'history', 'stats', 'cooldown', 'forecast', 'doctor', 'tags',
+  'aliases', 'disabled', 'branch-bindings', 'affinities', 'prompt', 'completion', 'version', 'share', 'export', 'web', 'dashboard',
+])
+
+// Same palette as the `/profile list` table (pctCode in swap.js): green < 50, yellow < 80, orange < 95, red above.
+// Raw colours rather than theme keys, so the band and the table look alike on any theme.
+const loadColor = (pct: number) => (pct >= 95 ? 'red' : pct >= 80 ? '#ff8700' : pct >= 50 ? 'yellow' : 'green')
+const BAR_WIDTH = 8
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
@@ -144,11 +171,41 @@ export const register: Register = on => {
     try {
       const ran = await runSwap($, ['auto', 'check'])
       const out = `${ran.stdout}${ran.stderr}`.trim()
-      const status = out.match(/^\[status\] ?(.*)$/m)
-      if (status && status[1].trim() !== lastStatus) showStatus($, status[1].trim())
+      const line = out.match(/^\[status\] ?(.*)$/m)
+      if (line && line[1].trim() !== lastRaw) showStatus($, line[1].trim())
     } catch {}
 
     return next(e)
+  })
+
+  // coloured status band: ● profile │ 5h [███░░░░░] 34% ⏳2h10m │ 7d [██████░░] 73% ⏳3d4h │ ⚠ 5h ~12p
+  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
+    if (!status || e.props.hasSurvey) return next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    const sep = <Text color="gray"> │ </Text>
+    return (
+      <Box>
+        <Text color="green" bold>● {status.profile}</Text>
+        {status.rateLimited ? <Text color="yellow" bold> ⏳ 429</Text> : null}
+        {status.windows.map(w => {
+          const filled = Math.round((w.pct / 100) * BAR_WIDTH)
+          const color = loadColor(w.pct)
+          return (
+            <Box key={w.name}>
+              {sep}
+              <Text color="cyan" bold>{w.name} </Text>
+              <Text color="gray">[</Text>
+              <Text color={color} bold>{'█'.repeat(filled)}</Text>
+              <Text color="gray">{'░'.repeat(BAR_WIDTH - filled)}]</Text>
+              <Text color={color} bold> {String(w.pct)}%</Text>
+              {w.pct >= 80 ? <Text> 🔥</Text> : null}
+              {w.left ? <Text color="cyan"> ⏳{w.left}</Text> : null}
+            </Box>
+          )
+        })}
+        {status.warn ? <Box>{sep}<Text color="yellow" bold>{status.warn}</Text></Box> : null}
+      </Box>
+    )
   })
 
   on('command.run', { command: 'profile' }, async ($, e) => {
@@ -156,7 +213,7 @@ export const register: Register = on => {
     if (!argv) return { text: USAGE }
 
     const ran = await runSwap($, argv)
-    await refreshStatus($)
+    if (!READ_ONLY.has(argv[0]) || ran.exitCode !== 0) await refreshStatus($)
     const out = `${ran.stdout}${ran.stderr}`.trim()
     // the new version is only on disk: have the host re-read plugins once this command has returned
     if (argv[0] === 'upgrade' && ran.exitCode === 0) {

@@ -21,6 +21,7 @@
 [Web Dashboard](#-web-dashboard) ·
 [Commands](#-profile-commands) ·
 [Parallel sessions](#-parallel-sessions) ·
+[Troubleshooting](#-troubleshooting) ·
 [Under the hood](#-under-the-hood) ·
 [Languages](#-languages) ·
 [Development](#️-development--testing)
@@ -43,6 +44,10 @@ It runs on the **Node.js** that Claude Code already ships with: **no Python, no 
 | --- | --- |
 | 🌐 **Web Dashboard** | `/profile web` opens a control panel in your browser: one click to switch accounts, sliders for settings, built-in docs. For days when typing feels like too much. |
 | 💾 **Profile management** | Create, save, switch, delete: `/profile new`, `save`, `delete`. The classic four. |
+| ✏️ **Rename & undo** | `/profile rename old new` renames with aliases, bindings and history following along. `/profile undo` jumps back to the previous profile after a slip. |
+| 🔌 **MCP stays connected** | MCP server logins belong to the machine, not the account: switching profiles doesn't make you re-authenticate Linear, Notion, Vercel... |
+| 📟 **Detailed status line** | A coloured band above the input box: profile, 5h/7d bars, reset times and a running-out warning (`/profile statusline` to toggle). |
+| 🎨 **Coloured output** | Errors red, success green, an aligned `list` table with 5h and 7d reset times. Readable at a glance. |
 | 🔤 **Aliases** | Tired of typing `work-company-production-2`? Call it `w` and run `/profile w`. |
 | 🎛️ **Interactive picker** | `/profile pick` lets you choose with `↑` `↓`, for people who can't remember their own profile names. |
 | ⚖️ **Load balancing** | Spread the work across accounts with `least-used` (whoever has the most quota left) or `round-robin` (take turns). No account carries the team alone. |
@@ -50,7 +55,7 @@ It runs on the **Node.js** that Claude Code already ships with: **no Python, no 
 | 💰 **Budgets** | Set a monthly spending cap per profile (`/profile budget`). Your wallet says thanks. |
 | 🛡️ **Masking & safe sharing** | Emails show as `us***@domain.com` while you screen-share, and config exports leave tokens out (`/profile mask`, `/profile share`). |
 | ⌨️ **Tab completion** | Completion scripts for Bash, Zsh and Fish (`/profile completion`). Type half a word, hit Tab. |
-| 🚀 **Parallel sessions** | `/profile run <name>` starts a separate Claude Code on another account. Two Claudes, two accounts, nobody steps on anybody. |
+| 🚀 **Parallel sessions** | `/profile run <name>` starts a separate Claude Code on another account. Two Claudes, two accounts, nobody steps on anybody. Your skills, agents, plugins, settings and memory are shared. |
 | 🔑 **Setup-token & API key** | Create a profile straight from a token, no browser needed (`/profile add-token`). Reads from `stdin` too, so the token stays out of your shell history. |
 | 🚫 **Time off** | `/profile disable <name>` benches a profile from auto-switch without deleting it. |
 | 🌿 **Git branch binding** | `work-*` branches use the company account, `feat/*` use the dev one, automatically. No more side projects billed to your employer by accident. |
@@ -60,7 +65,7 @@ It runs on the **Node.js** that Claude Code already ships with: **no Python, no 
 | 🤖 **Auto-switch** | Hit the % threshold or a rate limit and it jumps to the account with the most quota left or the earliest reset. You just keep coding. |
 | 🚨 **7-day safeguard** | Won't jump into an account that has nearly used up its weekly quota (default 85%). |
 | 🧠 **Model affinity** | Opus on this account, Sonnet on that one (`/profile affinity`). |
-| 🩺 **Doctor & cleanup** | Checks for expired tokens, duplicate accounts and broken files (`/profile doctor`, `/profile cleanup`). A GP for your credentials. |
+| 🩺 **Doctor & cleanup** | Checks for expired tokens, expired MCP logins, duplicate accounts and broken files (`/profile doctor`, `/profile cleanup`). A GP for your credentials. |
 | ☁️ **Encrypted sync** | Push and pull AES-256 encrypted backups between machines (`/profile sync push` / `pull`). |
 | 💻 **Shell prompt & Tmux** | Shows the active profile and usage % in Starship, Zsh, Bash or Tmux, in under 5 ms. |
 | ⏳ **Borrow** | Borrow a profile for `30m` or `1h` and it hands itself back. Like borrowing a coworker's charger, except this time something reminds you to return it. |
@@ -146,7 +151,7 @@ This part is a bit more serious, because typos in commands aren't fun.
 | Command | Description |
 | --- | --- |
 | `/profile` | Show the full help. Lost? Type this |
-| `/profile list [--json]` | Roll call: 🟢/⚪, email 👤, tags 🏷️ and quota bars |
+| `/profile list [--json]` | Roll call: an aligned table with 🟢/⚪, email, 5h/7d quota bars, reset times and tags 🏷️ |
 | `/profile current [--json]` | The philosophical question "who am I?", answered with the active profile name |
 | `/profile <name\|alias>` | Switch to profile or alias `<name>`. Claude won't even notice it changed owners |
 | `/profile pick` | Pick with `↑` `↓`, for people who can't remember their own profile names |
@@ -186,7 +191,7 @@ This part is a bit more serious, because typos in commands aren't fun.
 
 | Command | Description |
 | --- | --- |
-| `/profile run <name> [-- cmd]` | Start another Claude Code on a different account, side by side, no toe-stepping |
+| `/profile run <name> [-- cmd]` | Start another Claude Code on a different account, side by side, no toe-stepping. Shares skills, agents, plugins, settings, memory |
 | `/profile add-token <tok> [name]` | Create a profile straight from a setup-token or API key, no browser needed |
 | `echo $TOK \| node swap.js add-token - [name]` | Feed the token via `stdin` so it stays out of your shell history |
 | `/profile upgrade` | Pull the latest version and reload it, no restart needed |
@@ -207,10 +212,10 @@ This part is a bit more serious, because typos in commands aren't fun.
 | `/profile auto safeguard [on\|off\|<%>]` | Don't jump into an account that has nearly burned its weekly quota (default `85%`) |
 | `/profile auto return [on\|off]` | Go back to the primary profile once it has recovered |
 | `/profile auto primary <name>` | Choose "home" for auto-return |
-| `/profile auto check` | Don't wait for the next prompt: check now, switch if over the line |
+| `/profile auto check` | Don't wait for the next prompt: check now, switch if over the line. Each prompt only asks for the current profile's quota, and asks everyone's only when it has to pick a replacement |
 | `/profile forecast` | Predict when you'll run dry, based on your real burn rate |
 | `/profile cooldown` | Countdown to the 5h quota coming back |
-| `/profile doctor` | Full checkup: OAuth tokens, config files, connectivity |
+| `/profile doctor` | Full checkup: OAuth tokens, MCP logins, config files, connectivity |
 | `/profile cleanup [--force]` | Find duplicate email/UUID profiles and broken tokens. Add `--force` to actually clean up |
 
 ### 📁 Projects, Git branches, tags & models
@@ -258,17 +263,34 @@ This part is a bit more serious, because typos in commands aren't fun.
 ### `/profile list`:
 
 ```text
-🟢 work (Active)  👤 work@company.com  5h [███░░░░░] 32%   7d [█████░░░] 64%
-⚪ personal       👤 user@gmail.com    5h [███████░] 85% ⚠   7d [███░░░░░] 40%
-⚪ dev-account
+   PROFILE   EMAIL                5H                 7D                 RESET 5H  RESET 7D
+───────────────────────────────────────────────────────────────────────────────────────────
+🟢 work      work@company.com     [███░░░░░]  32%    [█████░░░]  64%    2h10m     3d4h
+⚪ personal  user@gmail.com       [███████░]  85%🔥  [███░░░░░]  40%    48m       1d9h  🏷️ side
+⚪ dev       dev@example.com      —                  —                  —         —     (disabled)
 ```
 
+The reset columns tell you how long until each quota window recovers, so you know whether to wait or switch.
+
 *Bar colours, traffic-light style:*
-- 🟢 `< 50%`: relax
-- 🟡 `< 80%`: keep an eye on it
-- 🟠 `< 95%`: start rationing
-- 🔴 `≥ 95%`: auto-switch is putting its shoes on
-- From `80%` up you also get a ⚠️, just to be sure.
+- 🟢 green `< 50%`: relax
+- 🟡 yellow `< 80%`: keep an eye on it
+- 🟠 orange `< 95%`: start rationing, from `80%` you also get a 🔥
+- 🔴 red `≥ 95%`: auto-switch is putting its shoes on
+
+### Detailed status line (`/profile statusline`):
+
+On by default, a multi-colour band right above the input box (not Claude Code's own one-colour status line, which can only draw plain text). It refreshes whenever you send a prompt, and the bars and percentages change colour with the load:
+
+```text
+● work │ 5h [███░░░░░] 32% ⏳2h10m │ 7d [█████░░░] 64% ⏳3d4h │ ⚠ 5h ~12p
+```
+
+`⏳` is the time left until the reset. `⚠ 5h ~12p` only appears when the burn rate says this profile will reach the auto-switch threshold within about 30 minutes. Type `/profile statusline` to toggle it.
+
+### Colours in the output
+
+Human-facing commands (`swap`, `undo`, `history`, `stats`, `forecast`, `tag`, `alias`...) are coloured by meaning: errors red, success green, profile names yellow, titles cyan. Commands that the hook or your shell has to parse (`current`, `statusline`, `auto check`, `--json`) always stay plain. To turn colour off: `--no-color` or the `NO_COLOR=1` environment variable.
 
 ### From a regular terminal, outside Claude Code:
 
@@ -294,7 +316,7 @@ node swap.js run work
 node swap.js run work -- claude --model sonnet
 ```
 
-Each session lives in `~/.config/claude-cli-profiles/.sessions/<name>` with its own `CLAUDE_CONFIG_DIR`. When it ends, refreshed tokens are synced back into the profile. If someone logs into a different account inside that session, the plugin won't copy it into the profile by mistake.
+Each session lives in `~/.config/claude-cli-profiles/.sessions/<name>` with its own `CLAUDE_CONFIG_DIR`. Skills, agents, plugins, settings, `CLAUDE.md` and memory are symlinked in from `~/.claude`, so the extra session still has all your tools; only the login is per profile. When it ends, refreshed tokens are synced back into the profile. If someone logs into a different account inside that session, the plugin won't copy it into the profile by mistake.
 
 ---
 
@@ -305,10 +327,13 @@ Each profile is a file `~/.config/claude-cli-profiles/<name>.json` (mode `0600`,
 - The login keys from `~/.claude.json`: `oauthAccount`, `primaryApiKey`, `customApiKeyResponses`.
 - The OAuth token from `~/.claude/.credentials.json`, or the Keychain on macOS.
 
+Skills, agents, plugins, settings and memory live in `~/.claude/` and **belong to no profile**: switching accounts doesn't lose any of them.
+
 **When you switch:**
 - Only those login keys are replaced. **Project settings, preferences and history in `~/.claude.json` stay as they are.** We swap the car keys, not the car.
 - Before switching, the current profile's latest token is saved, in case Claude Code quietly refreshed it.
 - Every file is written to a temp file and then renamed (atomic write), with a `.bak` copy. A power cut mid-write won't cost you a profile.
+- The credentials file also holds `mcpOAuth`, the MCP servers' own logins. Those belong to the machine, not the account, so a switch keeps the live ones instead of restoring the profile's old snapshot. That's why MCP doesn't ask you to log in again.
 - If you set `CLAUDE_CONFIG_DIR`, the plugin works with that folder instead of `~/.claude`.
 - On macOS the token goes into the Keychain via `stdin`, never on the command line, so `ps` can't see it.
 
@@ -317,6 +342,20 @@ Each profile is a file `~/.config/claude-cli-profiles/<name>.json` (mode `0600`,
 - Webhook URLs (which carry a Telegram bot token or a Discord/Slack secret) are stored in full, but the dashboard only shows the domain. Type a new URL to change one; leave the field empty to keep it.
 - A corrupt profile reports "invalid JSON" instead of quoting the file in the error, so no token fragment ends up in your terminal.
 - `.bak` copies are created `0600` from the very first byte, with no window for anyone else to peek.
+
+---
+
+## 🩹 Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| Ran `/profile upgrade` but still see the old UI | Claude Code only reloads the installed copy. Since v0.4.1 the plugin calls `/reload-plugins` itself after an update. If you are on an older version, type `/reload-plugins` once (or restart); later upgrades are automatic. |
+| `/profile foo bar` prints "Usage: ..." | `foo` isn't in the version you're running. Check `/profile version`, then `/profile upgrade`. |
+| Odd text like `[38;5;248m` before an email | The chat box doesn't understand some colour codes. Since v0.4.2 the plugin only uses codes verified to draw. Upgrade to fix it. |
+| MCP asks to log in again after a switch | Since v0.4.0 MCP logins are kept across switches. `claude.ai ...` connectors are tied to the account, so they change with it and can't be kept. Run `/profile doctor` to see which MCP logins expired with no refresh token. |
+| `list` shows `—` in a quota column | No data for that profile yet (quota not fetched, token expired, or an API key). `/profile list --refresh` asks again. |
+| Status line is missing | The coloured band needs v0.4.3 or newer. You may have turned it off: type `/profile statusline` to enable it. It refreshes when you send a prompt. |
+| Want the new dashboard | `/profile web stop`, then `/profile web`, and open the link that includes `#token`. |
 
 ---
 
@@ -342,7 +381,7 @@ export CLAUDE_SWAP_LANG=en
 ## 🛠️ Development & testing
 
 ```bash
-npm test                   # 50 unit tests for swap.js & web.js (node --test)
+npm test                   # 66 unit tests for swap.js & web.js (node --test)
 claude plugin validate .   # validate the manifest and hooks
 claude plugin test .       # 11 plugin hook tests
 ```
@@ -358,10 +397,10 @@ claude-swap/
 ├── package.json          # Metadata and test script
 ├── hooks/
 │   ├── hooks.json        # Hook registration for Claude Code
-│   ├── register.ts       # session.start, prompt.submit and the /profile command
-│   └── register.test.ts  # Plugin hook tests (11 tests)
+│   ├── register.tsx      # session.start, prompt.submit and the /profile command
+│   └── register.test.ts  # Plugin hook tests (15 tests)
 ├── test/
-│   └── swap.test.js      # Unit tests for swap.js & web.js (50 tests)
+│   └── swap.test.js      # Unit tests for swap.js & web.js (66 tests)
 ├── LICENSE               # MIT
 └── .claude-plugin/       # Plugin manifest & marketplace
 ```

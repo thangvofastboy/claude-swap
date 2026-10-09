@@ -632,13 +632,17 @@ export function renderDashboardHtml() {
                 <tr><td><span class="cmd-code">/profile &lt;tên|alias&gt;</span></td><td>Chuyển nhanh sang profile chỉ định</td></tr>
                 <tr><td><span class="cmd-code">/profile pick</span></td><td>Chọn profile tương tác bằng phím mũi tên ↑ ↓</td></tr>
                 <tr><td><span class="cmd-code">/profile web</span></td><td>Mở Web Dashboard trực quan và cấu hình plugin</td></tr>
+                <tr><td><span class="cmd-code">/profile rename &lt;cũ&gt; &lt;mới&gt;</span></td><td>Đổi tên profile, alias, liên kết, lịch sử và ngân sách đi theo</td></tr>
+                <tr><td><span class="cmd-code">/profile undo</span></td><td>Quay lại profile trước lần chuyển gần nhất (gọi lần nữa để đi lại)</td></tr>
+                <tr><td><span class="cmd-code">/profile statusline</span></td><td>Bật/tắt status line chi tiết: thanh 5h/7d, giờ reset, cảnh báo sắp cạn</td></tr>
+                <tr><td><span class="cmd-code">/profile upgrade</span></td><td>Cập nhật plugin lên bản mới nhất và tự nạp lại</td></tr>
                 <tr><td><span class="cmd-code">/profile run &lt;tên&gt;</span></td><td>Chạy session Claude Code song song độc lập</td></tr>
                 <tr><td><span class="cmd-code">/profile add-token &lt;tok&gt;</span></td><td>Đăng ký profile trực tiếp từ setup-token hoặc API key</td></tr>
                 <tr><td><span class="cmd-code">/profile balance</span></td><td>Bật/tắt chế độ cân bằng tải Quota thông minh</td></tr>
                 <tr><td><span class="cmd-code">/profile webhook</span></td><td>Cấu hình thông báo Telegram, Discord, Slack</td></tr>
                 <tr><td><span class="cmd-code">/profile forecast</span></td><td>Dự báo tốc độ tiêu thụ % token/giờ và thời điểm cạn hạn mức</td></tr>
                 <tr><td><span class="cmd-code">/profile cooldown</span></td><td>Đồng hồ đếm ngược thời gian reset quota 5h của các tài khoản</td></tr>
-                <tr><td><span class="cmd-code">/profile doctor</span></td><td>Quét chẩn đoán token OAuth, thời hạn và sức khỏe tài khoản</td></tr>
+                <tr><td><span class="cmd-code">/profile doctor</span></td><td>Quét chẩn đoán token OAuth, đăng nhập MCP, thời hạn và sức khỏe tài khoản</td></tr>
                 <tr><td><span class="cmd-code">/profile bind-branch &lt;pat&gt;</span></td><td>Gắn profile tự động theo nhánh Git (vd: feat/*, work-*)</td></tr>
                 <tr><td><span class="cmd-code">/profile temp &lt;tên&gt; [tg]</span></td><td>Mượn tạm profile thứ hai (vd: 30m, 1h) rồi tự hoàn lại</td></tr>
                 <tr><td><span class="cmd-code">/profile lang [vi|en]</span></td><td>Chuyển đổi ngôn ngữ hiển thị (Tiếng Việt / English)</td></tr>
@@ -679,6 +683,8 @@ export function renderDashboardHtml() {
             <h2>🔐 7. Bảo Mật & Cách Ly Session Song Song</h2>
             <p>Mỗi profile được lưu trữ tại <span class="cmd-code">~/.config/claude-cli-profiles/&lt;tên&gt;.json</span> với phân quyền <span class="cmd-code">0600</span> nghiêm ngặt:</p>
             <p>• Khi chạy song song bằng <span class="cmd-code">/profile run &lt;tên&gt;</span>, một thư mục cô lập độc lập được tạo tại <span class="cmd-code">~/.config/claude-cli-profiles/.sessions/&lt;tên&gt;</span>, giúp hai cửa sổ terminal chạy hai tài khoản Claude Code cùng lúc mà không bị lẫn lộn token.</p>
+            <p>• Session song song dùng chung skill, agent, plugin, settings và memory với <span class="cmd-code">~/.claude</span> (qua symlink); chỉ có đăng nhập là riêng theo profile.</p>
+            <p>• Đăng nhập của các MCP server (<span class="cmd-code">mcpOAuth</span>) thuộc về máy, không thuộc tài khoản: khi đổi profile chúng được giữ nguyên, nên không phải đăng nhập lại MCP.</p>
           </div>
         </div>
       </div>
@@ -1062,6 +1068,8 @@ export function renderDashboardHtml() {
         ['Chuyển profile', ['swap'], [['profile', 'Profile']]],
         ['Tạo profile từ tài khoản đang đăng nhập', ['new'], [['text', 'Tên profile mới'], ['flag', 'Ghi đè nếu đã có', '--force']]],
         ['Lưu tài khoản hiện tại vào profile', ['save'], [['profile', 'Profile'], ['flag', 'Ghi đè', '--force']]],
+        ['Đổi tên profile', ['rename'], [['profile', 'Profile'], ['text', 'Tên mới']]],
+        ['Quay lại profile trước', ['undo'], []],
         ['Xóa profile', ['delete'], [['profile', 'Profile']], true],
         ['Đặt alias', ['alias'], [['text', 'Alias (vd: w)'], ['profile', 'Profile']]],
         ['Xóa alias', ['unalias'], [['text', 'Alias']]],
@@ -1110,6 +1118,7 @@ export function renderDashboardHtml() {
         ['Snippet cho shell prompt', ['prompt'], [['choice', 'Shell', ['starship', 'zsh', 'bash', 'tmux', 'powershell']]]],
         ['Script Tab completion', ['completion'], [['choice', 'Shell', ['bash', 'zsh', 'fish']]]],
         ['Lịch sử chuyển profile', ['history'], [['number', 'Số dòng', '20']]],
+        ['Status line chi tiết', ['statusline'], [['choice', 'Trạng thái', ['on', 'off', 'toggle']]]],
         ['Cập nhật plugin', ['upgrade'], []],
         ['Mở thư mục profile', ['folder'], []],
       ]],
@@ -1119,6 +1128,8 @@ export function renderDashboardHtml() {
       'Chuyển profile': 'Đổi tài khoản trong một nốt nhạc. Claude còn không biết mình vừa đổi chủ.',
       'Tạo profile từ tài khoản đang đăng nhập': 'Chụp ảnh tài khoản đang dùng rồi cất vào ngăn kéo. Lần sau lôi ra là xài.',
       'Lưu tài khoản hiện tại vào profile': 'Cập nhật profile bằng tài khoản đang đăng nhập, rất hợp sau khi vừa /login lại.',
+      'Đổi tên profile': 'Đổi tên mà không bỏ rơi ai: alias, liên kết, lịch sử, ngân sách đều đi theo.',
+      'Quay lại profile trước': 'Lỡ tay đổi nhầm? Về chỗ cũ trong một nốt nhạc. Bấm lần nữa thì đi lại.',
       'Xóa profile': 'Chia tay dứt khoát: không thùng rác, không tái hợp.',
       'Đặt alias': 'Đặt biệt danh cho profile. Gõ "w" nhanh hơn "work-company-production-2" nhiều.',
       'Xóa alias': 'Biệt danh hết thời thì xóa. Profile gốc vẫn bình an vô sự.',
@@ -1157,7 +1168,8 @@ export function renderDashboardHtml() {
       'Snippet cho shell prompt': 'Cho prompt biết bạn đang ở tài khoản nào: Starship, zsh, bash, tmux, PowerShell đều có.',
       'Script Tab completion': 'Gõ nửa chữ, bấm Tab, phần còn lại để shell lo.',
       'Lịch sử chuyển profile': 'Nhật ký đổi tài khoản: ai, khi nào, vì sao.',
-      'Cập nhật plugin': 'Kéo bản mới nhất về. Nhớ khởi động lại Claude Code để bản mới có hiệu lực.',
+      'Status line chi tiết': 'Bật/tắt dòng trạng thái trong Claude Code: thanh 5h/7d, giờ reset, cảnh báo sắp cạn.',
+      'Cập nhật plugin': 'Kéo bản mới nhất về. Plugin tự nạp lại sau khi cập nhật, khỏi khởi động lại Claude Code.',
       'Mở thư mục profile': 'Mở thư mục chứa profile. Ngó thì được, đừng sửa tay.',
     };
     const QUICK = [['📋 Danh sách', ['list'], 'Điểm danh cả đội, kèm thanh quota.'], ['🟢 Đang dùng', ['current'], 'Mình đang là ai?'], ['📊 Usage', ['usage'], 'Quota 5h, 7d và từng model (lấy từ cache).'], ['🔄 Usage (làm mới)', ['usage', '--refresh'], 'Hỏi lại server số mới nhất. Đừng spam, server cũng biết mệt.'],

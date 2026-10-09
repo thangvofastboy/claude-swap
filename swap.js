@@ -1479,25 +1479,37 @@ export function setStatuslineEnabled(home, enabled) {
   atomicWrite(statuslineConfigFile(home), JSON.stringify({ enabled: Boolean(enabled) }))
 }
 
-// "● work │ 5h [███░░░░░] 34% ↻4h40m │ 7d [██████░░] 73% ↻3d4h │ ⚠ 5h ~12p", plain text for the host's status line
-export function statusLineText(home) {
+// Everything the in-session status line shows, as data: the hook draws it in colour, `statusline text` flattens it.
+// null when there is nothing to show (no profile, or `/profile statusline off`).
+export function statusLineData(home) {
   const cur = currentProfile(home)
-  if (!cur || !isStatuslineEnabled(home)) return ''
+  if (!cur || !isStatuslineEnabled(home)) return null
   const hit = cacheHit(home, loadUsageCache(home), cur)
-  const parts = [`● ${cur}`]
-  if (isRateLimited(hit)) {
-    parts.push('⏳ 429')
-  } else {
+  const windows = []
+  if (!isRateLimited(hit)) {
     for (const [label, name] of [[LABEL_5H, '5h'], [LABEL_7D, '7d']]) {
       const lim = findLimit(hit, label)
       if (!lim) continue
-      const pct = Math.max(0, Math.min(Number(lim[1]) || 0, 100))
-      const left = resetIn(hit, lim)
-      parts.push(`${name} ${chartBar(pct, 8)} ${Math.round(pct)}%${pct >= WARN_PCT ? '🔥' : ''}${left ? ` ↻${left}` : ''}`)
+      windows.push({
+        name,
+        pct: Math.round(Math.max(0, Math.min(Number(lim[1]) || 0, 100))),
+        left: resetIn(hit, lim),
+      })
     }
   }
-  const warning = forecastWarning(home)
-  if (warning) parts.push(warning)
+  return { profile: cur, rateLimited: isRateLimited(hit), windows, warn: forecastWarning(home) }
+}
+
+// "● work │ 5h [███░░░░░] 34% ⏳4h40m │ 7d [██████░░] 73% ⏳3d4h │ ⚠ 5h ~12p"; ⏳ has a fixed width, unlike ↻
+export function statusLineText(home) {
+  const d = statusLineData(home)
+  if (!d) return ''
+  const parts = [`● ${d.profile}`]
+  if (d.rateLimited) parts.push('⏳ 429')
+  for (const w of d.windows) {
+    parts.push(`${w.name} ${chartBar(w.pct, 8)} ${w.pct}%${w.pct >= WARN_PCT ? '🔥' : ''}${w.left ? ` ⏳${w.left}` : ''}`)
+  }
+  if (d.warn) parts.push(d.warn)
   return parts.join(' │ ')
 }
 
@@ -1647,7 +1659,9 @@ export function checkTempExpiry(home) {
   }
   if (Date.now() >= state.expiresAt) {
     const orig = state.originalProfile
-    if (orig && profileExists(home, orig)) {
+    // only hand the account back if it is still the borrowed one: a manual swap or undo since then wins
+    const stillBorrowed = currentProfile(home) === state.tempProfile
+    if (stillBorrowed && orig && profileExists(home, orig)) {
       swapProfile(home, orig, {
         type: 'auto',
         reason: 'Hết hạn profile tạm thời',
@@ -1657,7 +1671,7 @@ export function checkTempExpiry(home) {
     try {
       fs.unlinkSync(tempProfileFile(home))
     } catch {}
-    return { expired: true, revertedTo: orig }
+    return { expired: true, revertedTo: stillBorrowed ? orig : null }
   }
   return { expired: false, remainingMs: state.expiresAt - Date.now(), state }
 }
@@ -1738,7 +1752,7 @@ function isExhausted(hit, config) {
 export async function autoCheckAndSwap(home, options = {}) {
   // Check if temp profile expired
   const tempRes = checkTempExpiry(home)
-  if (tempRes.expired) {
+  if (tempRes.expired && tempRes.revertedTo) {
     return {
       swapped: true,
       from: options.currentProfile || currentProfile(home),
@@ -3862,7 +3876,7 @@ async function runCliInner(argv, home) {
           } else {
             console.log(`✅ Không cần chuyển profile (mức dùng: ${res.util}%, ngưỡng: ${res.threshold}%).`)
           }
-          console.log(`[status] ${statusLineText(home)}`.trimEnd()) // the hook shows this on the status line
+          console.log(`[status] ${JSON.stringify(statusLineData(home))}`) // the hook draws this line (`null` = hide)
           return 0
         }
 
@@ -4076,7 +4090,9 @@ async function runCliInner(argv, home) {
           )
           return 0
         }
-        console.log(sub === 'text' ? statusLineText(home) : getStatusline(home))
+        console.log(
+          sub === 'text' ? statusLineText(home) : sub === 'json' ? JSON.stringify(statusLineData(home)) : getStatusline(home)
+        )
         return 0
       }
       case 'prompt': {

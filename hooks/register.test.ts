@@ -4,26 +4,47 @@ const ok = (stdout: string) => ({
   value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
 })
 
+// what swap.js prints for the status line: `statusline json` and the `[status]` line of `auto check`
+const data = (profile: string, pct = 34, warn = '') =>
+  JSON.stringify({ profile, rateLimited: false, windows: [{ name: '5h', pct, left: '2h10m' }, { name: '7d', pct: 90, left: '3d4h' }], warn })
+const WORK = data('work')
+const PERSONAL = data('personal', 0)
+
+// draws the band above the prompt the way the terminal would and returns what it shows
+async function band($: any, surface: 'terminal' | 'desktop' = 'terminal') {
+  const ui = await $.ui.mount({ plugin: 'profile-swap', surface, component: 'AbovePrompt', props: { hasSurvey: false } })
+  return ui
+}
+
+async function expectBand($: any, profile: string) {
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await band($, surface)
+    expect(await ui.find({ type: 'Text', text: profile })).toBeDefined()
+    await ui.unmount()
+  }
+}
+
 test('/profile <name> swaps through swap.js and shows it on the status line', async ($, on) => {
   const calls: string[][] = []
   const scripts = new Set<string>()
-  const statuses: (string | undefined)[] = []
+  let redraws = 0
   on('process.run', async (_$, { argv }) => {
     scripts.add(argv[1].split('/').pop() ?? '')
     calls.push(argv.slice(2))
-    return argv[2] === 'statusline' ? ok('● work\n') : ok("Đã chuyển sang 'work'.\n")
+    return argv[2] === 'statusline' ? ok(`${WORK}\n`) : ok("Đã chuyển sang 'work'.\n")
   })
-  on('ui.status', (_$, { text }) => {
-    statuses.push(text)
+  on('ui.invalidate', () => {
+    redraws++
     return { value: undefined }
   })
 
   const ran = await $.command.run({ command: 'profile', args: 'work' })
 
   expect(ran.text).toContain("'work'")
-  expect(calls).toEqual([['swap', 'work'], ['statusline', 'text']])
+  expect(calls).toEqual([['swap', 'work'], ['statusline', 'json']])
   expect([...scripts]).toEqual(['swap.js'])
-  expect(statuses).toEqual(['● work'])
+  expect(redraws).toBe(1)
+  await expectBand($, 'work')
 })
 
 test('/profile maps subcommands including auto and rejects junk', async ($, on) => {
@@ -32,7 +53,7 @@ test('/profile maps subcommands including auto and rejects junk', async ($, on) 
     calls.push(argv.slice(2))
     return ok('')
   })
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.invalidate', () => ({ value: undefined }))
 
   // empty args should invoke help
   await $.command.run({ command: 'profile', args: '' })
@@ -45,17 +66,15 @@ test('/profile maps subcommands including auto and rejects junk', async ($, on) 
 
   expect(calls).toEqual([
     ['help'],
-    ['statusline', 'text'],
     ['list'],
-    ['statusline', 'text'],
     ['save', 'work', '--force'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['new', 'personal'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['auto', 'threshold', '80'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['auto', 'order', 'p1,p2'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
   ])
 })
 
@@ -65,7 +84,7 @@ test('/profile import keeps a path with spaces as one argument', async ($, on) =
     calls.push(argv.slice(2))
     return ok('Đã nhập: w')
   })
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.invalidate', () => ({ value: undefined }))
 
   await $.command.run({ command: 'profile', args: 'import /home/me/old profiles --force' })
   expect(calls[0]).toEqual(['import', '/home/me/old profiles', '--force'])
@@ -74,16 +93,16 @@ test('/profile import keeps a path with spaces as one argument', async ($, on) =
 
 test('prompt.submit automatically checks and switches profile if limit exceeded', async ($, on) => {
   const calls: string[][] = []
-  const statuses: (string | undefined)[] = []
+  let redraws = 0
   on('process.run', async (_$, { argv }) => {
     calls.push(argv.slice(2))
     if (argv[2] === 'auto' && argv[3] === 'check') {
-      return ok("[auto-swap] Đã tự động chuyển từ 'work' sang 'personal' (mức dùng: 96% >= ngưỡng 95%).\n[status] ● personal │ 5h [░░░░░░░░] 0%\n")
+      return ok(`[auto-swap] Đã tự động chuyển từ 'work' sang 'personal' (mức dùng: 96% >= ngưỡng 95%).\n[status] ${PERSONAL}\n`)
     }
     return ok('')
   })
-  on('ui.status', (_$, { text }) => {
-    statuses.push(text)
+  on('ui.invalidate', () => {
+    redraws++
     return { value: undefined }
   })
   on('prompt.submit', (_$, e) => ({ text: e.text }))
@@ -92,12 +111,13 @@ test('prompt.submit automatically checks and switches profile if limit exceeded'
   await $.prompt.submit({ text: 'test prompt' })
 
   expect(calls).toEqual([['auto', 'check']]) // the status text rides on the auto check output: no second process on the prompt path
-  expect(statuses).toEqual(['● personal │ 5h [░░░░░░░░] 0%'])
+  expect(redraws).toBe(1)
+  await expectBand($, 'personal')
 })
 
 test('session.start automatically switches to bound profile if different from current', async ($, on) => {
   const calls: string[][] = []
-  const statuses: (string | undefined)[] = []
+  let redraws = 0
   on('process.run', async (_$, { argv }) => {
     calls.push(argv.slice(2))
     if (argv[2] === 'bind' && argv[3] === 'get') {
@@ -114,8 +134,8 @@ test('session.start automatically switches to bound profile if different from cu
     }
     return ok('')
   })
-  on('ui.status', (_$, { text }) => {
-    statuses.push(text)
+  on('ui.invalidate', () => {
+    redraws++
     return { value: undefined }
   })
   on('command.register', () => ({ value: undefined }))
@@ -127,7 +147,7 @@ test('session.start automatically switches to bound profile if different from cu
     ['bind', 'get', '/proj'],
     ['current'],
     ['swap', 'work', '--project'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
   ])
 })
 
@@ -137,7 +157,7 @@ test('/profile dispatches advanced subcommands: bind, tag, notify, history, stat
     calls.push(argv.slice(2))
     return ok('OK')
   })
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.invalidate', () => ({ value: undefined }))
 
   await $.command.run({ command: 'profile', args: 'bind work' })
   await $.command.run({ command: 'profile', args: 'tag work company' })
@@ -148,17 +168,14 @@ test('/profile dispatches advanced subcommands: bind, tag, notify, history, stat
 
   expect(calls).toEqual([
     ['bind', 'work'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['tag', 'work', 'company'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['notify', 'on'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['history', '5'],
-    ['statusline', 'text'],
     ['stats'],
-    ['statusline', 'text'],
     ['export', 'backup.enc', '--password', '123'],
-    ['statusline', 'text'],
   ])
 })
 
@@ -168,7 +185,7 @@ test('/profile dispatches Batch 2 subcommands: cooldown, doctor, statusline, tem
     calls.push(argv.slice(2))
     return ok('OK')
   })
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.invalidate', () => ({ value: undefined }))
 
   await $.command.run({ command: 'profile', args: 'cooldown' })
   await $.command.run({ command: 'profile', args: 'doctor' })
@@ -178,15 +195,13 @@ test('/profile dispatches Batch 2 subcommands: cooldown, doctor, statusline, tem
 
   expect(calls).toEqual([
     ['cooldown'],
-    ['statusline', 'text'],
     ['doctor'],
-    ['statusline', 'text'],
     ['statusline', 'toggle'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['temp', 'work', '30m'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['untemp'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
   ])
 })
 
@@ -196,7 +211,7 @@ test('/profile dispatches Batch 3 subcommands: alias, bind-branch, forecast, pic
     calls.push(argv.slice(2))
     return ok('OK')
   })
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.invalidate', () => ({ value: undefined }))
 
   await $.command.run({ command: 'profile', args: 'alias w work' })
   await $.command.run({ command: 'profile', args: 'bind-branch feat/* work' })
@@ -208,19 +223,18 @@ test('/profile dispatches Batch 3 subcommands: alias, bind-branch, forecast, pic
 
   expect(calls).toEqual([
     ['alias', 'w', 'work'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['bind-branch', 'feat/*', 'work'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['forecast'],
-    ['statusline', 'text'],
     ['pick'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['sync', 'push'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['affinity', 'opus', 'work'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['cleanup'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
   ])
 })
 
@@ -230,7 +244,7 @@ test('/profile dispatches lang subcommands', async ($, on) => {
     calls.push(argv.slice(2))
     return ok('OK')
   })
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.invalidate', () => ({ value: undefined }))
 
   await $.command.run({ command: 'profile', args: 'lang' })
   await $.command.run({ command: 'profile', args: 'lang en' })
@@ -238,11 +252,11 @@ test('/profile dispatches lang subcommands', async ($, on) => {
 
   expect(calls).toEqual([
     ['lang'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['lang', 'en'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['language', 'vi'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
   ])
 })
 
@@ -252,7 +266,7 @@ test('/profile dispatches new Batch 4 subcommands: disable, enable, disabled, ad
     calls.push(argv.slice(2))
     return ok('OK')
   })
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.invalidate', () => ({ value: undefined }))
 
   await $.command.run({ command: 'profile', args: 'disable work' })
   await $.command.run({ command: 'profile', args: 'enable work' })
@@ -262,15 +276,14 @@ test('/profile dispatches new Batch 4 subcommands: disable, enable, disabled, ad
 
   expect(calls).toEqual([
     ['disable', 'work'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['enable', 'work'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['disabled'],
-    ['statusline', 'text'],
     ['add-token', 'sk-ant-api03-test', 'my-api'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['run', 'work'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
   ])
 })
 
@@ -280,7 +293,7 @@ test('/profile dispatches new Batch 5 subcommands: web, balance, webhook, budget
     calls.push(argv.slice(2))
     return ok('OK')
   })
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.invalidate', () => ({ value: undefined }))
 
   await $.command.run({ command: 'profile', args: 'web' })
   await $.command.run({ command: 'profile', args: 'balance status' })
@@ -292,19 +305,16 @@ test('/profile dispatches new Batch 5 subcommands: web, balance, webhook, budget
 
   expect(calls).toEqual([
     ['web', '--daemon'],
-    ['statusline', 'text'],
     ['balance', 'status'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['webhook', 'status'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['budget', 'status'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['mask', 'on'],
-    ['statusline', 'text'],
+    ['statusline', 'json'],
     ['share', 'out.json'],
-    ['statusline', 'text'],
     ['completion', 'bash'],
-    ['statusline', 'text'],
   ])
 })
 
@@ -317,7 +327,7 @@ test('/profile upgrade reloads plugins afterwards, and only when the upgrade suc
   on('process.run', async (_$, { argv }) => ({
     value: { exitCode: argv[2] === 'upgrade' ? exitCode : 0, stdout: 'ok\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
   }))
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.invalidate', () => ({ value: undefined }))
   on('clock.after', () => ({ value: undefined })) // fire the timer at once
   on('command.run', { command: 'reload-plugins' }, (_$, e) => {
     reloads.push(e.command)
@@ -339,31 +349,42 @@ test('/profile list starts on its own line so the table lines up', async ($, on)
   on('process.run', async (_$, { argv }) => {
     return ok(argv[2] === 'list' ? 'HEAD\nrow\n' : '')
   })
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.invalidate', () => ({ value: undefined }))
   expect((await $.command.run({ command: 'profile', args: 'list' })).text).toBe('\nHEAD\nrow')
 
 })
 
-test('prompt.submit redraws the status line only when its text changes', async ($, on) => {
-  let check = '✅ ok\n[status] ● work │ ⚠ 5h ~12p'
-  const statuses: (string | undefined)[] = []
+test('prompt.submit redraws the status band only when its data changes', async ($, on) => {
+  let check = `✅ ok\n[status] ${data('work', 34, '⚠ 5h ~12p')}`
+  let redraws = 0
   on('process.run', async () => ok(check))
-  on('ui.status', (_$, { text }) => {
-    statuses.push(text)
+  on('ui.invalidate', () => {
+    redraws++
     return { value: undefined }
   })
   on('prompt.submit', (_$, e) => ({ text: e.text }))
+  on('ui.render', ($, e) => $.ui.resolve(e).Box({})) // the engine's own (empty) band, drawn when the plugin has nothing to show
 
   await $.prompt.submit({ text: 'hi' })
-  await $.prompt.submit({ text: 'again' }) // same text: no redraw
-  check = '✅ ok\n[status] ● work'
-  await $.prompt.submit({ text: 'later' })
-  check = '✅ ok\n[status]' // `/profile statusline off`
-  await $.prompt.submit({ text: 'off' })
-  check = 'ℹ️ skipped' // no status line in the output: leave the line alone
-  await $.prompt.submit({ text: 'skip' })
+  await $.prompt.submit({ text: 'again' }) // same data: no redraw
+  expect(redraws).toBe(1)
+  const ui = await band($)
+  expect(await ui.find({ type: 'Text', text: '⚠ 5h ~12p' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /34%/ })).toBeDefined()
+  await ui.unmount()
 
-  expect(statuses).toEqual(['● work │ ⚠ 5h ~12p', '● work', undefined])
+  check = `✅ ok\n[status] ${WORK}`
+  await $.prompt.submit({ text: 'later' })
+  expect(redraws).toBe(2)
+  check = '✅ ok\n[status] null' // `/profile statusline off`
+  await $.prompt.submit({ text: 'off' })
+  expect(redraws).toBe(3)
+  const hidden = await band($)
+  expect(await hidden.find({ type: 'Text', text: 'work' })).toBeUndefined()
+  await hidden.unmount()
+  check = 'ℹ️ skipped' // no [status] line in the output: leave the band alone
+  await $.prompt.submit({ text: 'skip' })
+  expect(redraws).toBe(3)
 })
 
 test('bare /profile statusline toggles, and the list keeps its colour', async ($, on) => {
@@ -374,7 +395,7 @@ test('bare /profile statusline toggles, and the list keeps its colour', async ($
     envs.push(init?.env)
     return ok('')
   })
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.invalidate', () => ({ value: undefined }))
   await $.command.run({ command: 'profile', args: 'statusline' })
   await $.command.run({ command: 'profile', args: 'statusline off' })
   await $.command.run({ command: 'profile', args: 'rename a b' })
@@ -382,4 +403,19 @@ test('bare /profile statusline toggles, and the list keeps its colour', async ($
   expect(calls[2]).toEqual(['statusline', 'off'])
   expect(calls[4]).toEqual(['rename', 'a', 'b']) // a known subcommand, not "swap to a profile called rename"
   expect(envs.every(e => e === undefined)).toBe(true) // no NO_COLOR: escape codes are meant to be drawn
+})
+
+test('read-only commands do not spawn a second process for the status band', async ($, on) => {
+  const calls: string[][] = []
+  on('process.run', async (_$, { argv }) => {
+    calls.push(argv.slice(2))
+    return ok(argv[2] === 'statusline' ? WORK : 'out')
+  })
+  on('ui.invalidate', () => ({ value: undefined }))
+  await $.command.run({ command: 'profile', args: 'list' })
+  await $.command.run({ command: 'profile', args: 'history 5' })
+  expect(calls).toEqual([['list'], ['history', '5']])
+  await $.command.run({ command: 'profile', args: 'undo' }) // may change the profile: refresh
+  expect(calls[2]).toEqual(['undo'])
+  expect(calls[3]).toEqual(['statusline', 'json'])
 })
