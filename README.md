@@ -282,8 +282,8 @@ Cột reset cho biết còn bao lâu nữa thì cửa sổ quota đó hồi sứ
 
 Bật mặc định, cập nhật mỗi khi bạn gửi prompt, thanh và phần trăm đổi màu theo mức tải (cùng bảng màu với `/profile list`). Có hai kiểu hiển thị:
 
-- `/profile statusline line` (mặc định): một dòng ghim dưới khung nhập, tô màu bằng mã ANSI.
-- `/profile statusline band`: một dải vẽ trên khung nhập. Dùng kiểu này nếu dòng ghim hiện chữ lạ kiểu `[1;32m` (khung chat không hiểu mã màu ở chỗ đó).
+- `/profile statusline band` (mặc định): một dải nhiều màu vẽ ngay trên khung nhập.
+- `/profile statusline line`: một dòng chữ thường ghim dưới khung nhập, không có màu. Claude Code bỏ ký tự điều khiển màu của dòng ghim nên chỗ đó không thể tô màu.
 
 `/profile statusline` không kèm tham số thì bật/tắt, `on`/`off` cũng được.
 
@@ -361,7 +361,7 @@ Skill, agent, plugin, settings và memory nằm trong `~/.claude/` nên **không
 | Trước email có chữ lạ kiểu `[38;5;248m` | Khung chat của Claude Code không hiểu một số mã màu. Từ v0.4.2 plugin chỉ dùng các mã đã kiểm chứng. Lên bản mới là hết. |
 | Đổi profile xong MCP đòi đăng nhập lại | Từ v0.4.0 đăng nhập MCP được giữ nguyên khi đổi profile. Riêng các connector `claude.ai ...` gắn với tài khoản nên đổi tài khoản là đổi theo, không giữ được. Chạy `/profile doctor` để xem MCP nào hết hạn mà không có refresh token. |
 | Bảng `list` hiện `—` ở cột quota | Chưa có số liệu cho profile đó (chưa lấy được quota, token hết hạn, hoặc là API key). `/profile list --refresh` để hỏi lại. |
-| Status line hiện chữ lạ `[1;32m` hoặc một màu | Chạy `/profile statusline band` để chuyển sang dải trên khung nhập. Nếu không hiện gì: có thể bạn đã tắt: gõ `/profile statusline` để bật lại. Nó cập nhật khi bạn gửi prompt. |
+| Status line hiện chữ lạ `[1;32m` hoặc chỉ một màu | Bạn đang ở kiểu `line` (dòng ghim). Chạy `/profile statusline band` để có dải nhiều màu trên khung nhập. Nếu không hiện gì: có thể bạn đã tắt: gõ `/profile statusline` để bật lại. Nó cập nhật khi bạn gửi prompt. |
 | Muốn thấy dashboard bản mới | `/profile web stop` rồi `/profile web`, và mở đúng link có `#token`. |
 
 ---

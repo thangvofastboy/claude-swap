@@ -436,11 +436,11 @@ test('read-only commands do not spawn a second process for the status band', asy
   expect(calls[3]).toEqual(['statusline', 'json'])
 })
 
-test('line mode pins the coloured text under the prompt, band mode clears it and draws above', async ($, on) => {
+test('line mode pins plain text under the prompt, band mode clears it and draws above', async ($, on) => {
   const pinned: (string | undefined)[] = []
   let out = ''
   const line = (mode: string) =>
-    JSON.stringify({ profile: 'work', mode, rateLimited: false, windows: [], warn: '', ansi: '\u001b[1;32m● work\u001b[0m' })
+    JSON.stringify({ profile: 'work', mode, rateLimited: false, windows: [], warn: '', text: '● work' })
   on('process.run', async () => ok(out))
   on('ui.invalidate', () => ({ value: undefined }))
   on('ui.status', (_$, { text }) => {
@@ -452,13 +452,13 @@ test('line mode pins the coloured text under the prompt, band mode clears it and
 
   out = `[status] ${line('line')}`
   await $.prompt.submit({ text: 'a' })
-  expect(pinned).toEqual(['\u001b[1;32m● work\u001b[0m'])
+  expect(pinned).toEqual(['● work'])
   const none = await band($)
   expect(await none.find({ type: 'Text', text: 'work' })).toBeUndefined() // no band in line mode
   await none.unmount()
 
   out = `[status] ${line('band')}`
   await $.prompt.submit({ text: 'b' })
-  expect(pinned).toEqual(['\u001b[1;32m● work\u001b[0m', undefined]) // the pinned line is cleared
+  expect(pinned).toEqual(['● work', undefined]) // the pinned line is cleared
   await expectBand($, 'work')
 })

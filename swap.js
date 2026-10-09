@@ -1470,9 +1470,9 @@ export function statuslineConfigFile(home) {
 function loadStatuslineConfig(home) {
   try {
     const c = JSON.parse(fs.readFileSync(statuslineConfigFile(home), 'utf-8'))
-    return { enabled: c.enabled !== false, mode: c.mode === 'band' ? 'band' : 'line' }
+    return { enabled: c.enabled !== false, mode: c.mode === 'line' ? 'line' : 'band' }
   } catch {
-    return { enabled: true, mode: 'line' }
+    return { enabled: true, mode: 'band' }
   }
 }
 
@@ -1480,8 +1480,8 @@ export function isStatuslineEnabled(home) {
   return loadStatuslineConfig(home).enabled
 }
 
-// `line`: coloured text pinned under the prompt (where the host puts a plugin's status line);
-// `band`: a coloured band drawn above the prompt by the hook
+// `band` (default): a coloured band drawn above the prompt by the hook;
+// `line`: plain text pinned under the prompt. The host strips the ESC byte of a pinned line, so it cannot be coloured.
 export function statuslineMode(home) {
   return loadStatuslineConfig(home).mode
 }
@@ -1530,12 +1530,12 @@ export function statusLineData(home) {
     }
   }
   const data = { profile: cur, rateLimited: isRateLimited(hit), windows, warn: forecastWarning(home), mode: statuslineMode(home) }
-  return { ...data, ansi: statusLineAnsi(data) }
+  return { ...data, text: statusLineText(home, data), ansi: statusLineAnsi(data) }
 }
 
 // "● work │ 5h [███░░░░░] 34% ⏳4h40m │ 7d [██████░░] 73% ⏳3d4h │ ⚠ 5h ~12p"; ⏳ has a fixed width, unlike ↻
-export function statusLineText(home) {
-  const d = statusLineData(home)
+export function statusLineText(home, data = null) {
+  const d = data || statusLineData(home)
   if (!d) return ''
   const parts = [`● ${d.profile}`]
   if (d.rateLimited) parts.push('⏳ 429')
@@ -4117,8 +4117,8 @@ async function runCliInner(argv, home) {
           setStatuslineMode(home, sub)
           console.log(
             lang === 'en'
-              ? `📟 Status line: ON, shown as ${sub === 'line' ? 'a line under the prompt' : 'a band above the prompt'}`
-              : `📟 Status line: BẬT, hiện ${sub === 'line' ? 'thành dòng dưới khung nhập' : 'thành dải trên khung nhập'}`
+              ? `📟 Status line: ON, shown as ${sub === 'line' ? 'a plain line under the prompt' : 'a coloured band above the prompt'}`
+              : `📟 Status line: BẬT, hiện ${sub === 'line' ? 'thành dòng chữ thường dưới khung nhập' : 'thành dải màu trên khung nhập'}`
           )
           return 0
         }

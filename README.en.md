@@ -282,8 +282,8 @@ The reset columns tell you how long until each quota window recovers, so you kno
 
 On by default, refreshed whenever you send a prompt, with bars and percentages coloured by load (the same palette as `/profile list`). Two display styles:
 
-- `/profile statusline line` (default): a pinned line under the input box, coloured with ANSI codes.
-- `/profile statusline band`: a band drawn above the input box. Use it if the pinned line shows stray text like `[1;32m` (the chat box doesn't understand colour codes there).
+- `/profile statusline band` (default): a multi-colour band drawn right above the input box.
+- `/profile statusline line`: a plain, uncoloured line pinned under the input box. Claude Code strips the colour control byte from a pinned line, so that spot can't be coloured.
 
 `/profile statusline` alone toggles it on/off; `on`/`off` work too.
 
@@ -361,7 +361,7 @@ Skills, agents, plugins, settings and memory live in `~/.claude/` and **belong t
 | Odd text like `[38;5;248m` before an email | The chat box doesn't understand some colour codes. Since v0.4.2 the plugin only uses codes verified to draw. Upgrade to fix it. |
 | MCP asks to log in again after a switch | Since v0.4.0 MCP logins are kept across switches. `claude.ai ...` connectors are tied to the account, so they change with it and can't be kept. Run `/profile doctor` to see which MCP logins expired with no refresh token. |
 | `list` shows `—` in a quota column | No data for that profile yet (quota not fetched, token expired, or an API key). `/profile list --refresh` asks again. |
-| Status line shows stray `[1;32m` text or one colour | Run `/profile statusline band` to switch to the band above the input box. If nothing shows: you may have turned it off: type `/profile statusline` to enable it. It refreshes when you send a prompt. |
+| Status line shows stray `[1;32m` text or only one colour | You are on the `line` style (pinned line). Run `/profile statusline band` for the multi-colour band above the input box. If nothing shows: you may have turned it off: type `/profile statusline` to enable it. It refreshes when you send a prompt. |
 | Want the new dashboard | `/profile web stop`, then `/profile web`, and open the link that includes `#token`. |
 
 ---
