@@ -1118,7 +1118,7 @@ export function renderDashboardHtml() {
         ['Snippet cho shell prompt', ['prompt'], [['choice', 'Shell', ['starship', 'zsh', 'bash', 'tmux', 'powershell']]]],
         ['Script Tab completion', ['completion'], [['choice', 'Shell', ['bash', 'zsh', 'fish']]]],
         ['Lịch sử chuyển profile', ['history'], [['number', 'Số dòng', '20']]],
-        ['Status line chi tiết', ['statusline'], [['choice', 'Trạng thái', ['on', 'off', 'toggle']]]],
+        ['Status line chi tiết', ['statusline'], [['choice', 'Trạng thái', ['on', 'off', 'toggle', 'line', 'band']]]],
         ['Cập nhật plugin', ['upgrade'], []],
         ['Mở thư mục profile', ['folder'], []],
       ]],

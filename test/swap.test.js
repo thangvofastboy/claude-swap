@@ -79,6 +79,8 @@ import {
   colorizeLine,
   usageReport,
   statusLineText,
+  statusLineData,
+  statuslineMode,
   isStatuslineEnabled,
   forecastWarning,
   formatDiagnostics,
@@ -1209,6 +1211,30 @@ describe('swap.js core functionality', () => {
     })
     assert.doesNotMatch(profileListReport(tmpHome, false), /\d{6,}/)
     assert.equal(statusLineText(tmpHome), '● nr │ 5h [█░░░░░░░] 10% │ 7d [██░░░░░░] 20%')
+  })
+
+  test('statusline modes: line by default, band on request, ansi uses only drawable codes', async () => {
+    login(tmpHome, 'sm_a', 'tok-a')
+    saveProfile(tmpHome, 'sm')
+    writeFreshCache(path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json'), {
+      'sm|sm_a@example.com': { limits: [['5 giờ', 85, '', new Date(Date.now() + 3600000).toISOString()], ['7 ngày', 10, '']] },
+    })
+    assert.equal(statuslineMode(tmpHome), 'line')
+    const d = statusLineData(tmpHome)
+    assert.equal(d.mode, 'line')
+    const seen = new Set(['0', '1;31', '1;32', '1;33', '1;36', '36', '90', '1;38;5;208', '38;5;240'])
+    const used = [...d.ansi.matchAll(/\x1b\[([0-9;]*)m/g)].map(m => m[1])
+    assert.deepEqual([...new Set(used)].filter(c => !seen.has(c)), [])
+    assert.ok(d.ansi.includes('85%') && d.ansi.includes('🔥') && !d.ansi.includes('↻'))
+
+    assert.equal(await runCli(['statusline', 'band'], tmpHome), 0)
+    assert.equal(statusLineData(tmpHome).mode, 'band')
+    assert.equal(await runCli(['statusline', 'off'], tmpHome), 0)
+    assert.equal(statusLineData(tmpHome), null)
+    assert.equal(await runCli(['statusline', 'toggle'], tmpHome), 0) // back on, mode kept
+    assert.equal(statusLineData(tmpHome).mode, 'band')
+    assert.equal(await runCli(['statusline', 'line'], tmpHome), 0)
+    assert.equal(statuslineMode(tmpHome), 'line')
   })
 
   test('list shows both reset columns', () => {

@@ -1467,16 +1467,48 @@ export function statuslineConfigFile(home) {
 }
 
 // the in-session status line is detailed by default; `statusline off` hides it
-export function isStatuslineEnabled(home) {
+function loadStatuslineConfig(home) {
   try {
-    return JSON.parse(fs.readFileSync(statuslineConfigFile(home), 'utf-8')).enabled !== false
+    const c = JSON.parse(fs.readFileSync(statuslineConfigFile(home), 'utf-8'))
+    return { enabled: c.enabled !== false, mode: c.mode === 'band' ? 'band' : 'line' }
   } catch {
-    return true
+    return { enabled: true, mode: 'line' }
   }
 }
 
+export function isStatuslineEnabled(home) {
+  return loadStatuslineConfig(home).enabled
+}
+
+// `line`: coloured text pinned under the prompt (where the host puts a plugin's status line);
+// `band`: a coloured band drawn above the prompt by the hook
+export function statuslineMode(home) {
+  return loadStatuslineConfig(home).mode
+}
+
 export function setStatuslineEnabled(home, enabled) {
-  atomicWrite(statuslineConfigFile(home), JSON.stringify({ enabled: Boolean(enabled) }))
+  atomicWrite(statuslineConfigFile(home), JSON.stringify({ ...loadStatuslineConfig(home), enabled: Boolean(enabled) }))
+}
+
+export function setStatuslineMode(home, mode) {
+  if (mode !== 'line' && mode !== 'band') throw new SwapError('Chế độ không hợp lệ. Dùng: line | band')
+  atomicWrite(statuslineConfigFile(home), JSON.stringify({ enabled: true, mode }))
+}
+
+// The same line as statusLineText, coloured with the palette of `/profile list` (only SGR codes the host is known to draw).
+export function statusLineAnsi(d) {
+  const c = (code, text) => `\x1b[${code}m${text}\x1b[0m`
+  const sep = c('90', ' │ ')
+  const parts = [c('1;32', `● ${d.profile}`)]
+  if (d.rateLimited) parts.push(c('1;33', '⏳ 429'))
+  for (const w of d.windows) {
+    parts.push(
+      `${c('1;36', w.name)} ${chartBar(w.pct, 8, true)} ${c(pctCode(w.pct), `${w.pct}%`)}${w.pct >= WARN_PCT ? '🔥' : ''}` +
+        (w.left ? ` ${c('36', `⏳${w.left}`)}` : '')
+    )
+  }
+  if (d.warn) parts.push(c('1;33', d.warn))
+  return parts.join(sep)
 }
 
 // Everything the in-session status line shows, as data: the hook draws it in colour, `statusline text` flattens it.
@@ -1497,7 +1529,8 @@ export function statusLineData(home) {
       })
     }
   }
-  return { profile: cur, rateLimited: isRateLimited(hit), windows, warn: forecastWarning(home) }
+  const data = { profile: cur, rateLimited: isRateLimited(hit), windows, warn: forecastWarning(home), mode: statuslineMode(home) }
+  return { ...data, ansi: statusLineAnsi(data) }
 }
 
 // "● work │ 5h [███░░░░░] 34% ⏳4h40m │ 7d [██████░░] 73% ⏳3d4h │ ⚠ 5h ~12p"; ⏳ has a fixed width, unlike ↻
@@ -4080,6 +4113,15 @@ async function runCliInner(argv, home) {
       }
       case 'statusline': {
         const sub = filteredArgv[1]
+        if (sub === 'line' || sub === 'band') {
+          setStatuslineMode(home, sub)
+          console.log(
+            lang === 'en'
+              ? `📟 Status line: ON, shown as ${sub === 'line' ? 'a line under the prompt' : 'a band above the prompt'}`
+              : `📟 Status line: BẬT, hiện ${sub === 'line' ? 'thành dòng dưới khung nhập' : 'thành dải trên khung nhập'}`
+          )
+          return 0
+        }
         if (sub === 'on' || sub === 'off' || sub === 'toggle') {
           const enabled = sub === 'toggle' ? !isStatuslineEnabled(home) : sub === 'on'
           setStatuslineEnabled(home, enabled)
@@ -4091,7 +4133,13 @@ async function runCliInner(argv, home) {
           return 0
         }
         console.log(
-          sub === 'text' ? statusLineText(home) : sub === 'json' ? JSON.stringify(statusLineData(home)) : getStatusline(home)
+          sub === 'text'
+            ? statusLineText(home)
+            : sub === 'ansi'
+            ? statusLineData(home)?.ansi || ''
+            : sub === 'json'
+            ? JSON.stringify(statusLineData(home))
+            : getStatusline(home)
         )
         return 0
       }

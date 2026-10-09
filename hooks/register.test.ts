@@ -6,7 +6,7 @@ const ok = (stdout: string) => ({
 
 // what swap.js prints for the status line: `statusline json` and the `[status]` line of `auto check`
 const data = (profile: string, pct = 34, warn = '') =>
-  JSON.stringify({ profile, rateLimited: false, windows: [{ name: '5h', pct, left: '2h10m' }, { name: '7d', pct: 90, left: '3d4h' }], warn })
+  JSON.stringify({ profile, mode: 'band', rateLimited: false, windows: [{ name: '5h', pct, left: '2h10m' }, { name: '7d', pct: 90, left: '3d4h' }], warn })
 const WORK = data('work')
 const PERSONAL = data('personal', 0)
 
@@ -37,6 +37,7 @@ test('/profile <name> swaps through swap.js and shows it on the status line', as
     redraws++
     return { value: undefined }
   })
+  on('ui.status', () => ({ value: undefined }))
 
   const ran = await $.command.run({ command: 'profile', args: 'work' })
 
@@ -54,6 +55,7 @@ test('/profile maps subcommands including auto and rejects junk', async ($, on) 
     return ok('')
   })
   on('ui.invalidate', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
 
   // empty args should invoke help
   await $.command.run({ command: 'profile', args: '' })
@@ -85,6 +87,7 @@ test('/profile import keeps a path with spaces as one argument', async ($, on) =
     return ok('Đã nhập: w')
   })
   on('ui.invalidate', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
 
   await $.command.run({ command: 'profile', args: 'import /home/me/old profiles --force' })
   expect(calls[0]).toEqual(['import', '/home/me/old profiles', '--force'])
@@ -105,6 +108,7 @@ test('prompt.submit automatically checks and switches profile if limit exceeded'
     redraws++
     return { value: undefined }
   })
+  on('ui.status', () => ({ value: undefined }))
   on('prompt.submit', (_$, e) => ({ text: e.text }))
 
   // Submit prompt
@@ -138,6 +142,7 @@ test('session.start automatically switches to bound profile if different from cu
     redraws++
     return { value: undefined }
   })
+  on('ui.status', () => ({ value: undefined }))
   on('command.register', () => ({ value: undefined }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
 
@@ -158,6 +163,7 @@ test('/profile dispatches advanced subcommands: bind, tag, notify, history, stat
     return ok('OK')
   })
   on('ui.invalidate', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
 
   await $.command.run({ command: 'profile', args: 'bind work' })
   await $.command.run({ command: 'profile', args: 'tag work company' })
@@ -186,6 +192,7 @@ test('/profile dispatches Batch 2 subcommands: cooldown, doctor, statusline, tem
     return ok('OK')
   })
   on('ui.invalidate', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
 
   await $.command.run({ command: 'profile', args: 'cooldown' })
   await $.command.run({ command: 'profile', args: 'doctor' })
@@ -212,6 +219,7 @@ test('/profile dispatches Batch 3 subcommands: alias, bind-branch, forecast, pic
     return ok('OK')
   })
   on('ui.invalidate', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
 
   await $.command.run({ command: 'profile', args: 'alias w work' })
   await $.command.run({ command: 'profile', args: 'bind-branch feat/* work' })
@@ -245,6 +253,7 @@ test('/profile dispatches lang subcommands', async ($, on) => {
     return ok('OK')
   })
   on('ui.invalidate', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
 
   await $.command.run({ command: 'profile', args: 'lang' })
   await $.command.run({ command: 'profile', args: 'lang en' })
@@ -267,6 +276,7 @@ test('/profile dispatches new Batch 4 subcommands: disable, enable, disabled, ad
     return ok('OK')
   })
   on('ui.invalidate', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
 
   await $.command.run({ command: 'profile', args: 'disable work' })
   await $.command.run({ command: 'profile', args: 'enable work' })
@@ -294,6 +304,7 @@ test('/profile dispatches new Batch 5 subcommands: web, balance, webhook, budget
     return ok('OK')
   })
   on('ui.invalidate', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
 
   await $.command.run({ command: 'profile', args: 'web' })
   await $.command.run({ command: 'profile', args: 'balance status' })
@@ -328,6 +339,7 @@ test('/profile upgrade reloads plugins afterwards, and only when the upgrade suc
     value: { exitCode: argv[2] === 'upgrade' ? exitCode : 0, stdout: 'ok\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
   }))
   on('ui.invalidate', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
   on('clock.after', () => ({ value: undefined })) // fire the timer at once
   on('command.run', { command: 'reload-plugins' }, (_$, e) => {
     reloads.push(e.command)
@@ -350,6 +362,7 @@ test('/profile list starts on its own line so the table lines up', async ($, on)
     return ok(argv[2] === 'list' ? 'HEAD\nrow\n' : '')
   })
   on('ui.invalidate', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
   expect((await $.command.run({ command: 'profile', args: 'list' })).text).toBe('\nHEAD\nrow')
 
 })
@@ -362,6 +375,7 @@ test('prompt.submit redraws the status band only when its data changes', async (
     redraws++
     return { value: undefined }
   })
+  on('ui.status', () => ({ value: undefined }))
   on('prompt.submit', (_$, e) => ({ text: e.text }))
   on('ui.render', ($, e) => $.ui.resolve(e).Box({})) // the engine's own (empty) band, drawn when the plugin has nothing to show
 
@@ -396,6 +410,7 @@ test('bare /profile statusline toggles, and the list keeps its colour', async ($
     return ok('')
   })
   on('ui.invalidate', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
   await $.command.run({ command: 'profile', args: 'statusline' })
   await $.command.run({ command: 'profile', args: 'statusline off' })
   await $.command.run({ command: 'profile', args: 'rename a b' })
@@ -412,10 +427,38 @@ test('read-only commands do not spawn a second process for the status band', asy
     return ok(argv[2] === 'statusline' ? WORK : 'out')
   })
   on('ui.invalidate', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
   await $.command.run({ command: 'profile', args: 'list' })
   await $.command.run({ command: 'profile', args: 'history 5' })
   expect(calls).toEqual([['list'], ['history', '5']])
   await $.command.run({ command: 'profile', args: 'undo' }) // may change the profile: refresh
   expect(calls[2]).toEqual(['undo'])
   expect(calls[3]).toEqual(['statusline', 'json'])
+})
+
+test('line mode pins the coloured text under the prompt, band mode clears it and draws above', async ($, on) => {
+  const pinned: (string | undefined)[] = []
+  let out = ''
+  const line = (mode: string) =>
+    JSON.stringify({ profile: 'work', mode, rateLimited: false, windows: [], warn: '', ansi: '\u001b[1;32m● work\u001b[0m' })
+  on('process.run', async () => ok(out))
+  on('ui.invalidate', () => ({ value: undefined }))
+  on('ui.status', (_$, { text }) => {
+    pinned.push(text)
+    return { value: undefined }
+  })
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  on('ui.render', ($, e) => $.ui.resolve(e).Box({}))
+
+  out = `[status] ${line('line')}`
+  await $.prompt.submit({ text: 'a' })
+  expect(pinned).toEqual(['\u001b[1;32m● work\u001b[0m'])
+  const none = await band($)
+  expect(await none.find({ type: 'Text', text: 'work' })).toBeUndefined() // no band in line mode
+  await none.unmount()
+
+  out = `[status] ${line('band')}`
+  await $.prompt.submit({ text: 'b' })
+  expect(pinned).toEqual(['\u001b[1;32m● work\u001b[0m', undefined]) // the pinned line is cleared
+  await expectBand($, 'work')
 })

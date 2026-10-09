@@ -101,7 +101,14 @@ async function runSwap($: EngineInterface, argv: string[]) {
 
 // What `statusLineData` in swap.js returns. Drawn as a coloured band above the prompt: the host's own status line
 // takes plain text only (one colour, prefixed with the plugin name).
-type StatusData = { profile: string; rateLimited: boolean; windows: { name: string; pct: number; left: string }[]; warn: string }
+type StatusData = {
+  profile: string
+  rateLimited: boolean
+  windows: { name: string; pct: number; left: string }[]
+  warn: string
+  mode?: 'line' | 'band'
+  ansi?: string
+}
 
 // The data swap.js last produced. `auto check` reprints it on every prompt, so only a change redraws.
 // A reload loses it; the next prompt brings it back.
@@ -117,9 +124,16 @@ function parseStatus(raw: string): StatusData | null {
   }
 }
 
+// `line` mode pins the coloured text under the prompt; `band` draws it above. Whichever is not in use is cleared:
+// a plugin's pinned text survives a reload, so the very first call must clear a line an older version left behind.
+let pinned = true
+
 function showStatus($: EngineInterface, raw: string) {
   lastRaw = raw
   status = parseStatus(raw)
+  const text = status && status.mode !== 'band' ? status.ansi || undefined : undefined
+  if (text !== undefined || pinned) $.ui.status(text)
+  pinned = text !== undefined
   $.ui.invalidate('ui.render')
 }
 
@@ -180,7 +194,7 @@ export const register: Register = on => {
 
   // coloured status band: ● profile │ 5h [███░░░░░] 34% ⏳2h10m │ 7d [██████░░] 73% ⏳3d4h │ ⚠ 5h ~12p
   on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
-    if (!status || e.props.hasSurvey) return next(e)
+    if (!status || status.mode !== 'band' || e.props.hasSurvey) return next(e)
     const { Box, Text } = $.ui.resolve(e)
     const sep = <Text color="gray"> │ </Text>
     return (

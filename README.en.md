@@ -280,11 +280,18 @@ The reset columns tell you how long until each quota window recovers, so you kno
 
 ### Detailed status line (`/profile statusline`):
 
-On by default, a multi-colour band right above the input box (not Claude Code's own one-colour status line, which can only draw plain text). It refreshes whenever you send a prompt, and the bars and percentages change colour with the load:
+On by default, refreshed whenever you send a prompt, with bars and percentages coloured by load (the same palette as `/profile list`). Two display styles:
+
+- `/profile statusline line` (default): a pinned line under the input box, coloured with ANSI codes.
+- `/profile statusline band`: a band drawn above the input box. Use it if the pinned line shows stray text like `[1;32m` (the chat box doesn't understand colour codes there).
+
+`/profile statusline` alone toggles it on/off; `on`/`off` work too.
 
 ```text
 ● work │ 5h [███░░░░░] 32% ⏳2h10m │ 7d [█████░░░] 64% ⏳3d4h │ ⚠ 5h ~12p
 ```
+
+To embed it in your own status line (the `statusLine` setting in `settings.json`): `node <plugin>/swap.js statusline ansi` prints exactly that coloured line.
 
 `⏳` is the time left until the reset. `⚠ 5h ~12p` only appears when the burn rate says this profile will reach the auto-switch threshold within about 30 minutes. Type `/profile statusline` to toggle it.
 
@@ -354,7 +361,7 @@ Skills, agents, plugins, settings and memory live in `~/.claude/` and **belong t
 | Odd text like `[38;5;248m` before an email | The chat box doesn't understand some colour codes. Since v0.4.2 the plugin only uses codes verified to draw. Upgrade to fix it. |
 | MCP asks to log in again after a switch | Since v0.4.0 MCP logins are kept across switches. `claude.ai ...` connectors are tied to the account, so they change with it and can't be kept. Run `/profile doctor` to see which MCP logins expired with no refresh token. |
 | `list` shows `—` in a quota column | No data for that profile yet (quota not fetched, token expired, or an API key). `/profile list --refresh` asks again. |
-| Status line is missing | The coloured band needs v0.4.3 or newer. You may have turned it off: type `/profile statusline` to enable it. It refreshes when you send a prompt. |
+| Status line shows stray `[1;32m` text or one colour | Run `/profile statusline band` to switch to the band above the input box. If nothing shows: you may have turned it off: type `/profile statusline` to enable it. It refreshes when you send a prompt. |
 | Want the new dashboard | `/profile web stop`, then `/profile web`, and open the link that includes `#token`. |
 
 ---
