@@ -86,7 +86,7 @@ To try it straight from source without installing:
 claude --plugin-dir /path/to/claude-swap
 ```
 
-Already installed and want the latest? `/profile upgrade`, then restart Claude Code.
+Already installed and want the latest? `/profile upgrade`. The plugin reloads itself (`/reload-plugins`), no need to leave the session.
 
 ---
 
@@ -188,7 +188,7 @@ This part is a bit more serious, because typos in commands aren't fun.
 | `/profile run <name> [-- cmd]` | Start another Claude Code on a different account, side by side, no toe-stepping |
 | `/profile add-token <tok> [name]` | Create a profile straight from a setup-token or API key, no browser needed |
 | `echo $TOK \| node swap.js add-token - [name]` | Feed the token via `stdin` so it stays out of your shell history |
-| `/profile upgrade` | Pull the latest version (remember to restart Claude Code) |
+| `/profile upgrade` | Pull the latest version and reload it, no restart needed |
 | `/profile disable <name>` | Send a profile on leave: auto-switch won't wake it up |
 | `/profile enable <name>` | Leave is over, back into the auto-switch rotation |
 | `/profile disabled [--json]` | Who's on leave |
@@ -235,9 +235,10 @@ This part is a bit more serious, because typos in commands aren't fun.
 | --- | --- |
 | `/profile temp <name> [time]` | Borrow a profile with a due time (e.g. `30m`, `1h`). It hands itself back |
 | `/profile untemp` | Return it early, keep your reputation, back to your own profile |
-| `/profile statusline` | Compact status string for prompts (e.g. `[Claude: 🟢 work (32%)]`) |
+| `/profile statusline` | Toggle the detailed status line: profile, 5h/7d bars, reset times, running-out warning (on by default) |
 | `/profile prompt [shell]` | Snippets so `starship`, `zsh`, `bash`, `tmux`, `powershell` know who you are |
 | `/profile notify [on\|off]` | Desktop notification on switch (off by default, for your sanity) |
+| `/profile undo` | Swapped by mistake? Jump back to the previous profile (run it again to go forward) |
 | `/profile history [n]` | Switch diary: who, when, why (10 lines by default) |
 | `/profile stats` | How many manual, automatic and per-project switches |
 | `/profile sync setup <path>` | Choose where the sync safe lives (a Dropbox folder, a network drive…) |

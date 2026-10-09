@@ -86,7 +86,7 @@ Muốn thử thẳng từ source mà chưa cài:
 claude --plugin-dir /path/to/claude-swap
 ```
 
-Đã cài rồi và muốn bản mới nhất: `/profile upgrade`, rồi khởi động lại Claude Code.
+Đã cài rồi và muốn bản mới nhất: `/profile upgrade`. Plugin tự nạp lại (`/reload-plugins`), không cần thoát session.
 
 ---
 
@@ -188,7 +188,7 @@ Phần này nghiêm túc hơn một chút, vì gõ sai lệnh thì không vui.
 | `/profile run <tên> [-- cmd]` | Mở thêm một Claude Code chạy tài khoản khác, song song mà không giẫm chân nhau |
 | `/profile add-token <tok> [tên]` | Tạo profile thẳng từ setup-token hoặc API key, không cần trình duyệt |
 | `echo $TOK \| node swap.js add-token - [tên]` | Đưa token qua `stdin` để nó không nằm lại trong lịch sử shell |
-| `/profile upgrade` | Kéo bản mới nhất về (nhớ khởi động lại Claude Code) |
+| `/profile upgrade` | Kéo bản mới nhất về và tự nạp lại, khỏi khởi động lại Claude Code |
 | `/profile disable <tên>` | Cho profile nghỉ phép: auto-switch sẽ không gọi nó dậy |
 | `/profile enable <tên>` | Hết phép, quay lại vòng xoay auto-switch |
 | `/profile disabled [--json]` | Ai đang nghỉ phép |
@@ -235,9 +235,10 @@ Phần này nghiêm túc hơn một chút, vì gõ sai lệnh thì không vui.
 | --- | --- |
 | `/profile temp <tên> [tg]` | Mượn tạm profile có hẹn giờ trả (vd: `30m`, `1h`). Hết giờ tự trả |
 | `/profile untemp` | Trả sớm cho giữ uy tín, về profile gốc ngay |
-| `/profile statusline` | Chuỗi trạng thái gọn cho prompt (vd: `[Claude: 🟢 work (32%)]`) |
+| `/profile statusline` | Bật/tắt status line chi tiết: profile, thanh 5h/7d, giờ reset, cảnh báo sắp cạn (mặc định bật) |
 | `/profile prompt [shell]` | Snippet để `starship`, `zsh`, `bash`, `tmux`, `powershell` biết bạn đang là ai |
 | `/profile notify [on\|off]` | Bật / tắt thông báo desktop khi đổi profile (mặc định tắt cho đỡ phiền) |
+| `/profile undo` | Lỡ tay đổi nhầm? Quay về profile trước đó trong một nốt nhạc (gọi lần nữa thì đi lại) |
 | `/profile history [n]` | Nhật ký đổi tài khoản: ai, khi nào, vì sao (mặc định 10 dòng) |
 | `/profile stats` | Đổi tay bao nhiêu lần, tự động bao nhiêu lần, theo dự án bao nhiêu lần |
 | `/profile sync setup <path>` | Chọn chỗ đặt két đồng bộ (thư mục Dropbox, ổ mạng…) |

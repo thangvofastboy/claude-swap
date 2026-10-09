@@ -262,6 +262,19 @@ export function writeCredentials(home, data) {
   atomicWrite(f, data)
 }
 
+// `.credentials.json` also holds `mcpOAuth` (the MCP servers' own logins), which belong to the machine,
+// not the account: keep the live ones so a swap does not hand back each profile's stale snapshot.
+export function keepLiveMcpOAuth(liveRaw, targetRaw) {
+  try {
+    const live = JSON.parse(liveRaw)
+    const target = JSON.parse(targetRaw)
+    if (!live?.mcpOAuth || !target || typeof target !== 'object') return targetRaw
+    return JSON.stringify({ ...target, mcpOAuth: live.mcpOAuth }, null, 2)
+  } catch {
+    return targetRaw
+  }
+}
+
 export function clearCredentials(home) {
   if (useKeychain(home)) return deleteKeychain(keychainService(home))
   const f = credentialsFile(home)
@@ -437,11 +450,12 @@ export function swapProfile(home, name, options = {}) {
     }
   }
 
+  const liveCredentials = readCredentials(home)
   backup(cj)
   atomicWrite(cj, JSON.stringify(data, null, 2))
 
   if (profile.credentials) {
-    writeCredentials(home, profile.credentials)
+    writeCredentials(home, liveCredentials ? keepLiveMcpOAuth(liveCredentials, profile.credentials) : profile.credentials)
   } else {
     clearCredentials(home)
   }
@@ -904,6 +918,21 @@ export async function usageRows(home, fetchFn = fetchUsage, force = false) {
   return rows
 }
 
+// Refreshes the quota cache for just these profiles (an entry still inside USAGE_TTL is not refetched).
+// The prompt path uses it so a check costs one request for the current profile, not one per profile.
+export async function refreshUsage(home, names, fetchFn = fetchUsage) {
+  const cur = currentProfile(home)
+  const cache = loadUsageCache(home)
+  await Promise.all(
+    [...new Set(names)]
+      .filter(n => n && profileExists(home, n))
+      .map(n => profileUsage(home, n, n === cur, fetchFn, cache))
+  )
+  try {
+    atomicWrite(usageCacheFile(home), JSON.stringify(cache, null, 2))
+  } catch {}
+}
+
 export function bar(pct, width = 20) {
   const filled = Math.round((Math.max(0, Math.min(pct, 100)) / 100) * width)
   return '█'.repeat(filled) + '░'.repeat(width - filled)
@@ -923,11 +952,15 @@ export function shouldColor(color) {
   return true
 }
 
+function pctCode(pct) {
+  if (pct >= 95) return '1;31'
+  if (pct >= WARN_PCT) return '1;38;5;208'
+  if (pct >= 50) return '1;33'
+  return '1;32'
+}
+
 function pctColor(pct) {
-  if (pct >= 95) return '\x1b[1;31m'
-  if (pct >= WARN_PCT) return '\x1b[1;38;5;208m'
-  if (pct >= 50) return '\x1b[1;33m'
-  return '\x1b[1;32m'
+  return `\x1b[${pctCode(pct)}m`
 }
 
 export function chartBar(pct, width = 8, color = false) {
@@ -940,18 +973,12 @@ export function chartBar(pct, width = 8, color = false) {
   return `\x1b[90m[\x1b[0m${c}${'█'.repeat(filled)}\x1b[0m\x1b[38;5;240m${'░'.repeat(empty)}\x1b[90m]\x1b[0m`
 }
 
-export function formatLimitChart(label, pct, color = false) {
-  const lbl = label.replace('5 giờ', '5h').replace('7 ngày', '7d')
-  const pctVal = Math.max(0, Math.min(Number(pct), 100))
-  const pctInt = Math.round(pctVal)
-  const barStr = chartBar(pctVal, 8, color)
-  const warn = pctInt >= WARN_PCT ? ' ⚠' : ''
-  if (!color) {
-    return `${lbl} ${barStr} ${pctInt}%${warn}`
-  }
-  const c = pctColor(pctInt)
-  const warnColored = pctInt >= WARN_PCT ? '\x1b[1;31m ⚠\x1b[0m' : ''
-  return `\x1b[1;36m${lbl}\x1b[0m ${barStr} ${c}${pctInt}%\x1b[0m${warnColored}`
+// 2h15m, 45m, 3d4h: the time left until a quota window resets
+function shortDuration(ms) {
+  if (ms <= 0) return 'now'
+  const m = Math.floor(ms / 60000)
+  if (m >= 1440) return `${Math.floor(m / 1440)}d${Math.floor((m % 1440) / 60)}h`
+  return m >= 60 ? `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m` : `${m}m`
 }
 
 export function profileListReport(home, color = null, lang = null) {
@@ -967,56 +994,53 @@ export function profileListReport(home, color = null, lang = null) {
   const disabledList = loadDisabledProfiles(home)
   const masking = isMaskingEnabled(home)
   const useColor = shouldColor(color)
-  const lines = []
+  const paint = (code, text) => (useColor ? `\x1b[${code}m${text}\x1b[0m` : text)
 
-  for (const n of profiles) {
-    const active = n === cur
-    const rawEmail = profileEmail(home, n)
-    const email = maskEmail(rawEmail, masking)
-    const icon = active ? '🟢' : '⚪'
-    const activeStr = active ? ' (Active)' : ''
-
-    const tags = getProfileTags(home, n)
-    const tagBadge = tags.length
-      ? useColor
-        ? `  \x1b[35m🏷️ ${tags.join(', ')}\x1b[0m`
-        : `  🏷️ ${tags.join(', ')}`
-      : ''
-
-    let summary = ''
-    const key = `${n}|${email}`
-    const hit = cache[key] && typeof cache[key] === 'object' ? cache[key] : {}
-    const cachedLimits = Array.isArray(hit.limits) ? hit.limits : []
-    if (cachedLimits.length > 0) {
-      const charts = cachedLimits
-        .slice(0, 2)
-        .map(lim => formatLimitChart(lim[0], Number(lim[1]), useColor))
-      if (charts.length) {
-        summary = '  ' + charts.join('   ')
-      }
-    } else if (hit.note) {
-      summary = useColor ? `  \x1b[38;5;214m(${hit.note})\x1b[0m` : `  (${hit.note})`
-    }
-
-    const disabled = disabledList.includes(n)
-    const disabledBadge = disabled
-      ? useColor
-        ? '  \x1b[33m(disabled)\x1b[0m'
-        : '  (disabled)'
-      : ''
-
-    const emailStr = email ? `  👤 ${email}` : ''
-
-    if (useColor) {
-      const nameAndActive = active ? `${n} (Active)` : n
-      const nameColored = active ? `\x1b[1;32m${nameAndActive}\x1b[0m` : `\x1b[1;37m${n}\x1b[0m`
-      const emailColored = email ? `  \x1b[38;5;248m👤 ${email}\x1b[0m` : ''
-      lines.push(`${icon} ${nameColored}${emailColored}${tagBadge}${disabledBadge}${summary}`)
-    } else {
-      lines.push(`${icon} ${n}${activeStr}${emailStr}${tagBadge}${disabledBadge}${summary}`)
-    }
+  // every quota cell is CELL_W columns wide, so the 5h and 7d columns line up row after row
+  const CELL_W = 17
+  const RESET_W = 8
+  const cell = hit => (label) => {
+    const lim = findLimit(hit, label)
+    if (!lim) return { shown: paint('90', '—'.padEnd(CELL_W)) }
+    const pct = Math.max(0, Math.min(Number(lim[1]) || 0, 100))
+    const n = Math.round(pct)
+    const num = `${String(n).padStart(3)}%`
+    const warn = n >= WARN_PCT ? '🔥' : '  ' // an emoji is always 2 columns wide, unlike ⚠, so the next column never slips
+    return { shown: `${chartBar(pct, 8, useColor)} ${useColor ? `${pctColor(n)}${num}\x1b[0m` : num}${warn}` }
   }
-  return lines.join('\n')
+
+  const rows = profiles.map(n => {
+    const email = maskEmail(profileEmail(home, n), masking) || ''
+    const hit = cache[`${n}|${email}`] && typeof cache[`${n}|${email}`] === 'object' ? cache[`${n}|${email}`] : {}
+    const limits = Array.isArray(hit.limits) ? hit.limits : []
+    const at = cell(hit)
+    const resetIn = label => {
+      const lim = findLimit(hit, label)
+      const at = lim ? parseResetTime(hit, lim) : NaN
+      return (Number.isFinite(at) ? shortDuration(at - Date.now()) : '—').padEnd(RESET_W)
+    }
+    const quota = limits.length
+      ? [at(LABEL_5H).shown, at(LABEL_7D).shown, paint('36', resetIn(LABEL_5H)), paint('36', resetIn(LABEL_7D).trimEnd())].join('  ')
+      : hit.note
+        ? paint('38;5;214', `(${hit.note})`)
+        : paint('90', '—'.padEnd(CELL_W) + '  ' + '—'.padEnd(CELL_W) + '  ' + '—'.padEnd(RESET_W) + '  —')
+    const badges = []
+    const tags = getProfileTags(home, n)
+    if (tags.length) badges.push(paint('35', `🏷️ ${tags.join(', ')}`))
+    if (disabledList.includes(n)) badges.push(paint('33', '(disabled)'))
+    return { n, email, quota, badges, active: n === cur }
+  })
+
+  const nameW = Math.max(7, ...rows.map(r => r.n.length))
+  const emailW = Math.max(5, ...rows.map(r => r.email.length))
+  const head = paint('1;36', `   ${'PROFILE'.padEnd(nameW)}  ${'EMAIL'.padEnd(emailW)}  ${'5H'.padEnd(CELL_W)}  ${'7D'.padEnd(CELL_W)}  ${'RESET 5H'.padEnd(RESET_W)}  RESET 7D`)
+  const lines = rows.map(r => {
+    const name = paint(r.active ? '1;32' : '1;37', r.n.padEnd(nameW))
+    const email = paint('38;5;248', r.email.padEnd(emailW))
+    return `${r.active ? '🟢' : '⚪'} ${name}  ${email}  ${r.quota}${r.badges.length ? '  ' + r.badges.join('  ') : ''}`.trimEnd()
+  })
+  const rule = paint('90', '─'.repeat(3 + nameW + emailW + CELL_W * 2 + RESET_W + 8 + 10))
+  return [head, rule, ...lines].join('\n')
 }
 
 export async function usageReport(home, fetchFn = fetchUsage, force = false, color = false, lang = null) {
@@ -1257,6 +1281,16 @@ export function diagnoseProfiles(home) {
             report.warnings.push(`OAuth token sắp hết hạn trong khoảng ${hours} giờ.`)
           }
         }
+        const mcp = Object.values(creds.mcpOAuth || {})
+        if (mcp.length) {
+          // an expired access token with a refresh token renews itself; without one the server needs a new login
+          const dead = mcp.filter(m => m?.expiresAt && m.expiresAt <= Date.now() && !m.refreshToken).length
+          report.mcp = { total: mcp.length, expired: dead }
+          if (dead) {
+            if (report.status === 'ok') report.status = 'warn'
+            report.warnings.push(`${dead} MCP hết hạn đăng nhập và không có refresh token (cần đăng nhập lại trong /mcp).`)
+          }
+        }
       } catch {}
     }
 
@@ -1305,6 +1339,7 @@ export function formatDiagnostics(diag, color = null, lang = 'vi') {
       const d = new Date(p.tokenExpiresAt).toLocaleString('vi-VN')
       lines.push(`   • Token OAuth: Hạn đến ${d}`)
     }
+    if (p.mcp) lines.push(`   • MCP: ${p.mcp.total} đăng nhập${p.mcp.expired ? `, ${p.mcp.expired} hết hạn` : ''}`)
     if (p.quota5h !== null || p.quota7d !== null) {
       const q5 = p.quota5h !== null ? `5h: ${p.quota5h}%` : ''
       const q7 = p.quota7d !== null ? `7d: ${p.quota7d}%` : ''
@@ -1343,6 +1378,48 @@ export function getStatusline(home) {
   }
 
   return `[Claude: 🟢 ${cur}]`
+}
+
+export function statuslineConfigFile(home) {
+  return path.join(profilesDir(home), '.statusline.json')
+}
+
+// the in-session status line is detailed by default; `statusline off` hides it
+export function isStatuslineEnabled(home) {
+  try {
+    return JSON.parse(fs.readFileSync(statuslineConfigFile(home), 'utf-8')).enabled !== false
+  } catch {
+    return true
+  }
+}
+
+export function setStatuslineEnabled(home, enabled) {
+  atomicWrite(statuslineConfigFile(home), JSON.stringify({ enabled: Boolean(enabled) }))
+}
+
+// "● work │ 5h [███░░░░░] 34% ↻4h40m │ 7d [██████░░] 73% ↻3d4h │ ⚠ 5h ~12p", plain text for the host's status line
+export function statusLineText(home) {
+  const cur = currentProfile(home)
+  if (!cur || !isStatuslineEnabled(home)) return ''
+  const hit = cacheHit(home, loadUsageCache(home), cur)
+  const parts = [`● ${cur}`]
+  if (isRateLimited(hit)) {
+    parts.push('⏳ 429')
+  } else {
+    for (const [label, name] of [[LABEL_5H, '5h'], [LABEL_7D, '7d']]) {
+      const lim = findLimit(hit, label)
+      if (!lim) continue
+      const pct = Math.max(0, Math.min(Number(lim[1]) || 0, 100))
+      const at = parseResetTime(hit, lim)
+      parts.push(
+        `${name} ${chartBar(pct, 8)} ${Math.round(pct)}%${pct >= WARN_PCT ? '🔥' : ''}` +
+          (Number.isFinite(at) ? ` ↻${shortDuration(at - Date.now())}` : '')
+      )
+    }
+  }
+  const warning = forecastWarning(home)
+  if (warning) parts.push(warning)
+  return parts.join(' │ ')
 }
 
 export function generatePromptSnippet(shell = 'starship') {
@@ -1601,16 +1678,21 @@ export async function autoCheckAndSwap(home, options = {}) {
     return { swapped: false, reason: 'no_current' }
   }
 
-  if (!options.cache) {
-    // refresh quota (cached for USAGE_TTL) so the decision is not made on stale numbers
+  // Refresh quota (cached for USAGE_TTL) so a decision is not made on stale numbers, but only for the profiles
+  // that decision looks at: the current one first, the others only once a branch/primary/swap check needs them.
+  let cache = options.cache || loadUsageCache(home)
+  const refresh = async names => {
+    if (options.cache) return
     try {
-      await usageRows(home, options.fetchFn || fetchUsage)
+      await refreshUsage(home, names, options.fetchFn || fetchUsage)
     } catch {}
+    cache = loadUsageCache(home)
   }
-  const cache = options.cache || loadUsageCache(home)
+  await refresh([cur])
 
   // Check branch binding; skip an exhausted bound profile, or we would swap back and forth every prompt
   const branchBound = getBoundBranchProfile(home, process.cwd())
+  if (branchBound && branchBound.profile !== cur) await refresh([branchBound.profile])
   const boundHit = branchBound ? cacheHit(home, cache, branchBound.profile) : {}
   if (
     branchBound &&
@@ -1639,6 +1721,7 @@ export async function autoCheckAndSwap(home, options = {}) {
     cur !== config.primaryProfile &&
     profileExists(home, config.primaryProfile)
   ) {
+    await refresh([config.primaryProfile])
     const priHit = cacheHit(home, cache, config.primaryProfile)
     const priUtil = limitPct(priHit, LABEL_5H)
 
@@ -1671,6 +1754,7 @@ export async function autoCheckAndSwap(home, options = {}) {
 
   // retry_at is a 429 from the usage endpoint (polling limit), not the account's quota: judge by the last known numbers
   if (util >= config.threshold || isSafeguardTriggered) {
+    await refresh(listProfiles(home)) // choosing a replacement needs everyone's numbers
     const next = findNextProfile(home, { config, cache })
     if (next && next !== cur) {
       const reasonText = isSafeguardTriggered
@@ -2195,6 +2279,26 @@ export function formatForecastReport(home, lang = null) {
   return lines.join('\n')
 }
 
+// short text for the status line when the current profile is about to hit the auto-switch threshold; '' otherwise
+export function forecastWarning(home, withinMinutes = 30) {
+  const cur = currentProfile(home)
+  if (!cur) return ''
+  const f = calculateForecast(home, cur, loadAutoSwitchConfig(home).threshold)
+  return f.hasData && f.trend === 'increasing' && f.minutesUntilThreshold <= withinMinutes
+    ? `⚠ 5h ~${Math.max(f.minutesUntilThreshold, 0)}p`
+    : ''
+}
+
+// go back to the profile before the last swap (history is newest first); a second undo returns again
+export function undoSwap(home) {
+  const cur = currentProfile(home)
+  const last = loadSwapHistory(home).find(h => h.from && h.from !== '(none)' && profileExists(home, h.from))
+  if (!last) throw new SwapError('Không có lần chuyển nào để hoàn tác.')
+  if (last.from === cur) throw new SwapError(`Đang ở '${cur}' rồi, không có gì để hoàn tác.`)
+  swapProfile(home, last.from, { type: 'manual', reason: 'undo' })
+  return { from: cur, to: last.from }
+}
+
 // ---------------------------------------------------------------- interactive picker
 
 export async function interactivePickProfile(home, options = {}) {
@@ -2636,6 +2740,26 @@ export function sessionDir(home = os.homedir(), name) {
   return path.join(profilesDir(home), '.sessions', resolved)
 }
 
+// what a `run` session shares with the real config dir; credentials and .claude.json stay per profile
+const SHARED_CONFIG = [
+  'skills', 'agents', 'commands', 'plugins', 'hooks', 'rules', 'output-styles', 'projects',
+  'CLAUDE.md', 'settings.json', 'settings.local.json', 'keybindings.json',
+]
+
+function linkSharedConfig(home, sDir) {
+  const src = claudeConfigDir(home) || path.join(home, '.claude')
+  for (const item of SHARED_CONFIG) {
+    const from = path.join(src, item)
+    const to = path.join(sDir, item)
+    try {
+      if (!fs.existsSync(from)) continue
+      if (fs.lstatSync(to, { throwIfNoEntry: false })?.isSymbolicLink()) fs.unlinkSync(to)
+      // a real file/dir already there (from an older run) is left alone rather than deleted
+      if (!fs.existsSync(to)) fs.symlinkSync(from, to, fs.statSync(from).isDirectory() ? 'junction' : 'file')
+    } catch {} // e.g. Windows without symlink rights: the session just stays isolated
+  }
+}
+
 export function prepareSession(home = os.homedir(), name) {
   const resolved = resolveProfileOrAlias(home, name)
   if (!profileExists(home, resolved)) {
@@ -2662,13 +2786,16 @@ export function prepareSession(home = os.homedir(), name) {
   // CLAUDE_CONFIG_DIR *is* the ~/.claude equivalent: credentials sit directly in it
   const credFile = path.join(sDir, '.credentials.json')
   fs.rmSync(path.join(sDir, '.claude', '.credentials.json'), { force: true }) // pre-0.2.1 location, never read
+  linkSharedConfig(home, sDir)
   if (pData.credentials) {
-    atomicWrite(credFile, pData.credentials)
+    const liveCredentials = readCredentials(home)
+    const credentials = liveCredentials ? keepLiveMcpOAuth(liveCredentials, pData.credentials) : pData.credentials
+    atomicWrite(credFile, credentials)
     // macOS reads the per-dir Keychain item first; overwrite it so a stale token there cannot win.
     // A locked/missing login keychain (SSH) must not abort `run`: the file above is the fallback.
     if (process.platform === 'darwin') {
       try {
-        writeKeychain(sessionKeychainService(sDir), pData.credentials)
+        writeKeychain(sessionKeychainService(sDir), credentials)
       } catch {}
     }
   } else {
@@ -3032,7 +3159,7 @@ export function generateCompletion(shell = 'bash') {
     'webhook', 'budget', 'cost', 'mask', 'share', 'completion', 'alias', 'unalias',
     'aliases', 'bind', 'unbind', 'bind-branch', 'unbind-branch', 'branch-bindings',
     'tag', 'untag', 'tags', 'affinity', 'unaffinity', 'affinities', 'temp', 'untemp',
-    'statusline', 'prompt', 'notify', 'history', 'stats', 'cooldown', 'doctor',
+    'statusline', 'prompt', 'notify', 'history', 'undo', 'stats', 'cooldown', 'doctor',
     'cleanup', 'lang', 'sync', 'forecast', 'pick', 'version',
   ].join(' ')
 
@@ -3120,7 +3247,7 @@ export function formatHelpReport(color = null, lang = 'vi') {
       `  ${cmd('/profile lang [vi|en]')}      View or switch language (Vietnamese / English)`,
       `  ${cmd('/profile run <name> [-- cmd]')} Run isolated Claude Code session in parallel`,
       `  ${cmd('/profile add-token <tok> [n]')} Register profile from setup-token or API key`,
-      `  ${cmd('/profile upgrade')}            Update plugin to the latest release (restart to apply)`,
+      `  ${cmd('/profile upgrade')}            Update plugin to the latest release (auto-reloads; else /reload-plugins)`,
       `  ${cmd('/profile disable <name>')}     Exclude profile from auto-switch rotation`,
       `  ${cmd('/profile enable <name>')}      Re-enable profile in auto-switch rotation`,
       `  ${cmd('/profile disabled')}           List profiles excluded from auto-switch`,
@@ -3165,10 +3292,11 @@ export function formatHelpReport(color = null, lang = 'vi') {
       `  ${cmd('/profile completion [sh]')}    Generate shell autocompletion (bash, zsh, fish)`,
       `  ${cmd('/profile temp <name> [time]')} Temporary swap with auto-revert (e.g. 30m, 1h)`,
       `  ${cmd('/profile untemp')}            Cancel temporary swap and revert immediately`,
-      `  ${cmd('/profile statusline')}        Status string for Shell prompt / Tmux`,
+      `  ${cmd('/profile statusline')}        Toggle the detailed usage status line (on|off; plain: shell prompt string)`,
       `  ${cmd('/profile prompt <shell>')}    Config snippet for starship, zsh, bash, tmux, powershell`,
       `  ${cmd('/profile notify on|off')}     Toggle desktop notifications on profile swap`,
       `  ${cmd('/profile history [n]')}       View recent swap history`,
+      `  ${cmd('/profile undo')}              Switch back to the profile before the last swap`,
       `  ${cmd('/profile stats')}             Statistics on manual vs automatic swaps`,
       '',
       `🔐 ${bold('Backup & Remote Sync:')}`,
@@ -3198,7 +3326,7 @@ export function formatHelpReport(color = null, lang = 'vi') {
     `  ${cmd('/profile lang [vi|en]')}      Xem hoặc đổi ngôn ngữ (Tiếng Việt / English)`,
     `  ${cmd('/profile run <tên> [-- cmd]')} Chạy session Claude Code độc lập song song`,
     `  ${cmd('/profile add-token <tok> [tên]')} Tạo profile từ setup-token hoặc API key`,
-    `  ${cmd('/profile upgrade')}            Cập nhật plugin lên bản mới nhất (khởi động lại để áp dụng)`,
+    `  ${cmd('/profile upgrade')}            Cập nhật plugin lên bản mới nhất (tự nạp lại; không thì /reload-plugins)`,
     `  ${cmd('/profile disable <tên>')}     Tạm dừng auto-switch đối với profile`,
     `  ${cmd('/profile enable <tên>')}      Bật lại auto-switch cho profile`,
     `  ${cmd('/profile disabled')}           Xem danh sách profile đang bị tạm dừng auto`,
@@ -3243,10 +3371,11 @@ export function formatHelpReport(color = null, lang = 'vi') {
     `  ${cmd('/profile completion [sh]')}   Sinh mã autocomplete cho Bash, Zsh, Fish`,
     `  ${cmd('/profile temp <tên> [tg]')}   Mượn tạm profile (vd: 30m, 1h) rồi tự hoàn lại`,
     `  ${cmd('/profile untemp')}            Hủy mượn tạm và quay về profile gốc ngay`,
-    `  ${cmd('/profile statusline')}        Chuỗi trạng thái cho Shell prompt / Tmux`,
+    `  ${cmd('/profile statusline')}        Bật/tắt status line chi tiết usage (on|off; trần: chuỗi cho Shell prompt)`,
     `  ${cmd('/profile prompt <shell>')}    Snippet cấu hình starship, zsh, bash, tmux, powershell`,
     `  ${cmd('/profile notify on|off')}     Bật / tắt thông báo desktop khi đổi profile`,
     `  ${cmd('/profile history [n]')}       Xem lịch sử các lần chuyển đổi gần nhất`,
+    `  ${cmd('/profile undo')}              Quay lại profile trước lần chuyển gần nhất`,
     `  ${cmd('/profile stats')}             Thống kê số lần đổi thủ công, tự động`,
     '',
     `🔐 ${bold('Sao lưu & Đồng bộ (Sync):')}`,
@@ -3257,7 +3386,67 @@ export function formatHelpReport(color = null, lang = 'vi') {
   ].join('\n')
 }
 
+// ---------------------------------------------------------------- colourised output
+
+const ESC = '\x1b'
+// commands whose output is for people only; the others (current, bind get, auto check, statusline, export...) are parsed by the hook or shells
+const PRETTY_CMDS = new Set([
+  'swap', 'undo', 'save', 'new', 'delete', 'tag', 'untag', 'tags', 'history', 'stats', 'cooldown', 'forecast',
+  'auto', 'balance', 'disable', 'enable', 'disabled', 'alias', 'unalias', 'aliases', 'notify', 'mask', 'cleanup',
+  'temp', 'untemp', 'budget', 'cost', 'upgrade', 'affinity', 'unaffinity', 'affinities', 'unbind', 'bind-branch',
+  'unbind-branch', 'branch-bindings', 'lang', 'language', 'webhook', 'sync', 'import', 'add-token', 'run',
+])
+
+// Wraps `text` in an SGR code and re-opens it after every reset inside, so nested highlights do not cut it short.
+function sgr(code, text) {
+  return `${ESC}[${code}m${text.split(`${ESC}[0m`).join(`${ESC}[0m${ESC}[${code}m`)}${ESC}[0m`
+}
+
+// Gives one plain line colour by what it says: failures red, successes green, titles cyan, 'names' yellow, % by load.
+export function colorizeLine(line) {
+  if (!line || line.includes(ESC)) return line
+  let out = line
+    .replace(/(^|[\s(])'([^'\s]{1,60})'(?=$|[\s.,;:)])/g, (_, pre, n) => `${pre}${sgr('1;33', `'${n}'`)}`) // 'profile-name', not an apostrophe in prose
+    .replace(/\b(\d{1,3})%/g, (m, n) => sgr(pctCode(Number(n)), m))
+    .replace(/ (➔|➜|→) /g, (_, a) => ` ${sgr('1;35', a)} `)
+    .replace(/\b(BẬT|ON|bật)\b/g, m => sgr('1;32', m))
+    .replace(/\b(TẮT|OFF|off|tắt)\b/g, m => sgr('1;31', m))
+    .replace(/(\[(?:auto-swap|manual|auto|project|branch)\])/g, m => sgr('36', m))
+  const lead = line.trimStart()
+  if (/^(❌|🚫.*lỗi)/.test(lead)) return sgr('1;31', out)
+  if (/^(✨|✅|🎉)/.test(lead)) return sgr('32', out)
+  if (/^(⚠️|🚨|⏳)/.test(lead)) return sgr('33', out)
+  if (/^(ℹ️|💡)/.test(lead)) return sgr('2', out)
+  if (!/^\s/.test(line) && /^\p{Extended_Pictographic}/u.test(lead) && /[:：]$/.test(lead)) return sgr('1;36', out) // a title
+  if (!/^\s/.test(line) && /^(🔀|↩️|🔤|🏷️|🧹|📟|🔔|🛡️|⚖️|🤖|🧠|⬆️|📈|📊|📜|⏱️|🔑)/u.test(lead)) return sgr('1;36', out)
+  return out
+}
+
+export function colorizeOutput(text) {
+  return String(text).split('\n').map(colorizeLine).join('\n')
+}
+
 export async function runCli(argv, home = os.homedir()) {
+  const words = argv.filter(a => !a.startsWith('--'))
+  const pretty =
+    shouldColor() && !argv.includes('--no-color') && !argv.includes('--json') &&
+    PRETTY_CMDS.has(words[0]) && !(words[0] === 'auto' && words[1] === 'check')
+  const colour = shouldColor() && !argv.includes('--no-color')
+  const origLog = console.log
+  const origError = console.error
+  const tint = fn => (...args) => fn(...args.map(a => (typeof a === 'string' ? colorizeOutput(a) : a)))
+  // ponytail: patches the global console for the length of one CLI run; two overlapping runCli calls in one process would restore in the wrong order
+  if (colour) console.error = tint(origError) // errors are for people whatever the command is
+  if (pretty) console.log = tint(origLog)
+  try {
+    return await runCliInner(argv, home)
+  } finally {
+    console.log = origLog
+    console.error = origError
+  }
+}
+
+async function runCliInner(argv, home) {
   let noColor = false
   const filteredArgv = []
   for (const arg of argv) {
@@ -3416,8 +3605,8 @@ export async function runCli(argv, home = os.homedir()) {
         if (out) console.log(out)
         console.log(
           lang === 'en'
-            ? '⬆️ Plugin updated. Restart Claude Code to load the new version.'
-            : '⬆️ Đã cập nhật plugin. Khởi động lại Claude Code để nạp bản mới.'
+            ? '⬆️ Plugin updated. Run /reload-plugins (or restart Claude Code) to load the new version.'
+            : '⬆️ Đã cập nhật plugin. Chạy /reload-plugins (hoặc khởi động lại Claude Code) để nạp bản mới.'
         )
         return 0
       }
@@ -3486,10 +3675,8 @@ export async function runCli(argv, home = os.homedir()) {
           type: isProject ? 'project' : 'manual',
           reason: isProject ? 'Project binding' : '',
         })
-        console.log(
-          `🔀 Đã chuyển sang '${name}'. Không cần tắt session; Claude CLI dùng tài khoản mới ở lần ` +
-            'kiểm tra đăng nhập kế tiếp (có thể chưa ngay prompt sau). Xem /status để chắc chắn.'
-        )
+        console.log(`🔀 Đã chuyển sang '${currentProfile(home) || name}'`)
+        console.log('ℹ️ Không cần thoát session: Claude dùng tài khoản mới ở lần kiểm tra đăng nhập kế tiếp (xem /status).')
         return 0
       }
       case 'delete': {
@@ -3588,6 +3775,7 @@ export async function runCli(argv, home = os.homedir()) {
           } else {
             console.log(`✅ Không cần chuyển profile (mức dùng: ${res.util}%, ngưỡng: ${res.threshold}%).`)
           }
+          console.log(`[status] ${statusLineText(home)}`.trimEnd()) // the hook shows this on the status line
           return 0
         }
 
@@ -3790,7 +3978,18 @@ export async function runCli(argv, home = os.homedir()) {
         return 0
       }
       case 'statusline': {
-        console.log(getStatusline(home))
+        const sub = filteredArgv[1]
+        if (sub === 'on' || sub === 'off' || sub === 'toggle') {
+          const enabled = sub === 'toggle' ? !isStatuslineEnabled(home) : sub === 'on'
+          setStatuslineEnabled(home, enabled)
+          console.log(
+            lang === 'en'
+              ? `📟 Status line: ${enabled ? 'ON (usage details)' : 'OFF'}`
+              : `📟 Status line: ${enabled ? 'BẬT (hiện chi tiết usage)' : 'TẮT'}`
+          )
+          return 0
+        }
+        console.log(sub === 'text' ? statusLineText(home) : getStatusline(home))
         return 0
       }
       case 'prompt': {
@@ -3893,6 +4092,15 @@ export async function runCli(argv, home = os.homedir()) {
             console.log(`   • ${item.pattern} ➔ ${item.profile}`)
           }
         }
+        return 0
+      }
+      case 'undo': {
+        const res = undoSwap(home)
+        console.log(
+          lang === 'en'
+            ? `↩️ Switched back from '${res.from}' to '${res.to}'.`
+            : `↩️ Đã quay lại từ '${res.from}' về '${res.to}'.`
+        )
         return 0
       }
       case 'forecast': {

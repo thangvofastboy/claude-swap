@@ -68,6 +68,14 @@ import {
   loadDisabledProfiles,
   addTokenProfile,
   prepareSession,
+  keepLiveMcpOAuth,
+  undoSwap,
+  colorizeLine,
+  statusLineText,
+  isStatuslineEnabled,
+  forecastWarning,
+  formatDiagnostics,
+  usageHistoryFile,
   syncSessionBack,
   sessionDir,
   profilePath,
@@ -305,8 +313,11 @@ describe('swap.js core functionality', () => {
 
     const out = profileListReport(tmpHome, false)
     assert.ok(out.includes('⚪ work'))
-    assert.ok(out.includes('🟢 personal (Active)'))
-    assert.ok(out.includes('👤 b@example.com'))
+    assert.ok(out.includes('🟢 personal'))
+    assert.ok(out.includes('b@example.com'))
+    // columns line up: the email starts at the same offset on every row
+    const col = email => Array.from(out.split('\n').find(r => r.includes(email))).slice(1).join('').indexOf(email) // icons differ in UTF-16 length, not in width
+    assert.equal(col('b@example.com'), col('a@example.com'))
     assert.ok(out.includes('🏷️ office'))
   })
 
@@ -975,6 +986,174 @@ describe('swap.js core functionality', () => {
     assert.equal(updated.credentials, refreshedCreds)
   })
 
+  test('swap keeps the live MCP logins instead of the profile snapshot', () => {
+    const creds = (token, mcp) => JSON.stringify({ claudeAiOauth: { accessToken: token }, mcpOAuth: { srv: { accessToken: mcp } } })
+    const credFile = path.join(tmpHome, '.claude', '.credentials.json')
+    login(tmpHome, 'mcp_a', 'tok-a')
+    fs.writeFileSync(credFile, creds('tok-a', 'old-mcp'))
+    saveProfile(tmpHome, 'mcp-a')
+    login(tmpHome, 'mcp_b', 'tok-b')
+    fs.writeFileSync(credFile, creds('tok-b', 'old-mcp'))
+    saveProfile(tmpHome, 'mcp-b')
+    fs.writeFileSync(credFile, creds('tok-b', 'fresh-mcp')) // MCP re-authenticated while on mcp-b
+
+    swapProfile(tmpHome, 'mcp-a')
+    const live = JSON.parse(fs.readFileSync(credFile, 'utf-8'))
+    assert.equal(live.claudeAiOauth.accessToken, 'tok-a') // account follows the profile
+    assert.equal(live.mcpOAuth.srv.accessToken, 'fresh-mcp') // MCP logins follow the machine
+    // unparsable or MCP-less input falls back to the profile as-is
+    assert.equal(keepLiveMcpOAuth('not json', '{"a":1}'), '{"a":1}')
+    assert.equal(keepLiveMcpOAuth('{"x":1}', '{"a":1}'), '{"a":1}')
+  })
+
+  test('run session shares skills, settings and memory with the real config dir', () => {
+    const real = path.join(tmpHome, '.claude')
+    fs.mkdirSync(path.join(real, 'skills'), { recursive: true })
+    fs.writeFileSync(path.join(real, 'settings.json'), '{"x":1}')
+    login(tmpHome, 'share_user', 'tok-share')
+    saveProfile(tmpHome, 'share-acc')
+
+    const sDir = prepareSession(tmpHome, 'share-acc')
+    assert.equal(fs.readFileSync(path.join(sDir, 'settings.json'), 'utf-8'), '{"x":1}')
+    assert.ok(fs.lstatSync(path.join(sDir, 'skills')).isSymbolicLink())
+    assert.ok(!fs.existsSync(path.join(sDir, 'agents'))) // absent in the real dir, so nothing to link
+    assert.notEqual(
+      fs.realpathSync(path.join(sDir, '.credentials.json')),
+      fs.realpathSync(path.join(real, '.credentials.json'))
+    ) // credentials stay per profile
+    prepareSession(tmpHome, 'share-acc') // second run must not fail on existing links
+  })
+
+  test('undo goes back to the profile before the last swap, and again', () => {
+    login(tmpHome, 'u_a', 'tok-a')
+    saveProfile(tmpHome, 'un-a')
+    login(tmpHome, 'u_b', 'tok-b')
+    saveProfile(tmpHome, 'un-b')
+    assert.throws(() => undoSwap(tmpHome), /Không có lần chuyển/) // nothing swapped yet
+
+    swapProfile(tmpHome, 'un-a')
+    assert.deepEqual(undoSwap(tmpHome), { from: 'un-a', to: 'un-b' })
+    assert.equal(currentProfile(tmpHome), 'un-b')
+    assert.equal(undoSwap(tmpHome).to, 'un-a') // undo is itself a swap, so it toggles
+    assert.equal(loadSwapHistory(tmpHome)[0].reason, 'undo')
+  })
+
+  test('forecastWarning only speaks when the threshold is minutes away', () => {
+    login(tmpHome, 'f_a', 'tok-a')
+    saveProfile(tmpHome, 'fc')
+    const now = Date.now()
+    const write = (a, b) => fs.writeFileSync(usageHistoryFile(tmpHome), JSON.stringify({ fc: [
+      { timestamp: now - 3600000, util5h: a, util7d: 0 },
+      { timestamp: now, util5h: b, util7d: 0 },
+    ] }))
+    write(40, 90) // +50%/h, 5% left to 95: ~6 minutes
+    assert.match(forecastWarning(tmpHome), /^⚠ 5h ~\d+p$/)
+    write(10, 20) // far from the threshold
+    assert.equal(forecastWarning(tmpHome), '')
+    write(90, 50) // cooling down
+    assert.equal(forecastWarning(tmpHome), '')
+  })
+
+  test('doctor counts MCP logins and flags the ones that cannot renew', () => {
+    login(tmpHome, 'd_a', 'tok-a')
+    fs.writeFileSync(path.join(tmpHome, '.claude', '.credentials.json'), JSON.stringify({
+      claudeAiOauth: { accessToken: 'tok-a' },
+      mcpOAuth: {
+        ok: { accessToken: 'x', expiresAt: Date.now() + 1e6, refreshToken: 'r' },
+        renewable: { accessToken: 'x', expiresAt: 1, refreshToken: 'r' },
+        dead: { accessToken: 'x', expiresAt: 1 },
+      },
+    }))
+    saveProfile(tmpHome, 'doc')
+    const p = diagnoseProfiles(tmpHome).profiles.find(x => x.name === 'doc')
+    assert.deepEqual(p.mcp, { total: 3, expired: 1 })
+    assert.equal(p.status, 'warn')
+    assert.match(formatDiagnostics({ profiles: [p] }), /MCP: 3 đăng nhập, 1 hết hạn/)
+  })
+
+  test('statusline text shows both windows with reset times, and on/off hides it', async () => {
+    login(tmpHome, 'sl_a', 'tok-a')
+    saveProfile(tmpHome, 'sl')
+    const soon = new Date(Date.now() + 2 * 3600000 + 60000).toISOString()
+    const later = new Date(Date.now() + 3 * 86400000 + 5400000).toISOString()
+    writeFreshCache(path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json'), {
+      'sl|sl_a@example.com': { limits: [['5 giờ', 34, '', soon], ['7 ngày', 90, '', later]] },
+    })
+    const text = statusLineText(tmpHome)
+    assert.match(text, /^● sl │ 5h \[███░░░░░\] 34% ↻2h0\dm │ 7d \[███████░\] 90%🔥 ↻3d1h$/)
+    assert.equal(isStatuslineEnabled(tmpHome), true)
+
+    assert.equal(await runCli(['statusline', 'off'], tmpHome), 0)
+    assert.equal(statusLineText(tmpHome), '')
+    assert.equal(await runCli(['statusline', 'toggle'], tmpHome), 0) // off -> on
+    assert.equal(isStatuslineEnabled(tmpHome), true)
+    assert.match(statusLineText(tmpHome), /^● sl/)
+  })
+
+  test('list shows both reset columns', () => {
+    login(tmpHome, 'rs_a', 'tok-a')
+    saveProfile(tmpHome, 'rs')
+    writeFreshCache(path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json'), {
+      'rs|rs_a@example.com': { limits: [['5 giờ', 10, '', new Date(Date.now() + 90 * 60000 + 30000).toISOString()], ['7 ngày', 20, '', new Date(Date.now() + 2 * 86400000 + 5 * 3600000).toISOString()]] },
+    })
+    const out = profileListReport(tmpHome, false)
+    assert.match(out, /RESET 5H {2}RESET 7D/)
+    assert.match(out, /1h\d\dm {5}2d\dh/)
+  })
+
+  test('human commands are coloured, machine-read ones and --no-color stay plain', async () => {
+    login(tmpHome, 'c_a', 'tok-a')
+    saveProfile(tmpHome, 'col-a')
+    login(tmpHome, 'c_b', 'tok-b')
+    saveProfile(tmpHome, 'col-b')
+    const run = async args => {
+      const lines = []
+      const orig = console.log
+      console.log = (...a) => lines.push(a.join(' '))
+      try {
+        await runCli(args, tmpHome)
+      } finally {
+        console.log = orig
+      }
+      return lines.join('\n')
+    }
+    assert.match(await run(['swap', 'col-a']), /\x1b\[/) // coloured
+    assert.doesNotMatch(await run(['swap', 'col-b', '--no-color']), /\x1b\[/)
+    assert.equal(await run(['current']), 'col-b') // the hook compares this string
+    assert.match(await run(['auto', 'check']), /^(?!.*\x1b)/s) // `[status]` is parsed line by line
+    assert.doesNotMatch(await run(['history', '--json']), /\x1b\[/)
+
+    const err = colorizeLine("❌ Lỗi: Profile 'x' không tồn tại.")
+    assert.ok(err.startsWith('\x1b[1;31m') && err.includes('\x1b[1;33m\'x\'')) // red line, yellow name
+    assert.equal(colorizeLine('plain \x1b[32mgreen\x1b[0m'), 'plain \x1b[32mgreen\x1b[0m') // already styled lines are left alone
+    assert.equal(colorizeLine("It's not 'x"), "It's not 'x") // an apostrophe in prose is not a quoted name
+    // errors honour --no-color and NO_COLOR too
+    const errs = []
+    const origErr = console.error
+    console.error = (...x) => errs.push(x.join(' '))
+    try {
+      await runCli(['swap', 'nope', '--no-color'], tmpHome)
+      await runCli(['swap', 'nope'], tmpHome)
+    } finally {
+      console.error = origErr
+    }
+    assert.doesNotMatch(errs[0], /\x1b\[/)
+    assert.match(errs[1], /\x1b\[1;31m/)
+  })
+
+  test('deleting a profile removes its run session but never the shared config it links to', () => {
+    const real = path.join(tmpHome, '.claude')
+    fs.mkdirSync(path.join(real, 'skills'), { recursive: true })
+    fs.writeFileSync(path.join(real, 'skills', 'keep.md'), 'x')
+    login(tmpHome, 'del_u', 'tok-del')
+    saveProfile(tmpHome, 'del-acc')
+    const sDir = prepareSession(tmpHome, 'del-acc')
+    assert.ok(fs.existsSync(path.join(sDir, 'skills', 'keep.md'))) // visible through the link
+    deleteProfile(tmpHome, 'del-acc')
+    assert.ok(!fs.existsSync(sDir))
+    assert.ok(fs.existsSync(path.join(real, 'skills', 'keep.md'))) // the target survives
+  })
+
   test('JSON output mode for list and current', async () => {
     login(tmpHome, 'json_user', 'tok-json')
     saveProfile(tmpHome, 'json_user')
@@ -1035,7 +1214,33 @@ describe('swap.js core functionality', () => {
     }
     await autoCheckAndSwap(tmpHome, { fetchFn: failing, config })
     await autoCheckAndSwap(tmpHome, { fetchFn: failing, config })
-    assert.equal(calls, 2) // one per profile, first call only
+    assert.equal(calls, 1) // only the current profile, and only the first call (the failure is cached)
+  })
+
+  test('auto check fetches only the current profile until a swap needs the others', async () => {
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'r-one')
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'r-two') // current
+    login(tmpHome, 'c', 'tok-c')
+    saveProfile(tmpHome, 'r-three')
+    swapProfile(tmpHome, 'r-two')
+    const config = { enabled: true, threshold: 95 }
+    const fetched = []
+    const usage = pct => ({ five_hour: { utilization: pct, resets_at: new Date(Date.now() + 3600000).toISOString() } })
+    const fetchWith = pcts => async token => (fetched.push(token), usage(pcts[token] ?? 10))
+
+    const calm = await autoCheckAndSwap(tmpHome, { config, fetchFn: fetchWith({ 'tok-b': 20 }) })
+    assert.equal(calm.swapped, false)
+    assert.deepEqual(fetched, ['tok-b']) // nobody else was asked
+
+    // the cache entry is fresh, so a second prompt costs nothing; force it stale to cross the threshold
+    fs.rmSync(path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json'))
+    fetched.length = 0
+    const hot = await autoCheckAndSwap(tmpHome, { config, fetchFn: fetchWith({ 'tok-b': 99, 'tok-a': 50, 'tok-c': 5 }) })
+    assert.equal(hot.swapped, true)
+    assert.equal(hot.to, 'r-three') // chosen from fresh numbers for everyone
+    assert.deepEqual([...fetched].sort(), ['tok-a', 'tok-b', 'tok-c'])
   })
 
   test('upgrade refreshes the marketplace, then updates the plugin, and stops on failure', () => {

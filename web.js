@@ -56,7 +56,7 @@ const WEB_CLI = new Set([
   'auto', 'balance', 'forecast', 'cooldown', 'doctor', 'cleanup', 'temp', 'untemp',
   'bind', 'unbind', 'bind-branch', 'unbind-branch', 'branch-bindings',
   'affinity', 'unaffinity', 'affinities', 'notify', 'budget', 'webhook', 'mask', 'share',
-  'export', 'import-enc', 'sync', 'history', 'stats', 'statusline', 'prompt', 'completion', 'lang',
+  'export', 'import-enc', 'sync', 'history', 'undo', 'stats', 'statusline', 'prompt', 'completion', 'lang',
 ])
 
 // Runs `node swap.js <args>` like the /profile hook does; a password goes on stdin, never argv

@@ -20,6 +20,7 @@ const SUBCOMMANDS = new Set([
   'export',
   'import-enc',
   'history',
+  'undo',
   'stats',
   'cooldown',
   'doctor',
@@ -66,6 +67,7 @@ const USAGE =
 function toArgv(args: string): string[] | undefined {
   const words = args.trim().split(/\s+/).filter(Boolean)
   if (words.length === 0 || words[0] === '--help' || words[0] === '-h') return ['help']
+  if (words.length === 1 && words[0] === 'statusline') return ['statusline', 'toggle'] // bare CLI `statusline` prints the shell-prompt string
   if (words[0] === 'version' || words[0] === '--version' || words[0] === '-v') return ['version']
   if (words[0] === 'web' || words[0] === 'dashboard') {
     if (words[1] === 'stop') return words
@@ -96,10 +98,17 @@ async function runSwap($: EngineInterface, argv: string[]) {
   throw new Error(`Không chạy được node: ${String(failure)}`)
 }
 
+// the status line text swap.js last produced; `auto check` reprints it on every prompt, so only a change redraws
+let lastStatus: string | undefined
+
+function showStatus($: EngineInterface, text: string) {
+  lastStatus = text
+  $.ui.status(text || undefined)
+}
+
 async function refreshStatus($: EngineInterface) {
-  const { stdout } = await runSwap($, ['current'])
-  const name = stdout.trim()
-  $.ui.status(name ? `● ${name}` : undefined)
+  const { stdout } = await runSwap($, ['statusline', 'text'])
+  showStatus($, stdout.trim())
 }
 
 export const register: Register = on => {
@@ -107,6 +116,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'profile',
       description: 'Đổi tài khoản Claude ngay trong session: /profile [tên | usage | auto | cooldown | doctor | temp | bind | history]',
+      immediate: true, // runs at once even while a turn is streaming, instead of queueing behind it
     })
 
     try {
@@ -133,9 +143,8 @@ export const register: Register = on => {
     try {
       const ran = await runSwap($, ['auto', 'check'])
       const out = `${ran.stdout}${ran.stderr}`.trim()
-      if (out.includes('[auto-swap]') || out.includes('quay về') || out.includes('revert')) {
-        await refreshStatus($)
-      }
+      const status = out.match(/^\[status\] ?(.*)$/m)
+      if (status && status[1].trim() !== lastStatus) showStatus($, status[1].trim())
     } catch {}
 
     return next(e)
@@ -148,7 +157,13 @@ export const register: Register = on => {
     const ran = await runSwap($, argv)
     await refreshStatus($)
     const out = `${ran.stdout}${ran.stderr}`.trim()
-    if (out) return { text: out }
+    // the new version is only on disk: have the host re-read plugins once this command has returned
+    if (argv[0] === 'upgrade' && ran.exitCode === 0) {
+      $.clock.after(500, () => void $.command.run({ command: 'reload-plugins' }).catch(() => undefined))
+      return { text: `${out}\n🔄 Đang nạp lại plugin (/reload-plugins)...`.trim() }
+    }
+    // the host draws the first line beside its own prefix, which would push a table's header out of line
+    if (out) return { text: argv[0] === 'list' || argv[0] === 'usage' ? `\n${out}` : out }
 
     return { text: argv[0] === 'list' ? 'Chưa có profile nào. Tạo bằng: /profile new <tên>' : 'OK' }
   })
