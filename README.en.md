@@ -21,6 +21,7 @@
 [Web Dashboard](#-web-dashboard) ·
 [Commands](#-profile-commands) ·
 [Parallel sessions](#-parallel-sessions) ·
+[What's new](#-whats-new-in-04) ·
 [Troubleshooting](#-troubleshooting) ·
 [Under the hood](#-under-the-hood) ·
 [Languages](#-languages) ·
@@ -213,7 +214,7 @@ This part is a bit more serious, because typos in commands aren't fun.
 | `/profile auto return [on\|off]` | Go back to the primary profile once it has recovered |
 | `/profile auto primary <name>` | Choose "home" for auto-return |
 | `/profile auto check` | Don't wait for the next prompt: check now, switch if over the line. Each prompt only asks for the current profile's quota, and asks everyone's only when it has to pick a replacement |
-| `/profile forecast` | Predict when you'll run dry, based on your real burn rate |
+| `/profile forecast` | Predict when you'll run dry, based on your real burn rate. Counted from the latest measurement; data older than 20 minutes is flagged "for reference only" |
 | `/profile cooldown` | Countdown to the 5h quota coming back |
 | `/profile doctor` | Full checkup: OAuth tokens, MCP logins, config files, connectivity |
 | `/profile cleanup [--force]` | Find duplicate email/UUID profiles and broken tokens. Add `--force` to actually clean up |
@@ -241,7 +242,7 @@ This part is a bit more serious, because typos in commands aren't fun.
 | --- | --- |
 | `/profile temp <name> [time]` | Borrow a profile with a due time (e.g. `30m`, `1h`). It hands itself back |
 | `/profile untemp` | Return it early, keep your reputation, back to your own profile |
-| `/profile statusline` | Toggle the detailed status line: profile, 5h/7d bars, reset times, running-out warning (on by default) |
+| `/profile statusline [on\|off\|band\|line]` | Detailed status line: profile, 5h/7d bars, reset times, running-out warning. Alone it toggles on/off. `band` (default) is a coloured band above the input box, `line` a plain line pinned under it. `statusline ansi` prints the coloured line for your own status line |
 | `/profile prompt [shell]` | Snippets so `starship`, `zsh`, `bash`, `tmux`, `powershell` know who you are |
 | `/profile notify [on\|off]` | Desktop notification on switch (off by default, for your sanity) |
 | `/profile undo` | Swapped by mistake? Jump back to the previous profile (run it again to go forward) |
@@ -352,6 +353,20 @@ Skills, agents, plugins, settings and memory live in `~/.claude/` and **belong t
 
 ---
 
+## 🆕 What's new in 0.4
+
+| Version | Highlights |
+| --- | --- |
+| **0.4.7** | Fixed the running-out forecast: counted from the latest measurement and silent when the data is stale, instead of warning `⚠ 5h ~12p` from an old reading |
+| **0.4.6** | The status line defaults to a coloured band above the input box (`band`); the pinned `line` is plain text because the host drops colour codes there |
+| **0.4.5** | Two status line styles, and `statusline ansi` for your own status line |
+| **0.4.4** | Fixes 0.4.3, which shipped without its content; status line colours match `/profile list`; fixes `temp` dragging you back after you switched by hand |
+| **0.4.2** | Dropped the 256-colour code that the host printed as stray text before emails |
+| **0.4.1** | Added `/profile rename`; fixed the reset column showing a huge number when data is missing |
+| **0.4.0** | MCP logins kept across switches; `run` shares skills/agents/plugins/settings/memory; `/profile upgrade` reloads itself; `/profile` runs even while Claude is busy; `undo`, `statusline`, an aligned `list` table with reset columns, coloured output, `auto check` only asks for the current profile's quota |
+
+---
+
 ## 🩹 Troubleshooting
 
 | Symptom | Cause and fix |
@@ -388,7 +403,7 @@ export CLAUDE_SWAP_LANG=en
 ## 🛠️ Development & testing
 
 ```bash
-npm test                   # 66 unit tests for swap.js & web.js (node --test)
+npm test                   # 69 unit tests for swap.js & web.js (node --test)
 claude plugin validate .   # validate the manifest and hooks
 claude plugin test .       # 11 plugin hook tests
 ```
@@ -405,9 +420,9 @@ claude-swap/
 ├── hooks/
 │   ├── hooks.json        # Hook registration for Claude Code
 │   ├── register.tsx      # session.start, prompt.submit and the /profile command
-│   └── register.test.ts  # Plugin hook tests (15 tests)
+│   └── register.test.ts  # Plugin hook tests (17 tests)
 ├── test/
-│   └── swap.test.js      # Unit tests for swap.js & web.js (66 tests)
+│   └── swap.test.js      # Unit tests for swap.js & web.js (69 tests)
 ├── LICENSE               # MIT
 └── .claude-plugin/       # Plugin manifest & marketplace
 ```

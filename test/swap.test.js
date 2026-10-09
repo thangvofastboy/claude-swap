@@ -1137,6 +1137,27 @@ describe('swap.js core functionality', () => {
     assert.equal(loadSwapHistory(tmpHome)[0].reason, 'undo')
   })
 
+  test('forecast counts from the last measurement and drops a stale warning', () => {
+    login(tmpHome, 'fs_a', 'tok-a')
+    saveProfile(tmpHome, 'fs')
+    const now = Date.now()
+    const min = 60000
+    const hist = (t1, u1, t2, u2) => ({ fs: [{ timestamp: now - t1 * min, util5h: u1 }, { timestamp: now - t2 * min, util5h: u2 }] })
+    // 40% -> 83% in 60 min = 43%/h; 12% left to 95 = 16.7 min after the last reading
+    const fresh = calculateForecast(tmpHome, 'fs', 95, hist(65, 40, 5, 83))
+    assert.equal(fresh.minutesUntilThreshold, 12) // 16.7 - 5 min already elapsed (away from a .5 rounding edge)
+    assert.equal(fresh.stale, false)
+    // the same numbers measured an hour ago: the threshold has long passed, but the data is stale
+    const old = calculateForecast(tmpHome, 'fs', 95, hist(125, 40, 65, 80))
+    assert.equal(old.stale, true)
+    assert.equal(old.minutesUntilThreshold, 0)
+    assert.match(old.message, /Số liệu đã cũ/)
+    fs.writeFileSync(usageHistoryFile(tmpHome), JSON.stringify(hist(125, 40, 65, 80)))
+    assert.equal(forecastWarning(tmpHome), '') // no scary "~0p" from yesterday's numbers
+    fs.writeFileSync(usageHistoryFile(tmpHome), JSON.stringify(hist(65, 40, 5, 83)))
+    assert.equal(forecastWarning(tmpHome), '⚠ 5h ~12p')
+  })
+
   test('forecastWarning only speaks when the threshold is minutes away', () => {
     login(tmpHome, 'f_a', 'tok-a')
     saveProfile(tmpHome, 'fc')

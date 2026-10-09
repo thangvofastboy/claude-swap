@@ -2330,6 +2330,9 @@ export function recordUsageSnapshot(home, profileName, util5h, util7d = null) {
   atomicWrite(f, JSON.stringify(history, null, 2))
 }
 
+// a measurement older than this says nothing about the present (the cache refreshes every 5 minutes while you work)
+const STALE_FORECAST_MIN = 20
+
 export function calculateForecast(home, profileName, threshold = 95, history = loadUsageHistory(home)) {
   const entries = history[profileName] || []
   if (entries.length < 2) {
@@ -2368,7 +2371,9 @@ export function calculateForecast(home, profileName, threshold = 95, history = l
 
   const remainingUtil = Math.max(0, threshold - currentUtil)
   const hoursUntilThreshold = remainingUtil / burnRatePerHour
-  const minutesUntilThreshold = Math.round(hoursUntilThreshold * 60)
+  // counted from the moment of the last measurement, not from now: a reading that is an hour old has already used up an hour
+  const ageMin = Math.max(0, (Date.now() - last.timestamp) / 60000)
+  const minutesUntilThreshold = Math.max(0, Math.round(hoursUntilThreshold * 60 - ageMin))
   const estimatedTimestamp = Date.now() + minutesUntilThreshold * 60 * 1000
 
   return {
@@ -2379,10 +2384,12 @@ export function calculateForecast(home, profileName, threshold = 95, history = l
     trend: 'increasing',
     minutesUntilThreshold,
     estimatedTimestamp,
+    stale: ageMin > STALE_FORECAST_MIN,
     message:
       `Mức dùng: ${Math.round(currentUtil)}% | Tốc độ tăng: +${Math.round(burnRatePerHour * 10) / 10}%/giờ. ` +
       `Dự kiến chạm ngưỡng ${threshold}% sau ~${minutesUntilThreshold} phút ` +
-      `(${new Date(estimatedTimestamp).toLocaleTimeString('vi-VN')}).`,
+      `(${new Date(estimatedTimestamp).toLocaleTimeString('vi-VN')}).` +
+      (ageMin > STALE_FORECAST_MIN ? ` Số liệu đã cũ ${Math.round(ageMin)} phút, chỉ tham khảo.` : ''),
   }
 }
 
@@ -2410,7 +2417,7 @@ export function forecastWarning(home, withinMinutes = 30) {
   const cur = currentProfile(home)
   if (!cur) return ''
   const f = calculateForecast(home, cur, loadAutoSwitchConfig(home).threshold)
-  return f.hasData && f.trend === 'increasing' && f.minutesUntilThreshold <= withinMinutes
+  return f.hasData && f.trend === 'increasing' && !f.stale && f.minutesUntilThreshold <= withinMinutes
     ? `⚠ 5h ~${Math.max(f.minutesUntilThreshold, 0)}p`
     : ''
 }
@@ -3419,7 +3426,7 @@ export function formatHelpReport(color = null, lang = 'vi') {
       `  ${cmd('/profile completion [sh]')}    Generate shell autocompletion (bash, zsh, fish)`,
       `  ${cmd('/profile temp <name> [time]')} Temporary swap with auto-revert (e.g. 30m, 1h)`,
       `  ${cmd('/profile untemp')}            Cancel temporary swap and revert immediately`,
-      `  ${cmd('/profile statusline')}        Toggle the detailed usage status line (on|off; plain: shell prompt string)`,
+      `  ${cmd('/profile statusline')}        Detailed usage status line (on|off|band|line; plain: shell prompt string)`,
       `  ${cmd('/profile prompt <shell>')}    Config snippet for starship, zsh, bash, tmux, powershell`,
       `  ${cmd('/profile notify on|off')}     Toggle desktop notifications on profile swap`,
       `  ${cmd('/profile history [n]')}       View recent swap history`,
@@ -3499,7 +3506,7 @@ export function formatHelpReport(color = null, lang = 'vi') {
     `  ${cmd('/profile completion [sh]')}   Sinh mã autocomplete cho Bash, Zsh, Fish`,
     `  ${cmd('/profile temp <tên> [tg]')}   Mượn tạm profile (vd: 30m, 1h) rồi tự hoàn lại`,
     `  ${cmd('/profile untemp')}            Hủy mượn tạm và quay về profile gốc ngay`,
-    `  ${cmd('/profile statusline')}        Bật/tắt status line chi tiết usage (on|off; trần: chuỗi cho Shell prompt)`,
+    `  ${cmd('/profile statusline')}        Status line chi tiết usage (on|off|band|line; trần: chuỗi cho Shell prompt)`,
     `  ${cmd('/profile prompt <shell>')}    Snippet cấu hình starship, zsh, bash, tmux, powershell`,
     `  ${cmd('/profile notify on|off')}     Bật / tắt thông báo desktop khi đổi profile`,
     `  ${cmd('/profile history [n]')}       Xem lịch sử các lần chuyển đổi gần nhất`,

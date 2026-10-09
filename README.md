@@ -21,6 +21,7 @@
 [Web Dashboard](#-web-dashboard) ·
 [Bảng lệnh](#-bảng-lệnh-profile) ·
 [Session song song](#-chạy-session-song-song) ·
+[Có gì mới](#-có-gì-mới-ở-dòng-04) ·
 [Xử lý sự cố](#-xử-lý-sự-cố) ·
 [Bên trong có gì](#-bên-trong-có-gì) ·
 [Đa ngôn ngữ](#-đa-ngôn-ngữ) ·
@@ -213,7 +214,7 @@ Phần này nghiêm túc hơn một chút, vì gõ sai lệnh thì không vui.
 | `/profile auto return [on\|off]` | Tự quay về profile chính khi nó hồi sức |
 | `/profile auto primary <tên>` | Chọn "nhà" để auto-return quay về |
 | `/profile auto check` | Khỏi chờ prompt kế tiếp: kiểm tra ngay, chạm ngưỡng là đổi. Mỗi prompt chỉ hỏi quota của profile đang dùng, chỉ hỏi cả đội khi cần chọn người thay |
-| `/profile forecast` | Bói xem bao giờ cạn quota, dựa trên tốc độ tiêu thụ thật |
+| `/profile forecast` | Bói xem bao giờ cạn quota, dựa trên tốc độ tiêu thụ thật. Tính từ lúc đo gần nhất; số liệu cũ quá 20 phút sẽ được đánh dấu "chỉ tham khảo" |
 | `/profile cooldown` | Đếm ngược tới lúc quota 5h hồi sức |
 | `/profile doctor` | Khám tổng quát: token OAuth, đăng nhập MCP, file cấu hình, kết nối |
 | `/profile cleanup [--force]` | Tìm profile trùng email/UUID hoặc token hỏng. Thêm `--force` là dọn thật |
@@ -241,7 +242,7 @@ Phần này nghiêm túc hơn một chút, vì gõ sai lệnh thì không vui.
 | --- | --- |
 | `/profile temp <tên> [tg]` | Mượn tạm profile có hẹn giờ trả (vd: `30m`, `1h`). Hết giờ tự trả |
 | `/profile untemp` | Trả sớm cho giữ uy tín, về profile gốc ngay |
-| `/profile statusline` | Bật/tắt status line chi tiết: profile, thanh 5h/7d, giờ reset, cảnh báo sắp cạn (mặc định bật) |
+| `/profile statusline [on\|off\|band\|line]` | Status line chi tiết: profile, thanh 5h/7d, giờ reset, cảnh báo sắp cạn. Không kèm tham số thì bật/tắt. `band` (mặc định) là dải màu trên khung nhập, `line` là dòng chữ thường ghim dưới. `statusline ansi` in dòng có màu để nhúng vào status line riêng |
 | `/profile prompt [shell]` | Snippet để `starship`, `zsh`, `bash`, `tmux`, `powershell` biết bạn đang là ai |
 | `/profile notify [on\|off]` | Bật / tắt thông báo desktop khi đổi profile (mặc định tắt cho đỡ phiền) |
 | `/profile undo` | Lỡ tay đổi nhầm? Quay về profile trước đó trong một nốt nhạc (gọi lần nữa thì đi lại) |
@@ -352,6 +353,20 @@ Skill, agent, plugin, settings và memory nằm trong `~/.claude/` nên **không
 
 ---
 
+## 🆕 Có gì mới ở dòng 0.4
+
+| Bản | Điểm chính |
+| --- | --- |
+| **0.4.7** | Sửa dự báo cạn quota: tính từ lúc đo gần nhất và im lặng khi số liệu đã cũ, thay vì báo `⚠ 5h ~12p` dựa trên số đo từ lâu |
+| **0.4.6** | Status line mặc định là dải màu trên khung nhập (`band`); dòng ghim `line` chỉ còn chữ thường vì host bỏ mã màu ở đó |
+| **0.4.5** | Thêm hai kiểu hiển thị status line và `statusline ansi` cho status line riêng của bạn |
+| **0.4.4** | Sửa bản 0.4.3 phát hành thiếu nội dung; status line có màu đồng bộ với `/profile list`; sửa lỗi `temp` kéo về profile cũ sau khi bạn đã tự đổi |
+| **0.4.2** | Bỏ mã màu 256 sắc làm host in ra chữ lạ trước email |
+| **0.4.1** | Thêm `/profile rename`; sửa cột reset hiện số khổng lồ khi thiếu dữ liệu |
+| **0.4.0** | Giữ nguyên đăng nhập MCP khi đổi profile; `run` dùng chung skill/agent/plugin/settings/memory; `/profile upgrade` tự nạp lại; `/profile` chạy ngay cả khi Claude đang bận; `undo`, `statusline`, bảng `list` thẳng cột có cột reset, output có màu, `auto check` chỉ hỏi quota profile đang dùng |
+
+---
+
 ## 🩹 Xử lý sự cố
 
 | Triệu chứng | Nguyên nhân và cách xử lý |
@@ -388,9 +403,9 @@ export CLAUDE_SWAP_LANG=en
 ## 🛠️ Phát triển & kiểm thử
 
 ```bash
-npm test                   # 66 unit test cho swap.js & web.js (node --test)
+npm test                   # 69 unit test cho swap.js & web.js (node --test)
 claude plugin validate .   # kiểm tra manifest và hooks
-claude plugin test .       # 15 test cho plugin hook
+claude plugin test .       # 17 test cho plugin hook
 ```
 
 Test dùng thư mục tạm và token giả, nên chạy bao nhiêu lần cũng không đụng tới tài khoản thật của bạn.
@@ -405,9 +420,9 @@ claude-swap/
 ├── hooks/
 │   ├── hooks.json        # Đăng ký hook với Claude Code
 │   ├── register.tsx      # session.start, prompt.submit và lệnh /profile
-│   └── register.test.ts  # Test cho plugin hook (15 test)
+│   └── register.test.ts  # Test cho plugin hook (17 test)
 ├── test/
-│   └── swap.test.js      # Unit test cho swap.js & web.js (66 test)
+│   └── swap.test.js      # Unit test cho swap.js & web.js (69 test)
 ├── LICENSE               # MIT
 └── .claude-plugin/       # Manifest plugin & marketplace
 ```

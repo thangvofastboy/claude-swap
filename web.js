@@ -634,7 +634,7 @@ export function renderDashboardHtml() {
                 <tr><td><span class="cmd-code">/profile web</span></td><td>Mở Web Dashboard trực quan và cấu hình plugin</td></tr>
                 <tr><td><span class="cmd-code">/profile rename &lt;cũ&gt; &lt;mới&gt;</span></td><td>Đổi tên profile, alias, liên kết, lịch sử và ngân sách đi theo</td></tr>
                 <tr><td><span class="cmd-code">/profile undo</span></td><td>Quay lại profile trước lần chuyển gần nhất (gọi lần nữa để đi lại)</td></tr>
-                <tr><td><span class="cmd-code">/profile statusline</span></td><td>Bật/tắt status line chi tiết: thanh 5h/7d, giờ reset, cảnh báo sắp cạn</td></tr>
+                <tr><td><span class="cmd-code">/profile statusline</span></td><td>Status line chi tiết (on/off, band = dải màu trên khung nhập, line = dòng chữ thường): thanh 5h/7d, giờ reset, cảnh báo sắp cạn</td></tr>
                 <tr><td><span class="cmd-code">/profile upgrade</span></td><td>Cập nhật plugin lên bản mới nhất và tự nạp lại</td></tr>
                 <tr><td><span class="cmd-code">/profile run &lt;tên&gt;</span></td><td>Chạy session Claude Code song song độc lập</td></tr>
                 <tr><td><span class="cmd-code">/profile add-token &lt;tok&gt;</span></td><td>Đăng ký profile trực tiếp từ setup-token hoặc API key</td></tr>
