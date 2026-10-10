@@ -151,7 +151,7 @@ Phần này nghiêm túc hơn một chút, vì gõ sai lệnh thì không vui.
 
 | Lệnh | Mô tả |
 | --- | --- |
-| `/profile` | Hiện bảng hướng dẫn đầy đủ. Lạc đường thì gõ cái này |
+| `/profile` | Tổng quan (profile đang dùng, thanh quota 5h/7d, mọi cài đặt bật/tắt) rồi bảng hướng dẫn đầy đủ. Lạc đường thì gõ cái này |
 | `/profile list [--json]` | Điểm danh cả đội: bảng thẳng cột gồm 🟢/⚪, email, thanh quota 5h/7d, giờ reset và nhãn 🏷️ |
 | `/profile current [--json]` | Câu hỏi triết học "mình là ai?", trả lời bằng tên profile đang dùng |
 | `/profile <tên\|alias>` | Đổi sang profile hoặc alias `<tên>`. Claude còn không biết mình vừa đổi chủ |
@@ -364,6 +364,7 @@ Skill, agent, plugin, settings và memory nằm trong `~/.claude/` nên **không
 
 | Bản | Điểm chính |
 | --- | --- |
+| **0.4.9** | `/profile` mở đầu bằng khối Tổng quan có màu và icon: profile đang dùng, thanh quota 5h/7d, mọi cài đặt bật/tắt; lệnh `overview [--json]` |
 | **0.4.8** | Status line luôn có số liệu mới (kể cả khi tắt auto-switch) và tự cập nhật mỗi phút; báo `⚠` khi số liệu cũ/lỗi; gợi ý profile thay thế khi sắp cạn; thông báo khi auto-switch đổi profile; `list` đánh dấu profile token hết hạn và sửa lỗi mất số liệu khi bật `mask`; `usage` có biểu đồ 24h/7 ngày; ngân sách 7d theo giờ; nút chuyển trên dải; báo profile hồi quota; usage theo dự án trong `stats`; `repair` làm mới token hết hạn; cảnh báo webhook về ngân sách 7d và hồi quota; `stats --json`; dashboard có ngân sách 7d, usage theo dự án, nút sửa token; bấm lệnh trong bảng `/profile` để đưa xuống ô nhập; `/profile settings` sửa mọi cài đặt trong một bảng; `schedule` đổi profile theo giờ; `repair auto`; quota riêng theo model trên dải; báo cáo tuần qua webhook; `help <từ khóa>`; dải gọn cho terminal hẹp; tìm `node` ở các chỗ cài phổ biến khi app Desktop không thấy trong PATH |
 | **0.4.7** | Sửa dự báo cạn quota: tính từ lúc đo gần nhất và im lặng khi số liệu đã cũ, thay vì báo `⚠ 5h ~12p` dựa trên số đo từ lâu |
 | **0.4.6** | Status line mặc định là dải màu trên khung nhập (`band`); dòng ghim `line` chỉ còn chữ thường vì host bỏ mã màu ở đó |

@@ -151,7 +151,7 @@ This part is a bit more serious, because typos in commands aren't fun.
 
 | Command | Description |
 | --- | --- |
-| `/profile` | Show the full help. Lost? Type this |
+| `/profile` | An overview (current profile, 5h/7d quota bars, every setting on/off) followed by the full help. Lost? Type this |
 | `/profile list [--json]` | Roll call: an aligned table with 🟢/⚪, email, 5h/7d quota bars, reset times and tags 🏷️ |
 | `/profile current [--json]` | The philosophical question "who am I?", answered with the active profile name |
 | `/profile <name\|alias>` | Switch to profile or alias `<name>`. Claude won't even notice it changed owners |
@@ -364,6 +364,7 @@ Skills, agents, plugins, settings and memory live in `~/.claude/` and **belong t
 
 | Version | Highlights |
 | --- | --- |
+| **0.4.9** | `/profile` opens with a coloured Overview: current profile, 5h/7d quota bars, every setting on/off; `overview [--json]` command |
 | **0.4.8** | Status line always has current numbers (also with auto-switch off) and refreshes every minute; `⚠` when the numbers are stale or failed; suggests a profile to move to when running out; notification when auto-switch swaps; `list` flags profiles with an expired token and no longer loses its numbers with `mask` on; `usage` draws 24h/7-day history; 7d budget per hour; a swap button on the band; a toast when a profile recovers; per-project usage in `stats`; `repair` renews expired tokens; webhook alerts for the 7d budget and recovered profiles; `stats --json`; the dashboard shows the 7d budget, per-project usage and a repair button; click a command in the `/profile` table to put it in the prompt box; `/profile settings` edits every setting in one table; `schedule` swaps by time of day; `repair auto`; per-model quota on the band; weekly webhook report; `help <keyword>`; compact band on narrow terminals; looks for `node` in the usual install places when the Desktop app's PATH lacks it |
 | **0.4.7** | Fixed the running-out forecast: counted from the latest measurement and silent when the data is stale, instead of warning `⚠ 5h ~12p` from an old reading |
 | **0.4.6** | The status line defaults to a coloured band above the input box (`band`); the pinned `line` is plain text because the host drops colour codes there |

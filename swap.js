@@ -1612,6 +1612,15 @@ function suggestNext(home, cache, windows) {
   return { next, text: `→ ${next} ${hot.name} ${pct}%` }
 }
 
+// [{ name: '5h' | '7d', pct 0–100, left: '2h10m' }] from one cache entry; none while the usage endpoint answers 429
+function quotaWindows(hit) {
+  if (isRateLimited(hit)) return []
+  return [[LABEL_5H, '5h'], [LABEL_7D, '7d']].flatMap(([label, name]) => {
+    const lim = findLimit(hit, label)
+    return lim ? [{ name, pct: Math.round(Math.max(0, Math.min(Number(lim[1]) || 0, 100))), left: resetIn(hit, lim) }] : []
+  })
+}
+
 // Everything the in-session status line shows, as data: the hook draws it in colour, `statusline text` flattens it.
 // null when there is nothing to show (no profile, or `/profile statusline off`).
 export function statusLineData(home) {
@@ -1619,18 +1628,7 @@ export function statusLineData(home) {
   if (!cur || !isStatuslineEnabled(home)) return null
   const cache = loadUsageCache(home)
   const hit = cacheHit(home, cache, cur)
-  const windows = []
-  if (!isRateLimited(hit)) {
-    for (const [label, name] of [[LABEL_5H, '5h'], [LABEL_7D, '7d']]) {
-      const lim = findLimit(hit, label)
-      if (!lim) continue
-      windows.push({
-        name,
-        pct: Math.round(Math.max(0, Math.min(Number(lim[1]) || 0, 100))),
-        left: resetIn(hit, lim),
-      })
-    }
-  }
+  const windows = quotaWindows(hit)
   const suggestion = suggestNext(home, cache, windows)
   const hot7d = windows.find(w => w.name === '7d' && w.pct >= WARN_PCT)
   const data = {
@@ -4143,6 +4141,54 @@ export function formatSettings(home) {
   ].join('\n')
 }
 
+// Bare `/profile`: the live profile, its quota and every setting, above the command list.
+// Single-codepoint emoji only: a VS16 one (⚙️, ↩️, 🏷️) is drawn one cell wide by some terminals and breaks the columns.
+const SETTING_ICONS = {
+  'auto.enabled': '🤖', 'auto.threshold': '🎯', 'auto.safeguard': '🚧', 'auto.return': '🔁', 'auto.primary': '⭐',
+  'auto.pool': '👥', 'auto.order': '🔢', balance: '🔄', statusline: '📊', notify: '🔔', mask: '🙈', 'repair.auto': '🔧', lang: '🌐',
+}
+
+export function overviewData(home) {
+  const cur = currentProfile(home)
+  const hit = cur ? cacheHit(home, loadUsageCache(home), cur) : {}
+  return {
+    profile: cur || '',
+    email: cur ? maskEmail(profileEmail(home, cur), isMaskingEnabled(home)) : '',
+    profiles: listProfiles(home).length,
+    disabled: loadDisabledProfiles(home).length,
+    rateLimited: Boolean(cur) && isRateLimited(hit),
+    stale: cur ? staleNote(hit, loadLanguage(home)) : '',
+    windows: cur ? quotaWindows(hit) : [],
+    settings: settingsList(home).map(r => ({ ...r, icon: SETTING_ICONS[r.key] || '•' })),
+  }
+}
+
+export function formatOverview(home, color = null, lang = 'vi') {
+  const d = overviewData(home)
+  const en = lang === 'en'
+  const c = shouldColor(color) ? (code, t) => `\x1b[${code}m${t}\x1b[0m` : (_, t) => t
+  const w = Math.max(...d.settings.map(r => r.key.length))
+  const value = v => (v === true ? c('1;32', en ? '● on ' : '● bật') : v === false ? c('90', en ? '○ off' : '○ tắt') : v === '' || v === 'off' ? c('90', v || '—') : c('1;36', String(v)))
+  const pad = (v, n) => v + ' '.repeat(Math.max(0, n - String(v).replace(/\x1b\[[0-9;]*m/g, '').length))
+  const out = [`🔀 ${c('1;36', 'claude-swap')} · ${en ? 'Overview' : 'Tổng quan'}`, '']
+  if (d.profile) {
+    const count = `📦 ${d.profiles} profile${d.disabled ? ` · 🚫 ${d.disabled} ${en ? 'disabled' : 'tắt'}` : ''}`
+    out.push(`  👤 ${c('1;32', d.profile)}${d.email ? ` ${c('90', d.email)}` : ''}   ${count}`)
+    for (const win of d.windows) {
+      const code = pctCode(win.pct)
+      const label = win.name === '5h' ? (en ? '5 hours' : '5 giờ  ') : (en ? '7 days ' : '7 ngày ')
+      out.push(`  ${win.name === '5h' ? '⌛' : '📅'} ${c('1;36', label)} ${c('90', '[')}${c(code, bar(win.pct, 16))}${c('90', ']')} ${c(code, `${String(win.pct).padStart(3)}%`)}${win.pct >= WARN_PCT ? ' 🔥' : ''}${win.left ? `  ${c('36', `⏳ ${win.left}`)}` : ''}`)
+    }
+    if (d.rateLimited) out.push(`  ${c('1;33', en ? '⏳ usage endpoint busy (429), quota shows again soon' : '⏳ máy chủ usage đang bận (429), quota sẽ hiện lại sau')}`)
+    if (d.stale) out.push(`  ${c('1;33', d.stale)}`)
+  } else {
+    out.push(`  ${c('1;33', en ? '⚠ No active profile. Create one: /profile new <name>' : '⚠ Chưa có profile nào active. Tạo bằng: /profile new <tên>')}`)
+  }
+  out.push('', `🧰 ${c('1;36', en ? 'Settings' : 'Cài đặt')} ${c('90', en ? '(edit: /profile settings)' : '(sửa: /profile settings)')}`)
+  for (const r of d.settings) out.push(`  ${r.icon} ${pad(r.key, w)}  ${pad(value(r.value), 14)}${c('90', r.desc)}`)
+  return out.join('\n')
+}
+
 // ---------------------------------------------------------------- colourised output
 
 const ESC = '\x1b'
@@ -4219,7 +4265,14 @@ async function runCliInner(argv, home) {
   const color = !noColor && shouldColor()
 
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
-    console.log(formatHelpReport(color, lang, filteredArgv.slice(1).join(' ')))
+    const keyword = filteredArgv.slice(1).join(' ')
+    if (!keyword) console.log(`${formatOverview(home, color, lang)}\n`)
+    console.log(formatHelpReport(color, lang, keyword))
+    return 0
+  }
+
+  if (cmd === 'overview') {
+    console.log(argv.includes('--json') ? JSON.stringify(overviewData(home)) : formatOverview(home, color, lang))
     return 0
   }
 

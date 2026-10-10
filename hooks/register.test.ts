@@ -68,6 +68,7 @@ test('/profile maps subcommands including auto and rejects junk', async ($, on) 
 
   expect(calls).toEqual([
     ['help'],
+    ['overview', '--json'],
     ['list'],
     ['save', 'work', '--force'],
     ['statusline', 'json'],
@@ -556,6 +557,30 @@ test('the /profile help draws each command as a button that fills the prompt box
   const other = await mount('list', help) // only the help gets buttons
   expect(await other.find({ type: 'Button' })).toBeUndefined()
   await other.unmount()
+})
+
+test('bare /profile draws the overview (profile, quota, settings) in colour above the help', async ($, on) => {
+  const data = {
+    profile: 'work', email: 'a@b.c', profiles: 3, disabled: 1, rateLimited: false, stale: '',
+    windows: [{ name: '5h', pct: 34, left: '2h10m' }, { name: '7d', pct: 91, left: '3d4h' }],
+    settings: [
+      { key: 'auto.enabled', type: 'bool', value: true, desc: 'auto', icon: '🤖' },
+      { key: 'notify', type: 'bool', value: false, desc: 'notify', icon: '🔔' },
+      { key: 'balance', type: 'choice', value: 'off', desc: 'balance', icon: '🔄' },
+    ],
+  }
+  const help = '🔀 claude-swap · Tổng quan\n  👤 work\n\n🔀 \x1b[1;36mclaude-swap\x1b[0m — help:\n  \x1b[1;33m/profile list\x1b[0m   List profiles'
+  on('process.run', async (_$, { argv }) => ok(argv[2] === 'overview' ? JSON.stringify(data) : help))
+  on('ui.render', ($, e) => $.ui.resolve(e).Box({}))
+  await $.command.run({ command: 'profile', args: '' })
+  const ui = await $.ui.mount({ plugin: 'profile-swap', surface: 'terminal', component: 'CommandOutput', props: { command: 'profile', args: '', text: help, isErrored: false } })
+  expect(await ui.find({ type: 'Text', text: 'work' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: ' 91%' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /● bật/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /○ tắt/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '  👤 work' })).toBeUndefined() // swap.js's text copy is dropped
+  expect(await ui.find({ type: 'Button', key: 'help:/profile list' })).toBeDefined()
+  await ui.unmount()
 })
 
 test('without node on PATH it tries the usual install places, then sticks with the one that worked', async ($, on) => {

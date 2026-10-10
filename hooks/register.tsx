@@ -64,6 +64,7 @@ const SUBCOMMANDS = new Set([
   'schedule',
   'unschedule',
   'settings',
+  'overview',
 ])
 const USAGE =
   'Dùng: /profile | /profile list | /profile <tên|alias> | /profile pick | /profile web | /profile balance | /profile webhook | /profile lang [vi|en] | /profile run <tên> | /profile add-token <tok> | /profile disable <tên> | /profile auto | /profile sync | /profile upgrade'
@@ -266,7 +267,7 @@ async function saveSettings($: EngineInterface) {
 
 // commands that only read: they cannot change what the band shows, so they skip the extra `statusline json` process
 const READ_ONLY = new Set([
-  'help', 'list', 'current', 'usage', 'folder', 'history', 'stats', 'cooldown', 'forecast', 'doctor', 'tags',
+  'help', 'overview', 'list', 'current', 'usage', 'folder', 'history', 'stats', 'cooldown', 'forecast', 'doctor', 'tags',
   'aliases', 'disabled', 'branch-bindings', 'affinities', 'prompt', 'completion', 'version', 'share', 'export', 'web', 'dashboard',
 ])
 
@@ -279,6 +280,20 @@ const BAR_WIDTH = 8
 const SGR = /\x1b\[[0-9;]*m/g
 const HELP_ARGS = new Set(['', 'help', '--help', '-h'])
 type HelpRow = { cmd?: string; desc?: string; title?: string }
+
+// what bare `/profile` draws above the help (`overview --json`, overviewData in swap.js); the latest one, so an older help
+// in the scrollback shows the current values too
+type Overview = {
+  profile: string
+  email: string
+  profiles: number
+  disabled: number
+  rateLimited: boolean
+  stale: string
+  windows: { name: string; pct: number; left: string }[]
+  settings: (Setting & { icon: string })[]
+}
+let overview: Overview | null = null
 
 function helpRows(text: string): HelpRow[] {
   return text.split('\n').map(line => {
@@ -391,11 +406,72 @@ export const register: Register = on => {
   on('ui.render', { component: 'CommandOutput' }, ($, e, next) => {
     const { command, args, text, isErrored } = e.props
     if (command !== 'profile' || isErrored || !HELP_ARGS.has(args.trim().split(/\s+/)[0])) return next(e)
-    const rows = helpRows(text)
+    let rows = helpRows(text)
     if (!rows.some(r => r.cmd)) return next(e) // not the help after all (a format change, no match): draw it as text
     const { Box, Text, Button } = $.ui.resolve(e)
+    // bare `/profile`: swap.js printed the overview as text above the help; draw it from the data instead
+    const ov = HELP_ARGS.has(args.trim()) ? overview : null
+    const start = rows.findIndex(r => r.title?.includes('claude-swap —'))
+    if (ov && start > 0) rows = rows.slice(start)
+    const width = ov ? Math.max(...ov.settings.map(r => r.key.length), 8) : 0
     return (
       <Box flexDirection="column">
+        {ov ? (
+          <Box flexDirection="column">
+            <Text color="cyan" bold>🔀 claude-swap · Tổng quan</Text>
+            {ov.profile ? (
+              <Box>
+                <Text>  👤 </Text>
+                <Text color="green" bold>{ov.profile}</Text>
+                {ov.email ? <Text color="gray">{` ${ov.email}`}</Text> : null}
+                <Text>{`   📦 ${ov.profiles} profile`}</Text>
+                {ov.disabled ? <Text color="red">{` · 🚫 ${ov.disabled} tắt`}</Text> : null}
+              </Box>
+            ) : (
+              <Text color="yellow" bold>  ⚠ Chưa có profile nào active. Tạo bằng: /profile new {'<tên>'}</Text>
+            )}
+            {ov.windows.map(w => {
+              const filled = Math.round((w.pct / 100) * 16)
+              const color = loadColor(w.pct)
+              return (
+                <Box key={`ov:${w.name}`}>
+                  <Text>{w.name === '5h' ? '  ⌛ ' : '  📅 '}</Text>
+                  <Text color="cyan" bold>{w.name === '5h' ? '5 giờ   ' : '7 ngày  '}</Text>
+                  <Text color="gray">[</Text>
+                  <Text color={color} bold>{'█'.repeat(filled)}</Text>
+                  <Text color="gray">{'░'.repeat(16 - filled)}] </Text>
+                  <Text color={color} bold>{`${String(w.pct).padStart(3)}%`}</Text>
+                  {w.pct >= 80 ? <Text> 🔥</Text> : null}
+                  {w.left ? <Text color="cyan">{`  ⏳ ${w.left}`}</Text> : null}
+                </Box>
+              )
+            })}
+            {ov.rateLimited ? <Text color="yellow" bold>  ⏳ máy chủ usage đang bận (429), quota sẽ hiện lại sau</Text> : null}
+            {ov.stale ? <Text color="yellow" bold>{`  ${ov.stale}`}</Text> : null}
+            <Text> </Text>
+            <Box>
+              <Text color="cyan" bold>🧰 Cài đặt </Text>
+              <Button key="overview-settings" plain onPress={() => void $.prompt.fill({ text: '/profile settings' }).catch(() => undefined)}>
+                <Text color="gray">(sửa: /profile settings)</Text>
+              </Button>
+            </Box>
+            {ov.settings.map(r => {
+              const v = r.value
+              const off = v === false || v === '' || v === 'off'
+              return (
+                <Box key={`ov:${r.key}`}>
+                  <Text>{`  ${r.icon} `}</Text>
+                  <Text bold>{`${r.key.padEnd(width)}  `}</Text>
+                  <Text color={v === true ? 'green' : off ? 'gray' : 'cyan'} bold={!off}>
+                    {(v === true ? '● bật' : v === false ? '○ tắt' : v === '' ? '—' : String(v)).padEnd(14)}
+                  </Text>
+                  <Text dimColor>{r.desc}</Text>
+                </Box>
+              )
+            })}
+            <Text> </Text>
+          </Box>
+        ) : null}
         {rows.map((r, i) =>
           r.cmd ? (
             <Box key={`row${i}`}>
@@ -484,7 +560,16 @@ export const register: Register = on => {
       await $.ui.close({ id: 'settings' })
     }
 
-    const ran = await runSwap($, argv)
+    // bare `/profile`: the overview's data, for the render hook to draw in colour above the help
+    const [ran, ov] = await Promise.all([
+      runSwap($, argv),
+      argv.length === 1 && argv[0] === 'help' ? runSwap($, ['overview', '--json']).catch(() => null) : null,
+    ])
+    if (ov) {
+      try {
+        overview = JSON.parse(ov.stdout.trim())
+      } catch {}
+    }
     if (!READ_ONLY.has(argv[0]) || ran.exitCode !== 0) await refreshStatus($)
     const out = `${ran.stdout}${ran.stderr}`.trim()
     // the new version is only on disk: have the host re-read plugins once this command has returned

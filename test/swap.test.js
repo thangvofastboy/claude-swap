@@ -105,6 +105,8 @@ import {
   setMasking,
   sparkline,
   settingsList,
+  overviewData,
+  formatOverview,
   setSetting,
   addScheduleRule,
   removeScheduleRule,
@@ -1728,6 +1730,24 @@ describe('swap.js core functionality', () => {
     assert.throws(() => setSetting(tmpHome, 'auto.threshold', '500'), /từ 1 đến 100/)
     assert.throws(() => setSetting(tmpHome, 'auto.primary', 'ghost'), /không tồn tại/)
     assert.throws(() => setSetting(tmpHome, 'nope', '1'), /Không có cài đặt/)
+  })
+
+  test('bare /profile opens with an overview: current profile, quota bars and every setting', () => {
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'ov-main')
+    const cacheFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json')
+    writeFreshCache(cacheFile, { 'ov-main|a@example.com': { limits: [['5 giờ', 34, '20:00'], ['7 ngày', 91, '20:00']] } })
+    setSetting(tmpHome, 'notify', 'on')
+    const d = overviewData(tmpHome)
+    assert.equal(d.profile, 'ov-main')
+    assert.deepEqual(d.windows.map(w => [w.name, w.pct]), [['5h', 34], ['7d', 91]])
+    assert.equal(d.settings.find(r => r.key === 'notify').icon, '🔔')
+    const text = formatOverview(tmpHome, false)
+    assert.match(text, /👤 ov-main a@example\.com/)
+    assert.match(text, /7 ngày .*\] {2}91% 🔥/)
+    assert.match(text, /🔔 notify +● bật/)
+    assert.match(text, /🔁 auto\.return +○ tắt/)
+    assert.doesNotMatch(text, /\x1b/)
   })
 
   test('forecast reads a burst after an idle stretch at its real pace, not averaged over the idle hours', () => {
