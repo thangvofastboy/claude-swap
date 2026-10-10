@@ -103,6 +103,28 @@ import {
   formatBudgetReport,
   isMaskingEnabled,
   setMasking,
+  sparkline,
+  settingsList,
+  setSetting,
+  addScheduleRule,
+  removeScheduleRule,
+  activeScheduleRule,
+  checkSchedule,
+  loadSchedule,
+  maybeAutoRepair,
+  setAutoRepair,
+  weeklyReport,
+  repairProfile,
+  brokenProfiles,
+  swapStats,
+  sendQuotaAlerts,
+  flushWebhooks,
+  thinHistory,
+  slotSparkline,
+  weeklyPace,
+  formatProjectUsage,
+  loadProjectUsage,
+  refreshUsage,
   maskEmail,
   exportSafeShare,
   generateCompletion,
@@ -1200,7 +1222,8 @@ describe('swap.js core functionality', () => {
       'sl|sl_a@example.com': { limits: [['5 giờ', 34, '', soon], ['7 ngày', 90, '', later]] },
     })
     const text = statusLineText(tmpHome)
-    assert.match(text, /^● sl │ 5h \[███░░░░░\] 34% ⏳2h0\dm │ 7d \[███████░\] 90%🔥 ⏳3d1h$/)
+    // a hot 7d window also shows its budget until the reset: 10% over ~3d1h
+    assert.match(text, /^● sl │ 5h \[███░░░░░\] 34% ⏳2h0\dm │ 7d \[███████░\] 90%🔥 ⏳3d1h │ 7d ≈0\.1%\/h$/)
     assert.equal(isStatuslineEnabled(tmpHome), true)
 
     assert.equal(await runCli(['statusline', 'off'], tmpHome), 0)
@@ -1410,6 +1433,323 @@ describe('swap.js core functionality', () => {
     assert.equal(hot.swapped, true)
     assert.equal(hot.to, 'r-three') // chosen from fresh numbers for everyone
     assert.deepEqual([...fetched].sort(), ['tok-a', 'tok-b', 'tok-c'])
+  })
+
+  test('status line flags stale quota and, with auto-switch off, suggests the next profile', async () => {
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'st-two')
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'st-one') // current
+    const cacheFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json')
+    const lim = (label, pct) => [label, pct, '', new Date(Date.now() + 3600000).toISOString()]
+    const at = Date.now() / 1000 - 3 * 3600 // three hours old
+    fs.writeFileSync(cacheFile, JSON.stringify({
+      'st-one|a@example.com': { at, limits: [lim('5 giờ', 20), lim('7 ngày', 90)] },
+      'st-two|b@example.com': { at, limits: [lim('5 giờ', 5), lim('7 ngày', 31)] },
+    }))
+    saveAutoSwitchConfig(tmpHome, { ...loadAutoSwitchConfig(tmpHome), enabled: false })
+    let d = statusLineData(tmpHome)
+    assert.match(d.stale, /^⚠ cũ 3h0\dm$/)
+    assert.equal(d.suggest, '→ st-two 7d 31%')
+    assert.match(d.text, /→ st-two 7d 31%/)
+
+    // a failed fetch keeps the old limits: say so instead of the age; auto-switch on needs no hint
+    const cache = JSON.parse(fs.readFileSync(cacheFile, 'utf-8'))
+    cache['st-one|a@example.com'] = { ...cache['st-one|a@example.com'], at: Date.now() / 1000, note: 'lỗi mạng: fetch failed' }
+    cache['st-two|b@example.com'].note = 'token đã hết hạn — chuyển sang profile này'
+    fs.writeFileSync(cacheFile, JSON.stringify(cache))
+    saveAutoSwitchConfig(tmpHome, { ...loadAutoSwitchConfig(tmpHome), enabled: true })
+    d = statusLineData(tmpHome)
+    assert.equal(d.stale, '⚠ lỗi mạng')
+    assert.equal(d.suggest, '')
+
+    // the list flags the stale row, and still finds its numbers with emails masked
+    setMasking(tmpHome, true)
+    const list = profileListReport(tmpHome, false, 'vi')
+    assert.match(list, /st-two .* 31% .*⚠ token đã hết hạn/)
+
+    // a profile without an OAuth token: the refresh replaces the old note, so `list` and `usage` agree
+    const prof = path.join(tmpHome, '.config', 'claude-cli-profiles', 'st-two.json')
+    fs.writeFileSync(prof, JSON.stringify({ ...JSON.parse(fs.readFileSync(prof, 'utf-8')), credentials: '{}' }))
+    await refreshUsage(tmpHome, ['st-two'])
+    assert.match(profileListReport(tmpHome, false, 'vi'), /st-two .*⚠ không có token OAuth/)
+
+    assert.equal(sparkline([0, 50, 100, 200, -5]), '▁▅██▁')
+  })
+
+  test('history keeps a week, thinned to hourly past 6h; slot sparklines; project usage; weekly pace', async () => {
+    const now = Date.now()
+    const H = 3600000
+    const at = (h, u5 = 10, u7 = null) => ({ timestamp: now - h * H, util5h: u5, util7d: u7 })
+    const hour = Math.floor((now - 30 * H) / H) * H // three readings inside one clock hour, 30h ago
+    const inHour = m => ({ timestamp: hour + m * 60000, util5h: m, util7d: null })
+    const thinned = thinHistory([at(200), inHour(5), inHour(20), inHour(50), at(2), at(1.5), at(1)], now)
+    assert.equal(thinned.length, 4) // the 200h-old one dropped, the old hour kept as its last reading
+    assert.equal(thinned[0].util5h, 50)
+    assert.equal(slotSparkline([at(0.5, 100), at(0.2, 0), at(3, 50)], 'util5h', H, 4, now), '▅··█') // 3h ago is the oldest of 4 hourly slots
+
+    // the 5h usage gained between readings is put down to the session's project; a reset counts the new value
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'pj-one')
+    recordUsageSnapshot(tmpHome, 'pj-one', 10, 50, '/w/alpha')
+    recordUsageSnapshot(tmpHome, 'pj-one', 25, 52, '/w/alpha')
+    recordUsageSnapshot(tmpHome, 'pj-one', 30, 53, '/w/beta')
+    recordUsageSnapshot(tmpHome, 'pj-one', 4, 54, '/w/beta')
+    recordUsageSnapshot(tmpHome, 'pj-one', 90, 55) // another profile's fetch: no project
+    const totals = Object.fromEntries(Object.entries(loadProjectUsage(tmpHome)).map(([d, v]) => [d, Object.values(v)[0]]))
+    assert.deepEqual(totals, { '/w/alpha': 15, '/w/beta': 9 })
+    assert.match(formatProjectUsage(tmpHome, 7, 'vi'), /alpha\s+15%.*\n.*beta\s+9%/)
+
+    // 7-day budget: 10% left over 10h is 1%/h; the readings above climbed 5% in moments, too short to give a pace
+    const cacheFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json')
+    writeFreshCache(cacheFile, { 'pj-one|a@example.com': { limits: [['7 ngày', 90, '', new Date(now + 10 * H + 60000).toISOString()]] } })
+    const pace = weeklyPace(tmpHome, 'pj-one')
+    assert.equal(Math.round(pace.budget * 100) / 100, 1)
+    assert.equal(pace.rate, null)
+    const fast = weeklyPace(tmpHome, 'pj-one', undefined, { 'pj-one': [at(2, 0, 80), at(0, 0, 90)] })
+    assert.equal(Math.round(fast.rate), 5)
+  })
+
+  test('status line names profiles whose full window has reset since', () => {
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'rc-two')
+    login(tmpHome, 'c', 'tok-c')
+    saveProfile(tmpHome, 'rc-three')
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'rc-one') // current
+    const cacheFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json')
+    const past = new Date(Date.now() - 60000).toISOString()
+    writeFreshCache(cacheFile, {
+      'rc-one|a@example.com': { limits: [['5 giờ', 99, '', past]] }, // the current one is not "recovered"
+      'rc-two|b@example.com': { limits: [['5 giờ', 97, '', past]] },
+      'rc-three|c@example.com': { limits: [['5 giờ', 97, '', past]], note: 'token đã hết hạn' },
+    })
+    assert.deepEqual(statusLineData(tmpHome).recovered, ['rc-two'])
+  })
+
+  test('repair renews an expired profile in an isolated session, and says what a missing token needs', async () => {
+    const profilesDirPath = path.join(tmpHome, '.config', 'claude-cli-profiles')
+    const creds = (token, expiresAt, refreshToken) => JSON.stringify({ claudeAiOauth: { accessToken: token, expiresAt, refreshToken } })
+    login(tmpHome, 'x', 'tok-x')
+    saveProfile(tmpHome, 'rp-old')
+    login(tmpHome, 'y', 'tok-y')
+    saveProfile(tmpHome, 'rp-gone')
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'rp-cur') // current
+    const setCreds = (name, c) => {
+      const f = path.join(profilesDirPath, `${name}.json`)
+      fs.writeFileSync(f, JSON.stringify({ ...JSON.parse(fs.readFileSync(f, 'utf-8')), credentials: c }))
+    }
+    setCreds('rp-old', creds('tok-x', Date.now() - 1000, 'r-x'))
+    setCreds('rp-gone', '{}')
+    assert.deepEqual(brokenProfiles(tmpHome).sort(), ['rp-gone', 'rp-old'])
+
+    const runs = []
+    // stands in for `claude -p`: Claude Code refreshes the session's token before its request
+    const fakeClaude = (bin, args, opts) => {
+      runs.push([bin, ...args])
+      fs.writeFileSync(path.join(opts.env.CLAUDE_CONFIG_DIR, '.credentials.json'), creds('tok-x2', Date.now() + 3600000, 'r-x2'))
+      return { status: 0, stdout: 'ok' }
+    }
+    assert.equal((await repairProfile(tmpHome, 'rp-old', fakeClaude)).state, 'repaired')
+    assert.equal(runs[0][0], 'claude')
+    const saved = JSON.parse(JSON.parse(fs.readFileSync(path.join(profilesDirPath, 'rp-old.json'), 'utf-8')).credentials)
+    assert.equal(saved.claudeAiOauth.accessToken, 'tok-x2')
+    assert.equal((await repairProfile(tmpHome, 'rp-gone', fakeClaude)).state, 'no_token')
+    assert.equal((await repairProfile(tmpHome, 'rp-cur', fakeClaude)).state, 'current')
+    assert.equal(runs.length, 1) // only the expired one ran claude
+
+    // a renewed token left in the session dir (a run killed before its sync-back) is taken back without a request
+    setCreds('rp-old', creds('tok-x', Date.now() - 1000, 'r-x'))
+    assert.equal((await repairProfile(tmpHome, 'rp-old', () => assert.fail('no request needed'))).state, 'repaired')
+
+    setCreds('rp-old', creds('tok-x', Date.now() - 1000, 'r-x'))
+    fs.rmSync(path.join(profilesDirPath, '.sessions'), { recursive: true, force: true })
+    const stillOld = await repairProfile(tmpHome, 'rp-old', () => ({ status: 1, stderr: 'network down\nmore' }))
+    assert.deepEqual([stillOld.state, stillOld.detail], ['failed', 'network down'])
+    // a refresh that fails and leaves the session without a token must not wipe the profile's refresh token
+    fs.rmSync(path.join(profilesDirPath, '.sessions'), { recursive: true, force: true })
+    const wiped = await repairProfile(tmpHome, 'rp-old', (bin, args, opts) => {
+      fs.writeFileSync(path.join(opts.env.CLAUDE_CONFIG_DIR, '.credentials.json'), '{}')
+      return { status: 1, stderr: '401' }
+    })
+    assert.equal(wiped.state, 'failed')
+    const kept = JSON.parse(JSON.parse(fs.readFileSync(path.join(profilesDirPath, 'rp-old.json'), 'utf-8')).credentials)
+    assert.deepEqual([kept.claudeAiOauth.accessToken, kept.claudeAiOauth.refreshToken], ['tok-x', 'r-x'])
+  })
+
+  test('stats --json carries swap counts and project usage', async () => {
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'js-one')
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'js-two')
+    swapProfile(tmpHome, 'js-one')
+    recordUsageSnapshot(tmpHome, 'js-one', 10, null, '/w/p')
+    recordUsageSnapshot(tmpHome, 'js-one', 12, null, '/w/p')
+    const logs = []
+    const orig = console.log
+    console.log = m => logs.push(m)
+    try {
+      assert.equal(await runCli(['stats', '--json'], tmpHome), 0)
+    } finally {
+      console.log = orig
+    }
+    const out = JSON.parse(logs.join('\n'))
+    assert.equal(out.swaps.total, swapStats(tmpHome).total)
+    assert.equal(out.swaps.byProfile['js-one'], 1)
+    assert.deepEqual(out.projects, [{ dir: '/w/p', pct: 2 }])
+  })
+
+  test('quota alerts go to the webhook once per window', async () => {
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'al-two')
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'al-one') // current
+    const past = new Date(Date.now() - 60000).toISOString()
+    const later = new Date(Date.now() + 10 * 3600000).toISOString()
+    const cache = {
+      'al-one|a@example.com': { at: Date.now() / 1000, limits: [['7 ngày', 93, '', later]] },
+      'al-two|b@example.com': { at: Date.now() / 1000, limits: [['5 giờ', 99, '', past]] },
+    }
+    recordUsageSnapshot(tmpHome, 'al-one', 0, 85)
+    const history = JSON.parse(fs.readFileSync(usageHistoryFile(tmpHome), 'utf-8'))
+    history['al-one'][0].timestamp = Date.now() - 2 * 3600000 // 85% → 93% in 2h: 4%/h against 0.7%/h left
+    fs.writeFileSync(usageHistoryFile(tmpHome), JSON.stringify(history))
+    recordUsageSnapshot(tmpHome, 'al-one', 0, 93)
+    saveWebhookConfig(tmpHome, { generic: 'https://hooks.example.test/x' })
+
+    const posted = []
+    const origFetch = globalThis.fetch
+    const origEnv = [process.env.NODE_ENV, process.env.CLAUDE_SWAP_SILENT]
+    globalThis.fetch = async (url, init) => (posted.push(JSON.parse(init.body)), { status: 200 })
+    process.env.NODE_ENV = ''
+    process.env.CLAUDE_SWAP_SILENT = ''
+    try {
+      sendQuotaAlerts(tmpHome, cache)
+      sendQuotaAlerts(tmpHome, cache) // same windows: nothing new
+      await flushWebhooks()
+    } finally {
+      globalThis.fetch = origFetch
+      ;[process.env.NODE_ENV, process.env.CLAUDE_SWAP_SILENT] = origEnv
+    }
+    // the weekly report rides along unless the test runs on a Monday before 08:00
+    assert.deepEqual(posted.map(p => p.event).filter(e => e !== 'weekly_report').sort(), ['quota_pace', 'quota_recovered'])
+    assert.ok(posted.filter(p => p.event === 'weekly_report').length <= 1)
+    assert.match(posted.find(p => p.event === 'quota_recovered').text, /al-two đã hồi quota/)
+  })
+
+  test('help <keyword> keeps only the matching commands under their titles', () => {
+    const out = formatHelpReport(false, 'vi', 'schedule')
+    assert.match(out, /\/profile schedule <giờ> <p>/)
+    assert.doesNotMatch(out, /\/profile list /)
+    assert.match(formatHelpReport(false, 'vi', 'zzz-nothing'), /Không có lệnh nào khớp/)
+  })
+
+  test('schedule swaps once when a window starts, overnight windows included', () => {
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'sc-night')
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'sc-day') // current
+    assert.throws(() => addScheduleRule(tmpHome, '9-18', 'sc-day'), /Khung giờ không hợp lệ/)
+    addScheduleRule(tmpHome, '22:00-06:00', 'sc-night')
+    const at = (h, m = 0, day = 10) => new Date(2026, 9, day, h, m)
+    assert.equal(activeScheduleRule(loadSchedule(tmpHome).rules, at(12)), null)
+    // 02:00 on the 11th is the tail of the window that started on the 10th
+    assert.equal(activeScheduleRule(loadSchedule(tmpHome).rules, at(2, 0, 11)).key, '2026-10-10|0')
+    const config = { threshold: 95, safeguardThreshold: 85 }
+    assert.deepEqual(checkSchedule(tmpHome, config, {}, at(22, 30)), { from: 'sc-day', to: 'sc-night' })
+    swapProfile(tmpHome, 'sc-day') // a manual swap inside the window is left alone
+    assert.equal(checkSchedule(tmpHome, config, {}, at(23)), null)
+    assert.equal(currentProfile(tmpHome), 'sc-day')
+    renameProfile(tmpHome, 'sc-night', 'sc-late')
+    assert.equal(loadSchedule(tmpHome).rules[0].profile, 'sc-late')
+    removeScheduleRule(tmpHome, 'all')
+    assert.equal(loadSchedule(tmpHome).rules.length, 0)
+  })
+
+  test('status line names a model whose own 7-day limit runs out, with the profile that has most of it', () => {
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'md-two')
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'md-one') // current
+    writeFreshCache(path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json'), {
+      'md-one|a@example.com': { limits: [['5 giờ', 10, ''], ['7 ngày Fable', 88, '']] },
+      'md-two|b@example.com': { limits: [['7 ngày Fable', 12, '']] },
+    })
+    assert.equal(statusLineData(tmpHome).models, 'Fable 7d 88% → md-two 12%')
+  })
+
+  test('auto repair starts a background repair at most every 6h, only for an expired token', () => {
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'ar-old')
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'ar-cur')
+    const f = path.join(tmpHome, '.config', 'claude-cli-profiles', 'ar-old.json')
+    fs.writeFileSync(f, JSON.stringify({ ...JSON.parse(fs.readFileSync(f, 'utf-8')), credentials: JSON.stringify({ claudeAiOauth: { accessToken: 'x', expiresAt: Date.now() - 1, refreshToken: 'r' } }) }))
+    const spawned = []
+    const spawn = (cmd, args) => spawned.push(args[1])
+    assert.equal(maybeAutoRepair(tmpHome, spawn), false) // off by default
+    setAutoRepair(tmpHome, true)
+    assert.equal(maybeAutoRepair(tmpHome, spawn), true)
+    assert.equal(maybeAutoRepair(tmpHome, spawn), false) // ran just now
+    assert.deepEqual(spawned, ['repair'])
+  })
+
+  test('weekly report sums up quota, projects and swaps', () => {
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'wr-one')
+    writeFreshCache(path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json'), {
+      'wr-one|a@example.com': { limits: [['5 giờ', 30, ''], ['7 ngày', 60, '']] },
+    })
+    recordUsageSnapshot(tmpHome, 'wr-one', 10, null, '/w/app')
+    recordUsageSnapshot(tmpHome, 'wr-one', 15, null, '/w/app')
+    const text = weeklyReport(tmpHome)
+    assert.match(text, /wr-one: 5h 30% · 7d 60%/)
+    assert.match(text, /app 5%/)
+    assert.match(text, /Chuyển profile 7 ngày qua: \d+ lần/)
+  })
+
+  test('settings lists every option and writes each through its own validation', () => {
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'st-main')
+    const get = key => settingsList(tmpHome).find(r => r.key === key)
+    assert.equal(get('auto.threshold').value, 95)
+    assert.deepEqual(get('auto.primary').choices, ['', 'st-main'])
+    setSetting(tmpHome, 'auto.threshold', '88')
+    setSetting(tmpHome, 'auto.enabled', 'off')
+    setSetting(tmpHome, 'auto.primary', 'st-main')
+    setSetting(tmpHome, 'statusline', 'off')
+    setSetting(tmpHome, 'balance', 'round-robin')
+    assert.deepEqual(
+      ['auto.threshold', 'auto.enabled', 'auto.primary', 'statusline', 'balance'].map(k => get(k).value),
+      [88, false, 'st-main', 'off', 'round-robin']
+    )
+    assert.equal(loadAutoSwitchConfig(tmpHome).threshold, 88)
+    assert.throws(() => setSetting(tmpHome, 'auto.threshold', '500'), /từ 1 đến 100/)
+    assert.throws(() => setSetting(tmpHome, 'auto.primary', 'ghost'), /không tồn tại/)
+    assert.throws(() => setSetting(tmpHome, 'nope', '1'), /Không có cài đặt/)
+  })
+
+  test('forecast reads a burst after an idle stretch at its real pace, not averaged over the idle hours', () => {
+    const now = Date.now()
+    const idle = Array.from({ length: 72 }, (_, i) => ({ timestamp: now - (72 - i) * 3600000 - 600000, util5h: 0, util7d: 0 }))
+    const history = { burst: [...idle, { timestamp: now - 600000, util5h: 0 }, { timestamp: now - 300000, util5h: 10 }, { timestamp: now, util5h: 40 }] }
+    const f = calculateForecast(tmpHome, 'burst', 95, history)
+    assert.equal(f.trend, 'increasing')
+    assert.ok(f.burnRatePerHour > 100, `burn rate ${f.burnRatePerHour}`)
+  })
+
+  test('auto check refreshes the current quota even with auto-switch off, so the status line is not stale', async () => {
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'off-one')
+    const fetched = []
+    const res = await autoCheckAndSwap(tmpHome, {
+      config: { enabled: false },
+      fetchFn: async token => (fetched.push(token), { five_hour: { utilization: 42, resets_at: new Date(Date.now() + 3600000).toISOString() } }),
+    })
+    assert.equal(res.reason, 'disabled')
+    assert.deepEqual(fetched, ['tok-a'])
+    assert.equal(statusLineData(tmpHome).windows[0].pct, 42)
   })
 
   test('upgrade refreshes the marketplace, then updates the plugin, and stops on failure', () => {

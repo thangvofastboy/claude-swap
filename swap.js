@@ -530,32 +530,31 @@ export function formatSwapHistory(home, limit = 10) {
   return lines.join('\n')
 }
 
+// swap counts by kind, and how often each profile was swapped to (`stats --json` prints this)
+export function swapStats(home) {
+  const stats = { total: 0, manual: 0, auto: 0, project: 0, byProfile: {} }
+  for (const item of loadSwapHistory(home)) {
+    stats.total++
+    stats[item.type === 'auto' || item.type === 'project' ? item.type : 'manual']++
+    if (item.to) stats.byProfile[item.to] = (stats.byProfile[item.to] || 0) + 1
+  }
+  return stats
+}
+
 export function formatSwapStats(home) {
-  const list = loadSwapHistory(home)
-  if (list.length === 0) {
+  const stats = swapStats(home)
+  if (stats.total === 0) {
     return 'Chưa có dữ liệu thống kê chuyển profile.'
   }
-  let manual = 0
-  let auto = 0
-  let project = 0
-  const toCounts = {}
-  for (const item of list) {
-    if (item.type === 'auto') auto++
-    else if (item.type === 'project') project++
-    else manual++
-    if (item.to) {
-      toCounts[item.to] = (toCounts[item.to] || 0) + 1
-    }
-  }
-  const sortedProfiles = Object.entries(toCounts).sort((a, b) => b[1] - a[1])
+  const sortedProfiles = Object.entries(stats.byProfile).sort((a, b) => b[1] - a[1])
   const topStr = sortedProfiles.map(([name, count]) => `${name} (${count})`).join(', ')
 
   return [
     '📊 Thống kê chuyển đổi profile:',
-    `- Tổng số lần chuyển: ${list.length}`,
-    `- Thủ công (manual): ${manual}`,
-    `- Tự động (auto): ${auto}`,
-    `- Theo dự án (project): ${project}`,
+    `- Tổng số lần chuyển: ${stats.total}`,
+    `- Thủ công (manual): ${stats.manual}`,
+    `- Tự động (auto): ${stats.auto}`,
+    `- Theo dự án (project): ${stats.project}`,
     `- Profile được chuyển đến nhiều nhất: ${topStr || '(chưa có)'}`,
   ].join('\n')
 }
@@ -629,6 +628,7 @@ export function renameProfile(home, oldName, newName) {
     Object.fromEntries(Object.entries(b).map(([k, v]) => [k, Array.isArray(v) ? v.map(x => ({ ...x, profile: swap(x.profile) })) : v]))
   )
   editStateFile(state('.disabled.json'), l => (Array.isArray(l) ? l.map(swap) : l))
+  editStateFile(state('.schedule.json'), sc => ({ ...sc, rules: (sc.rules || []).map(r => ({ ...r, profile: swap(r.profile) })) }))
   editStateFile(state('.auto-switch.json'), c => ({
     ...c,
     ...(Array.isArray(c.order) ? { order: c.order.map(swap) } : {}),
@@ -936,12 +936,14 @@ export async function profileUsage(
   }
 
   row.email = profileEmail(home, name)
-  if (!token) {
-    return { ...row, note: 'không có token OAuth (API key không có quota gói)' }
-  }
-
   const key = `${name}|${row.email}`
   const hit = cache[key] && typeof cache[key] === 'object' ? cache[key] : {}
+  if (!token) {
+    const note = 'không có token OAuth (API key không có quota gói)'
+    cache[key] = { ...hit, note } // replaces an older note, which `list` would otherwise keep showing
+    return { ...row, note }
+  }
+
   const cached = Array.isArray(hit.limits) ? hit.limits : []
   const now = Date.now() / 1000
 
@@ -965,7 +967,7 @@ export async function profileUsage(
     cache[key] = { limits, at: now }
     if (limits.length) {
       const entry = { limits }
-      recordUsageSnapshot(home, name, limitPct(entry, LABEL_5H), limitPct(entry, LABEL_7D))
+      recordUsageSnapshot(home, name, limitPct(entry, LABEL_5H), limitPct(entry, LABEL_7D), active ? process.cwd() : null)
     }
     return { ...row, limits, note: limits.length ? '' : 'không có dữ liệu quota' }
   } catch (err) {
@@ -1097,7 +1099,7 @@ export function profileListReport(home, color = null, lang = null) {
 
   const rows = profiles.map(n => {
     const email = maskEmail(profileEmail(home, n), masking) || ''
-    const hit = cache[`${n}|${email}`] && typeof cache[`${n}|${email}`] === 'object' ? cache[`${n}|${email}`] : {}
+    const hit = cacheHit(home, cache, n)
     const limits = Array.isArray(hit.limits) ? hit.limits : []
     const at = cell(hit)
     const resetCell = label => (resetIn(hit, findLimit(hit, label)) || '—').padEnd(RESET_W)
@@ -1110,6 +1112,8 @@ export function profileListReport(home, color = null, lang = null) {
     const tags = getProfileTags(home, n)
     if (tags.length) badges.push(paint('36', `🏷️ ${tags.join(', ')}`))
     if (disabledList.includes(n)) badges.push(paint('1;33', '(disabled)'))
+    // the numbers above are from before this failure (an expired token keeps the last good limits)
+    if (limits.length && hit.note) badges.push(paint('1;33', `⚠ ${shortNote(hit.note)}`))
     return { n, email, quota, badges, active: n === cur }
   })
 
@@ -1125,12 +1129,30 @@ export function profileListReport(home, color = null, lang = null) {
   return [head, rule, ...lines].join('\n')
 }
 
+const SPARK = '▁▂▃▄▅▆▇█'
+
+// percentages (0–100) as one block character each: the recorded 5h usage at a glance
+export function sparkline(values) {
+  return values.map(v => SPARK[Math.min(SPARK.length - 1, Math.floor((Math.max(0, Math.min(Number(v) || 0, 100)) / 100) * SPARK.length))]).join('')
+}
+
+// the highest reading of `field` in each of the last `count` slots of `slotMs`, oldest first; '·' where none was taken
+export function slotSparkline(entries, field, slotMs, count, now = Date.now()) {
+  const slots = Array(count).fill(null)
+  for (const e of entries) {
+    const i = count - 1 - Math.floor((now - e.timestamp) / slotMs)
+    if (i >= 0 && i < count && Number.isFinite(e[field])) slots[i] = Math.max(slots[i] ?? 0, e[field])
+  }
+  return slots.map(v => (v === null ? '·' : sparkline([v]))).join('')
+}
+
 export async function usageReport(home, fetchFn = fetchUsage, force = false, color = false, lang = null) {
   const currentLang = lang || loadLanguage(home)
   const rows = await usageRows(home, fetchFn, force)
   if (rows.length === 0) {
     return currentLang === 'en' ? 'No profiles found.' : 'Chưa có profile nào.'
   }
+  const history = loadUsageHistory(home)
   const lines = []
   for (const r of rows) {
     const { name, active, email } = r
@@ -1166,6 +1188,17 @@ export async function usageReport(home, fetchFn = fetchUsage, force = false, col
     if (r.note) {
       const noteStr = color ? `  \x1b[1;33m⚠ ${r.note}\x1b[0m` : `  ${r.note}`
       lines.push(noteStr)
+    }
+
+    const past = Array.isArray(history[name]) ? history[name] : []
+    if (past.length >= 2) {
+      const rows = [
+        ['24h', slotSparkline(past, 'util5h', 3600000, 24), currentLang === 'en' ? '5h, hourly' : '5h, theo giờ'],
+        ['7d ', slotSparkline(past, 'util7d', 86400000, 7), currentLang === 'en' ? '7d, daily' : '7d, theo ngày'],
+      ]
+      for (const [span, spark, label] of rows) {
+        lines.push(color ? `  📈 \x1b[1;36m${span}\x1b[0m ${spark}  \x1b[90m(${label})\x1b[0m` : `  📈 ${span} ${spark}  (${label})`)
+      }
     }
   }
   return lines.join('\n')
@@ -1507,8 +1540,76 @@ export function statusLineAnsi(d) {
         (w.left ? ` ${c('36', `⏳${w.left}`)}` : '')
     )
   }
-  if (d.warn) parts.push(c('1;33', d.warn))
+  for (const note of [d.warn, d.pace, d.models, d.stale, d.suggest]) if (note) parts.push(c('1;33', note))
   return parts.join(sep)
+}
+
+// a status-line minute count past which cached quota is called stale (the hook refetches every USAGE_TTL)
+const STALE_STATUS_MIN = 2 * (USAGE_TTL / 60)
+
+// "lỗi HTTP 401 (token hết hạn…)" → "lỗi HTTP 401": a cache note short enough for the status line or a list badge
+export function shortNote(note) {
+  return String(note).split(/\s*[:(—]/)[0].trim()
+}
+
+// Why the numbers may be wrong: the last fetch failed (the cache keeps the old limits next to its note), or no
+// fetch has run for a while. '' when they are current.
+function staleNote(hit, lang) {
+  if (!Array.isArray(hit.limits) || !hit.limits.length) return '' // no numbers shown (an API key, never fetched)
+  if (hit.note) return `⚠ ${shortNote(hit.note)}`
+  const min = Math.floor((Date.now() / 1000 - hit.at) / 60)
+  return min > STALE_STATUS_MIN ? `⚠ ${lang === 'en' ? 'stale' : 'cũ'} ${shortDuration(min * 60000)}` : ''
+}
+
+// Other profiles whose window was at or past WARN_PCT and has reset since: usable again. Read from the cache alone
+// (a reset time in the past says enough), so no fetch is needed.
+export function recoveredProfiles(home, cache, cur) {
+  const disabled = loadDisabledProfiles(home)
+  return listProfiles(home).filter(n => {
+    if (n === cur || disabled.includes(n)) return false
+    const hit = cacheHit(home, cache, n)
+    if (hit.note) return false // its last refresh failed (expired token...): those numbers will not move
+    return [LABEL_5H, LABEL_7D].some(label => {
+      const lim = findLimit(hit, label)
+      return lim && limitPct(hit, label) >= WARN_PCT && parseResetTime(hit, lim) <= Date.now()
+    })
+  })
+}
+
+// A model's own 7-day limit (Fable, Opus…) at or past WARN_PCT, with the working profile that has the most of it left:
+// "Fable 7d 85% → minhvong 13%". '' when no model limit is hot.
+function modelNote(home, cache, hit, cur) {
+  const hot = (Array.isArray(hit.limits) ? hit.limits : []).filter(l => String(l[0]).startsWith(`${LABEL_7D} `) && Number(l[1]) >= WARN_PCT)
+  if (!hot.length) return ''
+  const disabled = loadDisabledProfiles(home)
+  const others = listProfiles(home).filter(n => n !== cur && !disabled.includes(n) && loginState(home, n) === 'ok')
+  return hot
+    .map(l => {
+      const model = l[0].slice(LABEL_7D.length + 1)
+      const best = others
+        .filter(n => findLimit(cacheHit(home, cache, n), l[0]))
+        .map(n => [n, limitPct(cacheHit(home, cache, n), l[0])])
+        .sort((a, b) => a[1] - b[1])[0]
+      return `${model} 7d ${Math.round(Number(l[1]))}%${best && best[1] < WARN_PCT ? ` → ${best[0]} ${Math.round(best[1])}%` : ''}`
+    })
+    .join(' · ')
+}
+
+// the fullest window at or past WARN_PCT, or undefined
+export function hotWindow(windows) {
+  return windows.filter(w => w.pct >= WARN_PCT).sort((a, b) => b.pct - a.pct)[0]
+}
+
+// With auto-switch off nothing moves you off a profile that is running out: name the one auto-switch would pick.
+// Only looked up for a hot window, since findNextProfile reads every profile file.
+function suggestNext(home, cache, windows) {
+  const hot = hotWindow(windows)
+  const config = hot && loadAutoSwitchConfig(home)
+  if (!hot || config.enabled) return null
+  const next = findNextProfile(home, { cache, config })
+  if (!next) return null
+  const pct = Math.round(limitPct(cacheHit(home, cache, next), hot.name === '5h' ? LABEL_5H : LABEL_7D))
+  return { next, text: `→ ${next} ${hot.name} ${pct}%` }
 }
 
 // Everything the in-session status line shows, as data: the hook draws it in colour, `statusline text` flattens it.
@@ -1516,7 +1617,8 @@ export function statusLineAnsi(d) {
 export function statusLineData(home) {
   const cur = currentProfile(home)
   if (!cur || !isStatuslineEnabled(home)) return null
-  const hit = cacheHit(home, loadUsageCache(home), cur)
+  const cache = loadUsageCache(home)
+  const hit = cacheHit(home, cache, cur)
   const windows = []
   if (!isRateLimited(hit)) {
     for (const [label, name] of [[LABEL_5H, '5h'], [LABEL_7D, '7d']]) {
@@ -1529,7 +1631,21 @@ export function statusLineData(home) {
       })
     }
   }
-  const data = { profile: cur, rateLimited: isRateLimited(hit), windows, warn: forecastWarning(home), mode: statuslineMode(home) }
+  const suggestion = suggestNext(home, cache, windows)
+  const hot7d = windows.find(w => w.name === '7d' && w.pct >= WARN_PCT)
+  const data = {
+    profile: cur,
+    rateLimited: isRateLimited(hit),
+    windows,
+    warn: forecastWarning(home),
+    stale: staleNote(hit, loadLanguage(home)),
+    suggest: suggestion?.text || '',
+    next: suggestion?.next || '',
+    pace: hot7d ? paceNote(weeklyPace(home, cur, cache)) : '',
+    recovered: recoveredProfiles(home, cache, cur),
+    models: isRateLimited(hit) ? '' : modelNote(home, cache, hit, cur),
+    mode: statuslineMode(home),
+  }
   return { ...data, text: statusLineText(home, data), ansi: statusLineAnsi(data) }
 }
 
@@ -1542,7 +1658,7 @@ export function statusLineText(home, data = null) {
   for (const w of d.windows) {
     parts.push(`${w.name} ${chartBar(w.pct, 8)} ${w.pct}%${w.pct >= WARN_PCT ? '🔥' : ''}${w.left ? ` ⏳${w.left}` : ''}`)
   }
-  if (d.warn) parts.push(d.warn)
+  for (const note of [d.warn, d.pace, d.models, d.stale, d.suggest]) if (note) parts.push(note)
   return parts.join(' │ ')
 }
 
@@ -1782,6 +1898,96 @@ function isExhausted(hit, config) {
   )
 }
 
+export function scheduleFile(home) {
+  return path.join(profilesDir(home), '.schedule.json')
+}
+
+// { rules: [{ from: 'HH:MM', to: 'HH:MM', profile }], applied: '<day>|<index>' of the last window acted on }
+export function loadSchedule(home) {
+  try {
+    const d = JSON.parse(fs.readFileSync(scheduleFile(home), 'utf-8'))
+    return { rules: Array.isArray(d.rules) ? d.rules : [], applied: d.applied || '' }
+  } catch {
+    return { rules: [], applied: '' }
+  }
+}
+
+const HHMM = /^([01]?\d|2[0-3]):([0-5]\d)$/
+const minutesOf = hhmm => {
+  const [, h, m] = hhmm.match(HHMM)
+  return Number(h) * 60 + Number(m)
+}
+
+export function addScheduleRule(home, range, name) {
+  const [from, to] = String(range || '').split('-')
+  if (!HHMM.test(from || '') || !HHMM.test(to || '') || from === to) {
+    throw new SwapError('Khung giờ không hợp lệ. Dùng: HH:MM-HH:MM (vd: 09:00-18:00, 22:00-06:00)')
+  }
+  const profile = resolveProfileOrAlias(home, name)
+  if (!profileExists(home, profile)) throw new SwapError(`Profile '${name}' không tồn tại.`)
+  const sched = loadSchedule(home)
+  sched.rules.push({ from, to, profile })
+  atomicWrite(scheduleFile(home), JSON.stringify(sched, null, 2))
+  return sched.rules
+}
+
+export function removeScheduleRule(home, which) {
+  const sched = loadSchedule(home)
+  if (which === 'all') sched.rules = []
+  else {
+    const i = Number(which) - 1
+    if (!Number.isInteger(i) || i < 0 || i >= sched.rules.length) throw new SwapError(`Không có lịch số ${which}. Xem: /profile schedule`)
+    sched.rules.splice(i, 1)
+  }
+  atomicWrite(scheduleFile(home), JSON.stringify(sched, null, 2))
+  return sched.rules
+}
+
+// The rule whose window holds `now` (the first one listed wins), with a key naming that one window: the day it
+// started (yesterday for the tail of an overnight window) and the rule's index.
+export function activeScheduleRule(rules, now = new Date()) {
+  const m = now.getHours() * 60 + now.getMinutes()
+  for (const [i, r] of rules.entries()) {
+    if (!HHMM.test(r.from || '') || !HHMM.test(r.to || '')) continue
+    const from = minutesOf(r.from)
+    const to = minutesOf(r.to)
+    const inside = from < to ? m >= from && m < to : m >= from || m < to
+    if (!inside) continue
+    const started = from > to && m < to ? now.getTime() - 86400000 : now.getTime()
+    return { rule: r, key: `${localDay(started)}|${i}` }
+  }
+  return null
+}
+
+// Swaps once on entering a scheduled window, so a manual swap inside it is not undone on the next prompt.
+// An exhausted or missing scheduled profile is skipped for that window.
+export function checkSchedule(home, config = loadAutoSwitchConfig(home), cache = loadUsageCache(home), now = new Date()) {
+  const sched = loadSchedule(home)
+  const active = activeScheduleRule(sched.rules, now)
+  if (!active || sched.applied === active.key) return null
+  atomicWrite(scheduleFile(home), JSON.stringify({ ...sched, applied: active.key }, null, 2))
+  const cur = currentProfile(home)
+  const target = active.rule.profile
+  const hit = cacheHit(home, cache, target)
+  if (target === cur || !profileExists(home, target) || isRateLimited(hit) || isExhausted(hit, config)) return null
+  swapProfile(home, target, { type: 'auto', reason: `Lịch ${active.rule.from}-${active.rule.to}` })
+  return { from: cur, to: target }
+}
+
+export function formatSchedule(home, lang = 'vi') {
+  const { rules } = loadSchedule(home)
+  if (!rules.length) {
+    return lang === 'en'
+      ? '🗓️ No schedule. Add one: /profile schedule 09:00-18:00 <profile>'
+      : '🗓️ Chưa có lịch. Thêm: /profile schedule 09:00-18:00 <profile>'
+  }
+  const active = activeScheduleRule(rules)
+  return [
+    lang === 'en' ? '🗓️ Profile schedule (swaps once when a window starts):' : '🗓️ Lịch đổi profile (đổi một lần khi tới giờ):',
+    ...rules.map((r, i) => `  ${i + 1}. ${r.from}-${r.to}  ➜ '${r.profile}'${active?.rule === r ? (lang === 'en' ? '  ← now' : '  ← đang tới giờ') : ''}`),
+  ].join('\n')
+}
+
 export async function autoCheckAndSwap(home, options = {}) {
   // Check if temp profile expired
   const tempRes = checkTempExpiry(home)
@@ -1795,17 +2001,11 @@ export async function autoCheckAndSwap(home, options = {}) {
   }
 
   const config = options.config || loadAutoSwitchConfig(home)
-  if (!config.enabled) {
-    return { swapped: false, reason: 'disabled' }
-  }
-
   const cur = currentProfile(home)
-  if (!cur) {
-    return { swapped: false, reason: 'no_current' }
-  }
 
   // Refresh quota (cached for USAGE_TTL) so a decision is not made on stale numbers, but only for the profiles
   // that decision looks at: the current one first, the others only once a branch/primary/swap check needs them.
+  // The current one is refreshed even with auto-switch off: the status line printed after the check reads it.
   let cache = options.cache || loadUsageCache(home)
   const refresh = async names => {
     if (options.cache) return
@@ -1814,7 +2014,19 @@ export async function autoCheckAndSwap(home, options = {}) {
     } catch {}
     cache = loadUsageCache(home)
   }
-  await refresh([cur])
+  if (cur) await refresh([cur])
+
+  if (!options.cache) {
+    const scheduled = checkSchedule(home, config, cache)
+    if (scheduled) return { swapped: true, ...scheduled, isSchedule: true }
+  }
+
+  if (!config.enabled) {
+    return { swapped: false, reason: 'disabled' }
+  }
+  if (!cur) {
+    return { swapped: false, reason: 'no_current' }
+  }
 
   // Check branch binding; skip an exhausted bound profile, or we would swap back and forth every prompt
   const branchBound = getBoundBranchProfile(home, process.cwd())
@@ -2312,22 +2524,90 @@ export function loadUsageHistory(home) {
   }
 }
 
-export function recordUsageSnapshot(home, profileName, util5h, util7d = null) {
+// every reading this recent is kept (the forecast reads them); older ones are thinned to the last of each hour
+const HISTORY_RAW_MS = 6 * 3600000
+const HISTORY_KEEP_MS = 7 * 86400000
+
+export function thinHistory(entries, now = Date.now()) {
+  const out = []
+  for (const e of entries) {
+    if (e.timestamp < now - HISTORY_KEEP_MS) continue
+    const prev = out[out.length - 1]
+    const sameOldHour = prev && e.timestamp < now - HISTORY_RAW_MS && Math.floor(prev.timestamp / 3600000) === Math.floor(e.timestamp / 3600000)
+    if (sameOldHour) out[out.length - 1] = e
+    else out.push(e)
+  }
+  return out
+}
+
+// `project`: the working directory of the session that fetched, when the profile is the one in use there.
+// The 5h usage gained since the previous reading is put down to it (an estimate: parallel sessions share one account).
+export function recordUsageSnapshot(home, profileName, util5h, util7d = null, project = null) {
   if (!profileName) return
   const f = usageHistoryFile(home)
   const history = loadUsageHistory(home)
   if (!Array.isArray(history[profileName])) {
     history[profileName] = []
   }
+  const prev = history[profileName][history[profileName].length - 1]
+  const now = Number(util5h)
+  if (project && prev && Number.isFinite(prev.util5h)) {
+    addProjectUsage(home, project, now >= prev.util5h ? now - prev.util5h : now) // lower: the window reset in between
+  }
   history[profileName].push({
     timestamp: Date.now(),
-    util5h: Number(util5h),
+    util5h: now,
     util7d: util7d !== null ? Number(util7d) : null,
   })
-  if (history[profileName].length > 50) {
-    history[profileName] = history[profileName].slice(-50)
+  history[profileName] = thinHistory(history[profileName])
+  atomicWrite(f, JSON.stringify(history))
+}
+
+export function projectUsageFile(home) {
+  return path.join(profilesDir(home), '.project-usage.json')
+}
+
+export function loadProjectUsage(home) {
+  try {
+    return JSON.parse(fs.readFileSync(projectUsageFile(home), 'utf-8'))
+  } catch {
+    return {}
   }
-  atomicWrite(f, JSON.stringify(history, null, 2))
+}
+
+const localDay = (t = Date.now()) => new Date(t - new Date(t).getTimezoneOffset() * 60000).toISOString().slice(0, 10)
+
+// { [dir]: { 'YYYY-MM-DD': 5h percentage points } }, days older than 30 dropped
+function addProjectUsage(home, project, pct) {
+  if (!(pct > 0)) return
+  const usage = loadProjectUsage(home)
+  const day = localDay()
+  const oldest = localDay(Date.now() - 30 * 86400000)
+  usage[project] = { ...usage[project], [day]: Math.round(((usage[project]?.[day] || 0) + pct) * 10) / 10 }
+  for (const dir of Object.keys(usage)) {
+    for (const d of Object.keys(usage[dir])) if (d < oldest) delete usage[dir][d]
+    if (!Object.keys(usage[dir]).length) delete usage[dir]
+  }
+  atomicWrite(projectUsageFile(home), JSON.stringify(usage, null, 2))
+}
+
+// [{ dir, pct }] over the last `days` days, largest first
+export function projectUsageTotals(home, days = 7) {
+  const since = localDay(Date.now() - (days - 1) * 86400000)
+  return Object.entries(loadProjectUsage(home))
+    .map(([dir, byDay]) => ({ dir, pct: Math.round(Object.entries(byDay).reduce((sum, [d, v]) => (d >= since ? sum + v : sum), 0) * 10) / 10 }))
+    .filter(p => p.pct > 0)
+    .sort((a, b) => b.pct - a.pct)
+}
+
+export function formatProjectUsage(home, days = 7, lang = 'vi') {
+  const totals = projectUsageTotals(home, days).map(p => [p.dir, p.pct])
+  const title = lang === 'en'
+    ? `📁 Usage by project (last ${days} days, estimated from 5h % gained):`
+    : `📁 Usage theo dự án (${days} ngày qua, ước tính từ % 5h tăng thêm):`
+  if (!totals.length) return `${title}\n- ${lang === 'en' ? '(no data yet)' : '(chưa có dữ liệu)'}`
+  const width = Math.max(...totals.map(([dir]) => path.basename(dir).length))
+  return [title, ...totals.slice(0, 15).map(([dir, total]) => `- ${path.basename(dir).padEnd(width)}  ${String(Math.round(total)).padStart(4)}%  ${dir}`)].join('\n')
 }
 
 // a measurement older than this says nothing about the present (the cache refreshes every 5 minutes while you work)
@@ -2343,10 +2623,13 @@ export function calculateForecast(home, profileName, threshold = 95, history = l
     }
   }
 
-  let start = entries.length - 1
-  while (start > 0 && entries[start - 1].util5h <= entries[start].util5h) start--
-  const first = entries[start]
+  // the rising run that ends at the last reading, at most one 5h window long (history keeps a week of readings),
+  // started at the last reading of a flat stretch so hours of an idle 0% do not dilute a burst
   const last = entries[entries.length - 1]
+  let start = entries.length - 1
+  while (start > 0 && entries[start - 1].util5h <= entries[start].util5h && last.timestamp - entries[start - 1].timestamp <= 5 * 3600000) start--
+  while (start < entries.length - 2 && entries[start + 1].util5h === entries[start].util5h) start++
+  const first = entries[start]
   const deltaMs = last.timestamp - first.timestamp
   const deltaHours = deltaMs / (3600 * 1000)
 
@@ -2408,8 +2691,47 @@ export function formatForecastReport(home, lang = null) {
     } else {
       lines.push(`🟢 ${n}: ${f.message}`)
     }
+    const pace = weeklyPace(home, n)
+    if (pace) {
+      const left = shortDuration(pace.hoursLeft * 3600000)
+      const now = pace.rate === null ? '' : currentLang === 'en' ? `, recent pace ${perHour(pace.rate)}` : `, đang dùng ${perHour(pace.rate)}`
+      lines.push(
+        currentLang === 'en'
+          ? `   📅 7 days: ${Math.round(100 - pace.pct)}% left for ${left} → ≈${perHour(pace.budget)}${now}`
+          : `   📅 7 ngày: còn ${Math.round(100 - pace.pct)}% cho ${left} → ≈${perHour(pace.budget)}${now}`
+      )
+    }
   }
   return lines.join('\n')
+}
+
+// The 7-day quota left per hour until its reset, and the pace of the last 3 hours of readings (null: too few).
+export function weeklyPace(home, name, cache = loadUsageCache(home), history = loadUsageHistory(home)) {
+  const hit = cacheHit(home, cache, name)
+  const lim = findLimit(hit, LABEL_7D)
+  const resetAt = lim ? parseResetTime(hit, lim) : NaN
+  const hoursLeft = (resetAt - Date.now()) / 3600000
+  if (!Number.isFinite(resetAt) || resetAt === Number.MAX_SAFE_INTEGER || hoursLeft <= 0) return null
+  const pct = limitPct(hit, LABEL_7D)
+  const recent = (history[name] || []).filter(e => e.timestamp >= Date.now() - 3 * 3600000 && Number.isFinite(e.util7d))
+  let rate = null
+  if (recent.length >= 2) {
+    const first = recent[0]
+    const last = recent[recent.length - 1]
+    const hours = (last.timestamp - first.timestamp) / 3600000
+    if (hours >= 0.25 && last.util7d >= first.util7d) rate = (last.util7d - first.util7d) / hours
+  }
+  return { pct, hoursLeft, budget: Math.max(0, 100 - pct) / hoursLeft, rate }
+}
+
+const perHour = n => `${n < 10 ? Math.round(n * 10) / 10 : Math.round(n)}%/h`
+
+// "7d ≈0.7%/h", or "⚠ 7d 1.2%/h > 0.7%/h" when the recent pace would run out before the reset
+function paceNote(pace) {
+  if (!pace) return ''
+  return pace.rate !== null && pace.rate > pace.budget
+    ? `⚠ 7d ${perHour(pace.rate)} > ${perHour(pace.budget)}`
+    : `7d ≈${perHour(pace.budget)}`
 }
 
 // short text for the status line when the current profile is about to hit the auto-switch threshold; '' otherwise
@@ -2968,6 +3290,126 @@ export function syncSessionBack(home = os.homedir(), name, sDir) {
   } catch {}
 }
 
+// 'ok', 'expired' (an access token past its expiry that the refresh token can renew) or 'no_token' (needs a new login)
+export function loginState(home, name) {
+  try {
+    const p = JSON.parse(fs.readFileSync(profilePath(home, name), 'utf-8'))
+    if (p.claude_json?.primaryApiKey) return 'ok'
+    const oauth = JSON.parse(p.credentials || '{}').claudeAiOauth || {}
+    if (!oauth.accessToken) return 'no_token'
+    if (typeof oauth.expiresAt === 'number' && oauth.expiresAt <= Date.now()) return oauth.refreshToken ? 'expired' : 'no_token'
+    return 'ok'
+  } catch {
+    return 'no_token'
+  }
+}
+
+// profiles other than the current one (Claude Code renews that one itself) whose saved login no longer works
+export function brokenProfiles(home) {
+  const cur = currentProfile(home)
+  return listProfiles(home).filter(n => n !== cur && loginState(home, n) !== 'ok')
+}
+
+// Renews an expired login without swapping to it. One tiny request in an isolated session (as `run` does) makes
+// Claude Code refresh the token, and syncSessionBack saves it into the profile; `claude auth status` does not refresh.
+// True when a `run`/`repair` session dir holds a token that still works: read where Claude Code writes it,
+// the per-dir Keychain item on macOS, else the file (as syncSessionBack reads it).
+function sessionHasLiveToken(sDir) {
+  try {
+    const raw =
+      (process.platform === 'darwin' && readKeychain(sessionKeychainService(sDir))) ||
+      fs.readFileSync(path.join(sDir, '.credentials.json'), 'utf-8')
+    const oauth = JSON.parse(raw).claudeAiOauth || {}
+    return Boolean(oauth.accessToken) && !(typeof oauth.expiresAt === 'number' && oauth.expiresAt <= Date.now())
+  } catch {
+    return false
+  }
+}
+
+export async function repairProfile(home, name, spawn = spawnClaudeSync) {
+  const resolved = resolveProfileOrAlias(home, name)
+  if (!profileExists(home, resolved)) throw new SwapError(`Profile '${name}' không tồn tại.`)
+  if (resolved === currentProfile(home)) return { name: resolved, state: 'current' }
+  const state = loginState(home, resolved)
+  if (state !== 'expired') return { name: resolved, state }
+  // an earlier run cut short after the refresh (a killed process) left the renewed token in the session dir:
+  // take it back before prepareSession overwrites it with the profile's spent one
+  const prior = sessionDir(home, resolved)
+  if (fs.existsSync(prior) && sessionHasLiveToken(prior)) {
+    syncSessionBack(home, resolved, prior)
+    if (loginState(home, resolved) === 'ok') return { name: resolved, state: 'repaired' }
+  }
+  const sDir = prepareSession(home, resolved)
+  const res = spawn('claude', ['-p', 'Reply with: ok', '--model', 'haiku'], {
+    env: { ...process.env, CLAUDE_CONFIG_DIR: sDir },
+    encoding: 'utf-8',
+    timeout: 120000,
+    cwd: os.tmpdir(),
+  })
+  // copy back only a session that ended with a working token: a failed refresh must not overwrite the profile's
+  // refresh token (a later, manual try may still succeed with it)
+  const renewed = sessionHasLiveToken(sDir)
+  if (renewed) syncSessionBack(home, resolved, sDir)
+  if (!renewed || loginState(home, resolved) !== 'ok') {
+    const detail = String(res?.error?.message || res?.stderr || res?.stdout || '').trim().split('\n')[0].slice(0, 160)
+    return { name: resolved, state: 'failed', detail }
+  }
+  try {
+    await refreshUsage(home, [resolved]) // replaces the "token expired" note with real numbers
+  } catch {}
+  return { name: resolved, state: 'repaired' }
+}
+
+export function repairConfigFile(home) {
+  return path.join(profilesDir(home), '.repair.json')
+}
+
+export function loadRepairConfig(home) {
+  try {
+    return { auto: false, lastRun: 0, ...JSON.parse(fs.readFileSync(repairConfigFile(home), 'utf-8')) }
+  } catch {
+    return { auto: false, lastRun: 0 }
+  }
+}
+
+export function setAutoRepair(home, auto) {
+  atomicWrite(repairConfigFile(home), JSON.stringify({ ...loadRepairConfig(home), auto: Boolean(auto) }))
+}
+
+const AUTO_REPAIR_MS = 6 * 3600000
+
+// From the hook's minute tick, while `repair auto` is on: at most every AUTO_REPAIR_MS, a background `repair` (each
+// `claude -p` takes seconds, too long for the tick) when some profile's token has expired. True when one started.
+export function maybeAutoRepair(home, spawn = spawnDetached) {
+  const cfg = loadRepairConfig(home)
+  if (!cfg.auto || Date.now() - cfg.lastRun < AUTO_REPAIR_MS || isolatedSession(home)) return false
+  atomicWrite(repairConfigFile(home), JSON.stringify({ ...cfg, lastRun: Date.now() }))
+  if (!brokenProfiles(home).some(n => loginState(home, n) === 'expired')) return false
+  spawn(process.execPath, [SCRIPT_PATH, 'repair'])
+  return true
+}
+
+export function formatRepair(r, lang = 'vi') {
+  const n = r.name
+  const en = lang === 'en'
+  switch (r.state) {
+    case 'repaired':
+      return en ? `✅ '${n}': token renewed.` : `✅ '${n}': đã làm mới token.`
+    case 'ok':
+      return en ? `✅ '${n}': login still valid, nothing to do.` : `✅ '${n}': đăng nhập vẫn tốt, không cần sửa.`
+    case 'current':
+      return en ? `ℹ️ '${n}' is in use: Claude Code renews its token itself.` : `ℹ️ '${n}' đang dùng: Claude Code tự làm mới token của nó.`
+    case 'no_token':
+      return en
+        ? `⚠️ '${n}': no token left to renew. Log in again: /profile ${n}, then /login, then /profile save ${n}`
+        : `⚠️ '${n}': không còn token để làm mới. Đăng nhập lại: /profile ${n}, rồi /login, rồi /profile save ${n}`
+    default:
+      return en
+        ? `❌ '${n}': could not renew the token${r.detail ? ` (${r.detail})` : ''}. Try: /profile run ${n}`
+        : `❌ '${n}': chưa làm mới được token${r.detail ? ` (${r.detail})` : ''}. Thử: /profile run ${n}`
+  }
+}
+
 export function runSession(home = os.homedir(), name, cmdArgs = ['claude']) {
   const resolved = resolveProfileOrAlias(home, name)
   const sDir = prepareSession(home, resolved)
@@ -3122,6 +3564,71 @@ export async function sendWebhookNotification(home = os.homedir(), payload) {
     [cfg.generic, payload],
   ].filter(([url]) => url)
   await Promise.allSettled(targets.map(([url, body]) => postHttpJson(url, body)))
+}
+
+// the text of the Monday webhook summary: each profile's quota now, the hungriest projects, last week's swaps
+export function weeklyReport(home, cache = loadUsageCache(home)) {
+  const weekAgo = Date.now() - 7 * 86400000
+  const swaps = loadSwapHistory(home).filter(h => new Date(h.timestamp).getTime() >= weekAgo)
+  const projects = projectUsageTotals(home, 7).slice(0, 5)
+  return [
+    '📊 [claude-swap] Báo cáo tuần',
+    ...listProfiles(home).map(n => {
+      const hit = cacheHit(home, cache, n)
+      return `• ${n}: 5h ${Math.round(limitPct(hit, LABEL_5H))}% · 7d ${Math.round(limitPct(hit, LABEL_7D))}%`
+    }),
+    projects.length ? `Dự án tốn quota nhất: ${projects.map(p => `${path.basename(p.dir)} ${Math.round(p.pct)}%`).join(', ')}` : '',
+    `Chuyển profile 7 ngày qua: ${swaps.length} lần (${swaps.filter(h => h.type === 'auto').length} tự động)`,
+  ].filter(Boolean).join('\n')
+}
+
+export function alertsSentFile(home) {
+  return path.join(profilesDir(home), '.alerts-sent.json')
+}
+
+// Webhook alerts for what the status line cannot tell you while you are away: a 7-day pace that would run out
+// before the reset, and another profile whose full window has reset. Each goes out once per window, keyed by email
+// and reset time (not by profile name, so a rename needs no migration).
+export function sendQuotaAlerts(home, cache = loadUsageCache(home)) {
+  if (silenced() || !Object.values(loadWebhookConfig(home)).some(Boolean)) return
+  const cur = currentProfile(home)
+  const resetKey = (hit, labels) => labels.map(l => findLimit(hit, l)).filter(Boolean).map(l => l[3] || l[2]).join(',')
+  const alerts = []
+  const pace = cur ? weeklyPace(home, cur, cache) : null
+  if (pace && pace.pct >= WARN_PCT && pace.rate !== null && pace.rate > pace.budget) {
+    alerts.push({
+      key: `${profileEmail(home, cur)}|pace|${resetKey(cacheHit(home, cache, cur), [LABEL_7D])}`,
+      event: 'quota_pace',
+      profile: cur,
+      text: `⚠ [claude-swap] ${cur}: 7 ngày đang dùng ${perHour(pace.rate)}, vượt mức ${perHour(pace.budget)} để đủ tới lúc reset (còn ${Math.round(100 - pace.pct)}% cho ${shortDuration(pace.hoursLeft * 3600000)}).`,
+    })
+  }
+  for (const n of recoveredProfiles(home, cache, cur)) {
+    alerts.push({
+      key: `${profileEmail(home, n)}|recovered|${resetKey(cacheHit(home, cache, n), [LABEL_5H, LABEL_7D])}`,
+      event: 'quota_recovered',
+      profile: n,
+      text: `✅ [claude-swap] ${n} đã hồi quota, dùng lại được: /profile ${n}`,
+    })
+  }
+  // Monday 08:00 or later: one summary of the week (keyed by that Monday)
+  const now = new Date()
+  const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - ((now.getDay() + 6) % 7), 8)
+  if (now >= monday) alerts.push({ key: `report|${localDay(monday.getTime())}`, event: 'weekly_report', profile: cur || '', text: () => weeklyReport(home, cache) })
+  let sent = {}
+  try {
+    sent = JSON.parse(fs.readFileSync(alertsSentFile(home), 'utf-8'))
+  } catch {}
+  const fresh = alerts.filter(a => !sent[a.key])
+  if (!fresh.length) return
+  const weekAgo = Date.now() - 8 * 86400000
+  sent = Object.fromEntries(Object.entries(sent).filter(([, t]) => t > weekAgo))
+  for (const a of fresh) {
+    sent[a.key] = Date.now()
+    const text = typeof a.text === 'function' ? a.text() : a.text // the report is built only when it goes out
+    trackWebhook(sendWebhookNotification(home, { event: a.event, profile: a.profile, reason: a.event, text }))
+  }
+  atomicWrite(alertsSentFile(home), JSON.stringify(sent, null, 2))
 }
 
 export async function testWebhook(home = os.homedir(), type = null) {
@@ -3293,7 +3800,7 @@ export function generateCompletion(shell = 'bash') {
     'aliases', 'bind', 'unbind', 'bind-branch', 'unbind-branch', 'branch-bindings',
     'tag', 'untag', 'tags', 'affinity', 'unaffinity', 'affinities', 'temp', 'untemp',
     'statusline', 'prompt', 'notify', 'history', 'undo', 'stats', 'cooldown', 'doctor',
-    'cleanup', 'lang', 'sync', 'forecast', 'pick', 'version',
+    'cleanup', 'lang', 'sync', 'forecast', 'pick', 'version', 'repair', 'schedule', 'unschedule', 'settings',
   ].join(' ')
 
   if (shell === 'zsh') {
@@ -3355,7 +3862,28 @@ export function upgradePlugin(run = spawnClaudeSync) {
 
 // ---------------------------------------------------------------- cli
 
-export function formatHelpReport(color = null, lang = 'vi') {
+// `help <keyword>`: only the commands whose line mentions it, under their section titles
+export function formatHelpReport(color = null, lang = 'vi', keyword = '') {
+  const full = helpText(color, lang)
+  const kw = String(keyword || '').trim().toLowerCase()
+  if (!kw) return full
+  const plain = line => line.replace(/\x1b\[[0-9;]*m/g, '').toLowerCase()
+  const out = []
+  let title = null
+  for (const line of full.split('\n').slice(1)) {
+    if (!line.startsWith('  ')) {
+      title = line.trim() ? line : null
+    } else if (plain(line).includes(kw)) {
+      if (title) out.push(title)
+      title = null
+      out.push(line)
+    }
+  }
+  if (!out.length) return lang === 'en' ? `No command matches '${keyword}'. /profile help lists them all.` : `Không có lệnh nào khớp '${keyword}'. Gõ /profile help để xem tất cả.`
+  return [full.split('\n')[0], '', ...out].join('\n')
+}
+
+function helpText(color, lang) {
   const useColor = shouldColor(color)
   const bold = s => (useColor ? `\x1b[1;36m${s}\x1b[0m` : s)
   const cmd = s => (useColor ? `\x1b[1;33m${s}\x1b[0m` : s)
@@ -3399,6 +3927,12 @@ export function formatHelpReport(color = null, lang = 'vi') {
       `  ${cmd('/profile forecast')}          Burn rate & quota exhaustion forecast`,
       `  ${cmd('/profile cooldown')}          Quota reset countdown timers`,
       `  ${cmd('/profile doctor')}            Diagnostics for accounts, tokens and health`,
+      `  ${cmd('/profile repair [name]')}     Renew a profile's expired token (without swapping)`,
+      `  ${cmd('/profile repair auto on|off')} Renew expired tokens in the background, every 6h`,
+      `  ${cmd('/profile schedule <time> <p>')} Swap on a schedule (e.g. 09:00-18:00 work)`,
+      `  ${cmd('/profile unschedule <n|all>')} Remove a schedule entry`,
+      `  ${cmd('/profile help <keyword>')}    Only the commands mentioning that keyword`,
+      `  ${cmd('/profile settings')}          View & edit every setting in one table`,
       `  ${cmd('/profile cleanup')}           Detect duplicate profiles and dead tokens`,
       '',
       `📁 ${bold('Projects, Git Branches & Tags:')}`,
@@ -3431,7 +3965,7 @@ export function formatHelpReport(color = null, lang = 'vi') {
       `  ${cmd('/profile notify on|off')}     Toggle desktop notifications on profile swap`,
       `  ${cmd('/profile history [n]')}       View recent swap history`,
       `  ${cmd('/profile undo')}              Switch back to the profile before the last swap`,
-      `  ${cmd('/profile stats')}             Statistics on manual vs automatic swaps`,
+      `  ${cmd('/profile stats')}             Swap counts and usage per project (--project)`,
       '',
       `🔐 ${bold('Backup & Remote Sync:')}`,
       `  ${cmd('/profile sync [push|pull]')}  Multi-device encrypted backup sync`,
@@ -3479,6 +4013,12 @@ export function formatHelpReport(color = null, lang = 'vi') {
     `  ${cmd('/profile forecast')}          Dự báo tốc độ tiêu thụ & thời điểm cạn hạn mức`,
     `  ${cmd('/profile cooldown')}          Xem đồng hồ đếm ngược reset quota của các account`,
     `  ${cmd('/profile doctor')}            Quét chẩn đoán sức khỏe, token và lỗi các account`,
+    `  ${cmd('/profile repair [tên]')}      Làm mới token hết hạn của profile (không cần chuyển sang)`,
+    `  ${cmd('/profile repair auto on|off')} Tự làm mới token hết hạn ở nền, 6 giờ một lần`,
+    `  ${cmd('/profile schedule <giờ> <p>')} Đổi profile theo lịch (vd: 09:00-18:00 work)`,
+    `  ${cmd('/profile unschedule <n|all>')} Xóa lịch đổi profile`,
+    `  ${cmd('/profile help <từ khóa>')}    Chỉ hiện các lệnh có từ khóa đó`,
+    `  ${cmd('/profile settings')}          Xem & sửa mọi cài đặt trong một bảng`,
     `  ${cmd('/profile cleanup')}           Quét phát hiện profile trùng lặp, token cũ`,
     '',
     `📁 ${bold('Dự án, Nhánh Git & Thẻ nhãn:')}`,
@@ -3511,13 +4051,95 @@ export function formatHelpReport(color = null, lang = 'vi') {
     `  ${cmd('/profile notify on|off')}     Bật / tắt thông báo desktop khi đổi profile`,
     `  ${cmd('/profile history [n]')}       Xem lịch sử các lần chuyển đổi gần nhất`,
     `  ${cmd('/profile undo')}              Quay lại profile trước lần chuyển gần nhất`,
-    `  ${cmd('/profile stats')}             Thống kê số lần đổi thủ công, tự động`,
+    `  ${cmd('/profile stats')}             Thống kê lần đổi & usage theo dự án (--project)`,
     '',
     `🔐 ${bold('Sao lưu & Đồng bộ (Sync):')}`,
     `  ${cmd('/profile sync [push|pull]')}  Đồng bộ bản sao lưu mã hóa đa thiết bị`,
     `  ${cmd('/profile export <file>')}     Xuất bản sao lưu mã hóa AES-256`,
     `  ${cmd('/profile import-enc <file>')} Khôi phục từ file mã hóa`,
     `  ${cmd('/profile import <folder>')}   Nhập profile từ thư mục cấu hình khác`,
+  ].join('\n')
+}
+
+// ---------------------------------------------------------------- settings: every option in one place
+
+function onOff(v) {
+  const t = String(v).trim().toLowerCase()
+  if (['on', 'true', '1', 'bật', 'yes'].includes(t)) return true
+  if (['off', 'false', '0', 'tắt', 'no'].includes(t)) return false
+  throw new SwapError(`Giá trị '${v}' không hợp lệ. Dùng: on | off`)
+}
+
+function pctSetting(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n < 1 || n > 100) throw new SwapError(`Giá trị '${v}' không hợp lệ. Dùng một số từ 1 đến 100.`)
+  return n
+}
+
+const patchAuto = (home, patch) => saveAutoSwitchConfig(home, { ...loadAutoSwitchConfig(home), ...patch })
+
+function profileSetting(home, v) {
+  const t = String(v ?? '').trim()
+  if (!t || t === 'none') return null
+  const name = resolveProfileOrAlias(home, t)
+  if (!profileExists(home, name)) throw new SwapError(`Profile '${t}' không tồn tại.`)
+  return name
+}
+
+// key, kind ('bool' | 'number' | 'choice' | 'text'), what it does, and how it is read and written; each setter
+// validates and goes through the same helper its own subcommand uses
+const SETTINGS = [
+  ['auto.enabled', 'bool', 'Tự động chuyển profile khi vượt ngưỡng', h => loadAutoSwitchConfig(h).enabled, (h, v) => patchAuto(h, { enabled: onOff(v) })],
+  ['auto.threshold', 'number', 'Ngưỡng % quota 5h để tự chuyển', h => loadAutoSwitchConfig(h).threshold, (h, v) => patchAuto(h, { threshold: pctSetting(v) })],
+  ['auto.safeguard', 'number', 'Né profile có 7 ngày ≥ % này (0 = tắt)', h => loadAutoSwitchConfig(h).safeguardThreshold ?? 0,
+    (h, v) => patchAuto(h, { safeguardThreshold: Number(v) === 0 || v === 'off' ? null : pctSetting(v) })],
+  ['auto.return', 'bool', 'Tự quay về profile chính khi nó hồi quota', h => loadAutoSwitchConfig(h).autoReturn, (h, v) => patchAuto(h, { autoReturn: onOff(v) })],
+  ['auto.primary', 'profile', 'Profile chính để quay về', h => loadAutoSwitchConfig(h).primaryProfile || '', (h, v) => patchAuto(h, { primaryProfile: profileSetting(h, v) })],
+  ['auto.pool', 'text', 'Chỉ chuyển trong nhóm có tag này (trống = tất cả)', h => loadAutoSwitchConfig(h).pool || '',
+    (h, v) => patchAuto(h, { pool: String(v ?? '').trim() && v !== 'all' ? String(v).trim() : null })],
+  ['auto.order', 'text', 'Thứ tự ưu tiên khi chuyển, cách nhau dấu phẩy', h => loadAutoSwitchConfig(h).order.join(','),
+    (h, v) => patchAuto(h, { order: String(v ?? '').split(',').map(x => x.trim()).filter(Boolean).map(x => profileSetting(h, x)) })],
+  ['balance', 'choice:off,least-used,round-robin', 'Cân bằng tải giữa các profile', h => {
+    const b = loadBalanceConfig(h)
+    return b.enabled ? b.mode : 'off'
+  }, (h, v) => {
+    if (!['off', 'least-used', 'round-robin'].includes(v)) throw new SwapError('Dùng: off | least-used | round-robin')
+    saveBalanceConfig(h, { ...loadBalanceConfig(h), enabled: v !== 'off', ...(v !== 'off' ? { mode: v } : {}) })
+  }],
+  ['statusline', 'choice:band,line,off', 'Status line: dải màu, dòng chữ, hoặc tắt', h => (isStatuslineEnabled(h) ? statuslineMode(h) : 'off'),
+    (h, v) => (v === 'off' ? setStatuslineEnabled(h, false) : setStatuslineMode(h, v))],
+  ['notify', 'bool', 'Thông báo desktop khi đổi profile', h => Boolean(loadNotificationConfig(h).enabled),
+    (h, v) => saveNotificationConfig(h, { ...loadNotificationConfig(h), enabled: onOff(v) })],
+  ['mask', 'bool', 'Che email trong list và dashboard', h => isMaskingEnabled(h), (h, v) => setMasking(h, onOff(v))],
+  ['repair.auto', 'bool', 'Tự làm mới token hết hạn ở nền, 6 giờ một lần', h => loadRepairConfig(h).auto, (h, v) => setAutoRepair(h, onOff(v))],
+  ['lang', 'choice:vi,en', 'Ngôn ngữ', h => loadLanguage(h), (h, v) => setLanguage(h, v)],
+]
+
+// [{ key, type, choices?, value, desc }]: what `/profile settings` shows and its editor draws
+export function settingsList(home) {
+  return SETTINGS.map(([key, kind, desc, get]) => {
+    const [type, list] = kind.split(':')
+    const choices = type === 'profile' ? ['', ...listProfiles(home)] : list ? list.split(',') : undefined
+    return { key, type: type === 'profile' ? 'choice' : type, ...(choices ? { choices } : {}), value: get(home), desc }
+  })
+}
+
+export function setSetting(home, key, value) {
+  const entry = SETTINGS.find(([k]) => k === key)
+  if (!entry) throw new SwapError(`Không có cài đặt '${key}'. Xem: /profile settings`)
+  entry[4](home, value)
+  return entry[3](home)
+}
+
+export function formatSettings(home) {
+  const rows = settingsList(home)
+  const w = Math.max(...rows.map(r => r.key.length))
+  const shown = v => (v === true ? 'on' : v === false ? 'off' : v === '' ? '—' : String(v))
+  return [
+    '⚙️ Cài đặt claude-swap:',
+    ...rows.map(r => `  ${r.key.padEnd(w)}  ${shown(r.value).padEnd(12)}  ${r.desc}`),
+    '',
+    'Đổi: /profile settings set <key> <giá trị>   (vd: /profile settings set auto.threshold 90)',
   ].join('\n')
 }
 
@@ -3529,7 +4151,7 @@ const PRETTY_CMDS = new Set([
   'swap', 'undo', 'save', 'new', 'rename', 'delete', 'tag', 'untag', 'tags', 'history', 'stats', 'cooldown', 'forecast',
   'auto', 'balance', 'disable', 'enable', 'disabled', 'alias', 'unalias', 'aliases', 'notify', 'mask', 'cleanup',
   'temp', 'untemp', 'budget', 'cost', 'upgrade', 'affinity', 'unaffinity', 'affinities', 'unbind', 'bind-branch',
-  'unbind-branch', 'branch-bindings', 'lang', 'language', 'webhook', 'sync', 'import', 'add-token', 'run',
+  'unbind-branch', 'branch-bindings', 'lang', 'language', 'webhook', 'sync', 'import', 'add-token', 'run', 'repair', 'schedule', 'unschedule', 'settings',
 ])
 
 // Wraps `text` in an SGR code and re-opens it after every reset inside, so nested highlights do not cut it short.
@@ -3597,7 +4219,7 @@ async function runCliInner(argv, home) {
   const color = !noColor && shouldColor()
 
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
-    console.log(formatHelpReport(color, lang))
+    console.log(formatHelpReport(color, lang, filteredArgv.slice(1).join(' ')))
     return 0
   }
 
@@ -3759,6 +4381,56 @@ async function runCliInner(argv, home) {
         const code = runSession(home, target, cmdArgs)
         return code
       }
+      case 'settings': {
+        if (filteredArgv.includes('--json')) {
+          console.log(JSON.stringify(settingsList(home)))
+          return 0
+        }
+        if (filteredArgv[1] === 'set') {
+          const key = filteredArgv[2]
+          if (!key) throw new SwapError('Cú pháp: /profile settings set <key> <giá trị>')
+          const value = setSetting(home, key, filteredArgv.slice(3).join(' '))
+          console.log(`✅ ${key} = ${value === true ? 'on' : value === false ? 'off' : value === '' ? '—' : value}`)
+          return 0
+        }
+        console.log(formatSettings(home))
+        return 0
+      }
+      case 'schedule': {
+        if (filteredArgv[1]) addScheduleRule(home, filteredArgv[1], filteredArgv[2])
+        console.log(formatSchedule(home, lang))
+        return 0
+      }
+      case 'unschedule': {
+        removeScheduleRule(home, filteredArgv[1] || 'all')
+        console.log(formatSchedule(home, lang))
+        return 0
+      }
+      case 'repair': {
+        if (filteredArgv[1] === 'auto') {
+          const v = filteredArgv[2]
+          if (v === 'on' || v === 'off') setAutoRepair(home, v === 'on')
+          const on = loadRepairConfig(home).auto
+          console.log(
+            lang === 'en'
+              ? `🔧 Auto repair: ${on ? 'ON (every 6h, renews expired tokens in the background)' : 'OFF'}`
+              : `🔧 Tự sửa token: ${on ? 'BẬT (6 giờ một lần, làm mới token hết hạn ở nền)' : 'TẮT'}`
+          )
+          return 0
+        }
+        const names = filteredArgv[1] ? [filteredArgv[1]] : brokenProfiles(home)
+        if (!names.length) {
+          console.log(lang === 'en' ? '✅ Every saved login works.' : '✅ Mọi profile đều đăng nhập tốt, không cần sửa.')
+          return 0
+        }
+        let failed = 0
+        for (const n of names) {
+          const r = await repairProfile(home, n)
+          if (r.state === 'failed') failed++
+          console.log(formatRepair(r, lang))
+        }
+        return failed ? 1 : 0
+      }
       case 'usage': {
         const refresh = filteredArgv.includes('--refresh')
         console.log(await usageReport(home, fetchUsage, refresh, color, lang))
@@ -3903,6 +4575,8 @@ async function runCliInner(argv, home) {
           if (res.swapped) {
             const why = res.isTempRevert
               ? 'hết hạn mượn tạm'
+              : res.isSchedule
+              ? 'theo lịch'
               : res.isBranchBinding
               ? 'theo nhánh Git'
               : res.isAutoReturn
@@ -3917,6 +4591,9 @@ async function runCliInner(argv, home) {
             console.log(`✅ Không cần chuyển profile (mức dùng: ${res.util}%, ngưỡng: ${res.threshold}%).`)
           }
           console.log(`[status] ${JSON.stringify(statusLineData(home))}`) // the hook draws this line (`null` = hide)
+          try {
+            sendQuotaAlerts(home)
+          } catch {}
           return 0
         }
 
@@ -4106,7 +4783,11 @@ async function runCliInner(argv, home) {
         return 0
       }
       case 'stats': {
-        console.log(formatSwapStats(home))
+        if (filteredArgv.includes('--json')) {
+          console.log(JSON.stringify({ swaps: swapStats(home), projectDays: 7, projects: projectUsageTotals(home, 7) }, null, 2))
+          return 0
+        }
+        console.log(filteredArgv.includes('--project') ? formatProjectUsage(home, 7, lang) : `${formatSwapStats(home)}\n\n${formatProjectUsage(home, 7, lang)}`)
         return 0
       }
       case 'cooldown': {
@@ -4138,6 +4819,17 @@ async function runCliInner(argv, home) {
               : `📟 Status line: ${enabled ? 'BẬT (hiện chi tiết usage)' : 'TẮT'}`
           )
           return 0
+        }
+        // the hook polls `statusline json`, so it brings the current profile's quota up to date (USAGE_TTL-cached)
+        if (sub === 'json') {
+          try {
+            await refreshUsage(home, [currentProfile(home)])
+            // a suggestion compares the other profiles: bring them up to date while the current one is running out
+            const d = statusLineData(home)
+            if (d && hotWindow(d.windows) && !loadAutoSwitchConfig(home).enabled) await refreshUsage(home, listProfiles(home))
+            sendQuotaAlerts(home)
+            maybeAutoRepair(home)
+          } catch {}
         }
         console.log(
           sub === 'text'

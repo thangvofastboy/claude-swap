@@ -177,7 +177,7 @@ Phần này nghiêm túc hơn một chút, vì gõ sai lệnh thì không vui.
 | `/profile balance mode <least-used\|round-robin>` | Chọn kiểu chia việc: ai còn nhiều quota nhất làm trước, hay lần lượt từng người |
 | `/profile balance pool <tag\|all>` | Chỉ chia việc trong nhóm có tag |
 | `/profile balance next` | Chuyền bóng ngay cho profile kế tiếp theo thuật toán |
-| `/profile webhook [status]` | Kênh báo nào đang bật |
+| `/profile webhook [status]` | Kênh báo nào đang bật. Ngoài báo đổi profile, webhook còn nhận cảnh báo khi tốc độ dùng 7 ngày sẽ làm cạn trước lúc reset và khi một profile hồi quota (mỗi chu kỳ báo một lần) |
 | `/profile webhook set <telegram\|discord\|slack\|generic> <url>` | Nối dây báo tin về Telegram, Discord, Slack hoặc một URL bất kỳ |
 | `/profile webhook unset <type>` | Tắt tiếng một kênh báo |
 | `/profile webhook test` | Bắn một tin thử cho chắc đường dây thông suốt |
@@ -217,6 +217,11 @@ Phần này nghiêm túc hơn một chút, vì gõ sai lệnh thì không vui.
 | `/profile forecast` | Bói xem bao giờ cạn quota, dựa trên tốc độ tiêu thụ thật. Tính từ lúc đo gần nhất; số liệu cũ quá 20 phút sẽ được đánh dấu "chỉ tham khảo" |
 | `/profile cooldown` | Đếm ngược tới lúc quota 5h hồi sức |
 | `/profile doctor` | Khám tổng quát: token OAuth, đăng nhập MCP, file cấu hình, kết nối |
+| `/profile settings` | Bảng gom mọi cài đặt (auto-switch, ngưỡng, profile chính, cân bằng tải, status line, thông báo, che email, tự sửa token, ngôn ngữ). Trong Claude Code nó mở thành bảng sửa trực tiếp: bấm để bật/tắt hoặc đổi lựa chọn, gõ số vào ô, rồi **💾 Lưu** (phím `s`); Esc để đóng. Từ terminal: `/profile settings set <key> <giá trị>`, `--json` để đọc bằng máy |
+| `/profile schedule <HH:MM-HH:MM> <tên>` | Đổi profile theo lịch, vd `09:00-18:00 work`, cả khung qua đêm như `22:00-06:00`. Chỉ đổi một lần khi tới giờ (bạn tự đổi trong khung giờ thì vẫn giữ). Chạy cả khi tắt auto-switch. `/profile schedule` xem lịch, `/profile unschedule <số\|all>` xóa |
+| `/profile repair auto on\|off` | Tự chạy `repair` ở nền 6 giờ một lần khi có profile hết hạn token |
+| `/profile help <từ khóa>` | Chỉ hiện các lệnh có từ khóa đó (vẫn bấm được để đưa xuống ô nhập) |
+| `/profile repair [tên]` | Làm mới token hết hạn của profile khác mà không cần chuyển sang: chạy một request rất nhỏ (`claude -p`, model haiku) trong session cô lập rồi lưu token mới vào profile. Không kèm tên thì sửa mọi profile cần sửa; profile không còn token thì in hướng dẫn đăng nhập lại |
 | `/profile cleanup [--force]` | Tìm profile trùng email/UUID hoặc token hỏng. Thêm `--force` là dọn thật |
 
 ### 📁 Dự án, nhánh Git, tag & model
@@ -247,7 +252,7 @@ Phần này nghiêm túc hơn một chút, vì gõ sai lệnh thì không vui.
 | `/profile notify [on\|off]` | Bật / tắt thông báo desktop khi đổi profile (mặc định tắt cho đỡ phiền) |
 | `/profile undo` | Lỡ tay đổi nhầm? Quay về profile trước đó trong một nốt nhạc (gọi lần nữa thì đi lại) |
 | `/profile history [n]` | Nhật ký đổi tài khoản: ai, khi nào, vì sao (mặc định 10 dòng) |
-| `/profile stats` | Đổi tay bao nhiêu lần, tự động bao nhiêu lần, theo dự án bao nhiêu lần |
+| `/profile stats [--project]` | Đổi tay bao nhiêu lần, tự động bao nhiêu lần, theo dự án bao nhiêu lần; kèm usage 7 ngày theo từng dự án (ước tính từ % 5h tăng thêm khi đang làm ở thư mục đó). `--project` chỉ in phần usage |
 | `/profile sync setup <path>` | Chọn chỗ đặt két đồng bộ (thư mục Dropbox, ổ mạng…) |
 | `/profile sync push` | Gửi két mã hóa lên chỗ đồng bộ |
 | `/profile sync pull` | Mang két về máy này rồi mở ra |
@@ -295,6 +300,8 @@ Bật mặc định, cập nhật mỗi khi bạn gửi prompt, thanh và phần
 Muốn nhúng vào status line riêng của bạn (cấu hình `statusLine` trong `settings.json`): `node <plugin>/swap.js statusline ansi` in đúng dòng có màu đó.
 
 `⏳` là thời gian còn lại tới lúc reset. `⚠ 5h ~12p` chỉ hiện khi tốc độ tiêu thụ cho thấy profile này sẽ chạm ngưỡng auto-switch trong khoảng 30 phút. Gõ `/profile statusline` để tắt/bật.
+
+Status line tự làm mới mỗi phút, kể cả khi bạn không gõ gì (quota được tải lại 5 phút một lần, kể cả khi đã tắt auto-switch). `⚠ lỗi mạng` / `⚠ cũ 2h` nghĩa là số liệu đang hiện không còn mới. Khi auto-switch tắt mà profile đang dùng vượt 80% (5h hoặc 7d), dải hiện `→ <profile> 7d 31%` là profile nên chuyển sang, kèm một thông báo nhỏ. Mỗi lần auto-switch tự đổi profile cũng có thông báo. Bên cạnh gợi ý có nút `⇄ <profile>` (bấm chuột, hoặc `ctrl+x tab` để vào dải rồi phím `s`) để chuyển ngay. Khi 7d vượt 80%, dải hiện `7d ≈0.7%/h`: phần quota còn lại chia đều cho số giờ tới lúc reset, hoặc `⚠ 7d 1.2%/h > 0.7%/h` khi tốc độ 3 giờ gần đây sẽ làm cạn trước lúc reset (`/profile forecast` có cùng thông tin cho mọi profile). Một profile khác vừa reset sau khi gần cạn sẽ có thông báo `✅ <profile> đã hồi quota`. `/profile usage` vẽ lịch sử 24 giờ (theo giờ) và 7 ngày (theo ngày). Gõ `/profile` không kèm gì: mỗi lệnh trong bảng hướng dẫn bấm được, bấm vào là lệnh đó xuống ô nhập để bạn điền nốt rồi gửi. `/profile stats --json` xuất số liệu cho công cụ khác. Khi hạn mức 7 ngày riêng của một model (vd Fable) vượt 80%, dải hiện `Fable 7d 85% → minhvong 13%`. Terminal hẹp thì dải bỏ thanh và giờ reset, chỉ giữ phần trăm. Webhook còn nhận báo cáo tuần vào sáng thứ Hai.
 
 ### Màu sắc trong output
 
@@ -357,6 +364,7 @@ Skill, agent, plugin, settings và memory nằm trong `~/.claude/` nên **không
 
 | Bản | Điểm chính |
 | --- | --- |
+| **0.4.8** | Status line luôn có số liệu mới (kể cả khi tắt auto-switch) và tự cập nhật mỗi phút; báo `⚠` khi số liệu cũ/lỗi; gợi ý profile thay thế khi sắp cạn; thông báo khi auto-switch đổi profile; `list` đánh dấu profile token hết hạn và sửa lỗi mất số liệu khi bật `mask`; `usage` có biểu đồ 24h/7 ngày; ngân sách 7d theo giờ; nút chuyển trên dải; báo profile hồi quota; usage theo dự án trong `stats`; `repair` làm mới token hết hạn; cảnh báo webhook về ngân sách 7d và hồi quota; `stats --json`; dashboard có ngân sách 7d, usage theo dự án, nút sửa token; bấm lệnh trong bảng `/profile` để đưa xuống ô nhập; `/profile settings` sửa mọi cài đặt trong một bảng; `schedule` đổi profile theo giờ; `repair auto`; quota riêng theo model trên dải; báo cáo tuần qua webhook; `help <từ khóa>`; dải gọn cho terminal hẹp; tìm `node` ở các chỗ cài phổ biến khi app Desktop không thấy trong PATH |
 | **0.4.7** | Sửa dự báo cạn quota: tính từ lúc đo gần nhất và im lặng khi số liệu đã cũ, thay vì báo `⚠ 5h ~12p` dựa trên số đo từ lâu |
 | **0.4.6** | Status line mặc định là dải màu trên khung nhập (`band`); dòng ghim `line` chỉ còn chữ thường vì host bỏ mã màu ở đó |
 | **0.4.5** | Thêm hai kiểu hiển thị status line và `statusline ansi` cho status line riêng của bạn |
@@ -376,7 +384,7 @@ Skill, agent, plugin, settings và memory nằm trong `~/.claude/` nên **không
 | Trước email có chữ lạ kiểu `[38;5;248m` | Khung chat của Claude Code không hiểu một số mã màu. Từ v0.4.2 plugin chỉ dùng các mã đã kiểm chứng. Lên bản mới là hết. |
 | Đổi profile xong MCP đòi đăng nhập lại | Từ v0.4.0 đăng nhập MCP được giữ nguyên khi đổi profile. Riêng các connector `claude.ai ...` gắn với tài khoản nên đổi tài khoản là đổi theo, không giữ được. Chạy `/profile doctor` để xem MCP nào hết hạn mà không có refresh token. |
 | Bảng `list` hiện `—` ở cột quota | Chưa có số liệu cho profile đó (chưa lấy được quota, token hết hạn, hoặc là API key). `/profile list --refresh` để hỏi lại. |
-| Status line hiện chữ lạ `[1;32m` hoặc chỉ một màu | Bạn đang ở kiểu `line` (dòng ghim). Chạy `/profile statusline band` để có dải nhiều màu trên khung nhập. Nếu không hiện gì: có thể bạn đã tắt: gõ `/profile statusline` để bật lại. Nó cập nhật khi bạn gửi prompt. |
+| Status line hiện chữ lạ `[1;32m` hoặc chỉ một màu | Bạn đang ở kiểu `line` (dòng ghim). Chạy `/profile statusline band` để có dải nhiều màu trên khung nhập. Nếu không hiện gì: có thể bạn đã tắt: gõ `/profile statusline` để bật lại. Nó tự cập nhật mỗi phút. |
 | Muốn thấy dashboard bản mới | `/profile web stop` rồi `/profile web`, và mở đúng link có `#token`. |
 
 ---

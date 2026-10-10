@@ -177,7 +177,7 @@ This part is a bit more serious, because typos in commands aren't fun.
 | `/profile balance mode <least-used\|round-robin>` | Pick a strategy: most quota left goes first, or everyone takes turns |
 | `/profile balance pool <tag\|all>` | Only balance within a tagged group |
 | `/profile balance next` | Pass the ball to the next profile right now |
-| `/profile webhook [status]` | Which alert channels are on |
+| `/profile webhook [status]` | Which alert channels are on. Besides swaps, webhooks also get an alert when the 7-day pace would run out before the reset and when a profile recovers (once per window) |
 | `/profile webhook set <telegram\|discord\|slack\|generic> <url>` | Wire up alerts to Telegram, Discord, Slack or any URL |
 | `/profile webhook unset <type>` | Mute one alert channel |
 | `/profile webhook test` | Fire a test message to make sure the line works |
@@ -217,6 +217,11 @@ This part is a bit more serious, because typos in commands aren't fun.
 | `/profile forecast` | Predict when you'll run dry, based on your real burn rate. Counted from the latest measurement; data older than 20 minutes is flagged "for reference only" |
 | `/profile cooldown` | Countdown to the 5h quota coming back |
 | `/profile doctor` | Full checkup: OAuth tokens, MCP logins, config files, connectivity |
+| `/profile settings` | One table of every setting (auto-switch, thresholds, primary profile, balancing, status line, notifications, email masking, auto repair, language). In Claude Code it opens as an editor: click to toggle or cycle a choice, type numbers in the fields, then **💾 Save** (key `s`); Esc closes it. From a terminal: `/profile settings set <key> <value>`, `--json` for machines |
+| `/profile schedule <HH:MM-HH:MM> <name>` | Swap on a schedule, e.g. `09:00-18:00 work`, overnight windows like `22:00-06:00` too. Swaps once when a window starts (a manual swap inside it is kept). Works with auto-switch off. `/profile schedule` lists, `/profile unschedule <n\|all>` removes |
+| `/profile repair auto on\|off` | Run `repair` in the background every 6h when some profile's token expired |
+| `/profile help <keyword>` | Only the commands mentioning that keyword (still clickable) |
+| `/profile repair [name]` | Renews another profile's expired token without swapping to it: one tiny request (`claude -p`, haiku) in an isolated session, then the new token is saved into the profile. Without a name it repairs every profile that needs it; a profile with no token left gets re-login steps |
 | `/profile cleanup [--force]` | Find duplicate email/UUID profiles and broken tokens. Add `--force` to actually clean up |
 
 ### 📁 Projects, Git branches, tags & models
@@ -247,7 +252,7 @@ This part is a bit more serious, because typos in commands aren't fun.
 | `/profile notify [on\|off]` | Desktop notification on switch (off by default, for your sanity) |
 | `/profile undo` | Swapped by mistake? Jump back to the previous profile (run it again to go forward) |
 | `/profile history [n]` | Switch diary: who, when, why (10 lines by default) |
-| `/profile stats` | How many manual, automatic and per-project switches |
+| `/profile stats [--project]` | How many manual, automatic and per-project switches, plus 7-day usage per project (estimated from the 5h % gained while working in that directory). `--project` prints only the usage part |
 | `/profile sync setup <path>` | Choose where the sync safe lives (a Dropbox folder, a network drive…) |
 | `/profile sync push` | Send the encrypted safe to the sync spot |
 | `/profile sync pull` | Bring the safe to this machine and open it |
@@ -295,6 +300,8 @@ On by default, refreshed whenever you send a prompt, with bars and percentages c
 To embed it in your own status line (the `statusLine` setting in `settings.json`): `node <plugin>/swap.js statusline ansi` prints exactly that coloured line.
 
 `⏳` is the time left until the reset. `⚠ 5h ~12p` only appears when the burn rate says this profile will reach the auto-switch threshold within about 30 minutes. Type `/profile statusline` to toggle it.
+
+The status line refreshes itself every minute, even while you type nothing (quota is refetched every 5 minutes, also with auto-switch off). `⚠ lỗi mạng` (network error) / `⚠ stale 2h` mean the numbers shown are not current. With auto-switch off and the current profile past 80% (5h or 7d), the band shows `→ <profile> 7d 31%`, the profile to move to, plus a small notification. Every automatic swap also shows a notification. Next to the suggestion a `⇄ <profile>` button (click it, or `ctrl+x tab` into the band and press `s`) swaps at once. With 7d past 80% the band shows `7d ≈0.7%/h`: the quota left spread over the hours until the reset, or `⚠ 7d 1.2%/h > 0.7%/h` when the pace of the last 3 hours would run out before it (`/profile forecast` shows the same for every profile). Another profile that resets after nearly running out toasts `✅ <profile> đã hồi quota`. `/profile usage` draws the last 24 hours (hourly) and 7 days (daily). Type `/profile` alone: every command in the help table is clickable and puts that command in the prompt box for you to complete and send. `/profile stats --json` exports the numbers for other tools. When a model's own 7-day limit (e.g. Fable) passes 80%, the band shows `Fable 7d 85% → minhvong 13%`. A narrow terminal gets a compact band without bars or reset times. Webhooks also get a weekly report on Monday morning.
 
 ### Colours in the output
 
@@ -357,6 +364,7 @@ Skills, agents, plugins, settings and memory live in `~/.claude/` and **belong t
 
 | Version | Highlights |
 | --- | --- |
+| **0.4.8** | Status line always has current numbers (also with auto-switch off) and refreshes every minute; `⚠` when the numbers are stale or failed; suggests a profile to move to when running out; notification when auto-switch swaps; `list` flags profiles with an expired token and no longer loses its numbers with `mask` on; `usage` draws 24h/7-day history; 7d budget per hour; a swap button on the band; a toast when a profile recovers; per-project usage in `stats`; `repair` renews expired tokens; webhook alerts for the 7d budget and recovered profiles; `stats --json`; the dashboard shows the 7d budget, per-project usage and a repair button; click a command in the `/profile` table to put it in the prompt box; `/profile settings` edits every setting in one table; `schedule` swaps by time of day; `repair auto`; per-model quota on the band; weekly webhook report; `help <keyword>`; compact band on narrow terminals; looks for `node` in the usual install places when the Desktop app's PATH lacks it |
 | **0.4.7** | Fixed the running-out forecast: counted from the latest measurement and silent when the data is stale, instead of warning `⚠ 5h ~12p` from an old reading |
 | **0.4.6** | The status line defaults to a coloured band above the input box (`band`); the pinned `line` is plain text because the host drops colour codes there |
 | **0.4.5** | Two status line styles, and `statusline ansi` for your own status line |
@@ -376,7 +384,7 @@ Skills, agents, plugins, settings and memory live in `~/.claude/` and **belong t
 | Odd text like `[38;5;248m` before an email | The chat box doesn't understand some colour codes. Since v0.4.2 the plugin only uses codes verified to draw. Upgrade to fix it. |
 | MCP asks to log in again after a switch | Since v0.4.0 MCP logins are kept across switches. `claude.ai ...` connectors are tied to the account, so they change with it and can't be kept. Run `/profile doctor` to see which MCP logins expired with no refresh token. |
 | `list` shows `—` in a quota column | No data for that profile yet (quota not fetched, token expired, or an API key). `/profile list --refresh` asks again. |
-| Status line shows stray `[1;32m` text or only one colour | You are on the `line` style (pinned line). Run `/profile statusline band` for the multi-colour band above the input box. If nothing shows: you may have turned it off: type `/profile statusline` to enable it. It refreshes when you send a prompt. |
+| Status line shows stray `[1;32m` text or only one colour | You are on the `line` style (pinned line). Run `/profile statusline band` for the multi-colour band above the input box. If nothing shows: you may have turned it off: type `/profile statusline` to enable it. It refreshes itself every minute. |
 | Want the new dashboard | `/profile web stop`, then `/profile web`, and open the link that includes `#token`. |
 
 ---

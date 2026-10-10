@@ -42,6 +42,9 @@ import {
   loadSwapHistory,
   loadUsageHistory,
   calculateForecast,
+  weeklyPace,
+  recoveredProfiles,
+  projectUsageTotals,
 } from './swap.js'
 
 const HOST = '127.0.0.1'
@@ -56,7 +59,7 @@ const WEB_CLI = new Set([
   'auto', 'balance', 'forecast', 'cooldown', 'doctor', 'cleanup', 'temp', 'untemp',
   'bind', 'unbind', 'bind-branch', 'unbind-branch', 'branch-bindings',
   'affinity', 'unaffinity', 'affinities', 'notify', 'budget', 'webhook', 'mask', 'share',
-  'export', 'import-enc', 'sync', 'history', 'undo', 'stats', 'statusline', 'prompt', 'completion', 'lang',
+  'export', 'import-enc', 'sync', 'history', 'undo', 'stats', 'statusline', 'prompt', 'completion', 'lang', 'repair', 'schedule', 'unschedule', 'settings',
 ])
 
 // Runs `node swap.js <args>` like the /profile hook does; a password goes on stdin, never argv
@@ -77,7 +80,9 @@ export function runSwapCli(home, args, password = '') {
     delete env.CLAUDE_CONFIG_DIR
   }
   return new Promise(resolve => {
-    const child = execFile(process.execPath, argv, { env, timeout: 180000, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+    // `repair` runs `claude -p` per profile (up to 2 min each): killing it mid-way could strand a renewed token
+    const timeout = args[0] === 'repair' ? 30 * 60000 : 180000
+    const child = execFile(process.execPath, argv, { env, timeout, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
       resolve({ code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, output: `${stdout}${stderr}`.trim() })
     })
     child.stdin.on('error', () => {}) // EPIPE when the child exits before reading stdin
@@ -183,6 +188,9 @@ export function getDashboardData(home = os.homedir()) {
     swapHistory: loadSwapHistory(home),
     usageHistory,
     forecast: Object.fromEntries(profiles.map(n => [n, calculateForecast(home, n, auto.threshold || 95, usageHistory)])),
+    weekly: Object.fromEntries(profiles.map(n => [n, weeklyPace(home, n, cache, usageHistory)])),
+    recovered: recoveredProfiles(home, cache, cur),
+    projectUsage: projectUsageTotals(home, 7),
   }
 }
 
@@ -412,7 +420,7 @@ export function renderDashboardHtml() {
         <div class="chart-head">
           <div>
             <div class="chart-title" id="usage-title">Mức dùng quota theo thời gian</div>
-            <div class="chart-sub">Mỗi điểm là một lần đo quota (tối đa 50 lần gần nhất mỗi profile)</div>
+            <div class="chart-sub">Mỗi điểm là một lần đo quota: đủ mọi lần trong 6 giờ gần nhất, cũ hơn thì mỗi giờ một điểm, giữ 7 ngày</div>
           </div>
           <select id="usage-window" class="form-control" style="width:auto;" onchange="statsKey=''; renderStats()">
             <option value="util5h">Hạn mức 5 giờ</option>
@@ -446,8 +454,16 @@ export function renderDashboardHtml() {
       </div>
 
       <div class="chart-card" style="margin-top:20px;">
-        <div class="chart-head"><div class="chart-title">📈 Dự báo cạn quota 5 giờ</div></div>
+        <div class="chart-head"><div class="chart-title">📈 Dự báo cạn quota 5 giờ & ngân sách 7 ngày</div></div>
         <div class="tbl-wrap"><table class="cmd-table" id="forecast-table"></table></div>
+      </div>
+
+      <div class="chart-card">
+        <div class="chart-head"><div>
+          <div class="chart-title">📁 Usage theo dự án</div>
+          <div class="chart-sub">7 ngày qua, ước tính từ % quota 5h tăng thêm khi đang làm ở thư mục đó</div>
+        </div></div>
+        <div class="tbl-wrap"><table class="cmd-table" id="project-table"></table></div>
       </div>
 
       <div class="chart-card">
@@ -1016,7 +1032,7 @@ export function renderDashboardHtml() {
 
     function renderStats() {
       const hist = appData.swapHistory || [];
-      const key = JSON.stringify([hist, appData.usageHistory, appData.forecast, appData.auto, (appData.profiles || []).map(p => p.name)]);
+      const key = JSON.stringify([hist, appData.usageHistory, appData.forecast, appData.weekly, appData.recovered, appData.projectUsage, appData.auto, (appData.profiles || []).map(p => p.name)]);
       if (key === statsKey) return; // unchanged: keep hover state and avoid redraw flicker on the 5s poll
       statsKey = key;
 
@@ -1034,7 +1050,8 @@ export function renderDashboardHtml() {
         tile('Tổng lượt chuyển', hist.length, hist.length >= 100 ? '100 lần gần nhất' : '') +
         tile('7 ngày qua', week) +
         tile('Thủ công / Tự động / Dự án', counts.manual + ' / ' + counts.auto + ' / ' + counts.project) +
-        tile('Hay dùng nhất', top ? top[0] : '-', top ? top[1] + ' lần' : '');
+        tile('Hay dùng nhất', top ? top[0] : '-', top ? top[1] + ' lần' : '') +
+        ((appData.recovered || []).length ? tile('✅ Đã hồi quota', appData.recovered.join(', '), 'dùng lại được') : '');
 
       renderUsageChart();
       renderDailyChart(hist);
@@ -1042,16 +1059,32 @@ export function renderDashboardHtml() {
 
       const fc = appData.forecast || {};
       const names = Object.keys(fc);
+      const perHour = v => (v < 10 ? Math.round(v * 10) / 10 : Math.round(v)) + '%/giờ';
+      // 7-day budget: the quota left spread over the hours until the reset, against the pace of the last 3 hours
+      const weekCell = n => {
+        const w = (appData.weekly || {})[n];
+        if (!w) return '<td style="color:#64748b;">-</td>';
+        const over = w.rate !== null && w.rate > w.budget;
+        return '<td' + (over ? ' style="color:#f97316;"' : '') + '>' + (over ? '⚠ ' : '') + 'còn ' + Math.round(100 - w.pct) + '% → ≈' + perHour(w.budget) +
+          (w.rate !== null ? ' <span style="color:#94a3b8;">(đang ' + perHour(w.rate) + ')</span>' : '') + '</td>';
+      };
       document.getElementById('forecast-table').innerHTML = names.length
-        ? '<thead><tr><th>Profile</th><th>Đang dùng</th><th>Tốc độ</th><th>Chạm ngưỡng</th></tr></thead><tbody>' + names.map(n => {
+        ? '<thead><tr><th>Profile</th><th>Đang dùng</th><th>Tốc độ</th><th>Chạm ngưỡng</th><th>Ngân sách 7 ngày</th></tr></thead><tbody>' + names.map(n => {
             const f = fc[n];
-            if (!f.hasData) return '<tr><td>' + esc(n) + '</td><td colspan="3" style="color:#64748b;">' + esc(f.message) + '</td></tr>';
+            if (!f.hasData) return '<tr><td>' + esc(n) + '</td><td colspan="3" style="color:#64748b;">' + esc(f.message) + '</td>' + weekCell(n) + '</tr>';
             const eta = f.trend === 'increasing'
               ? (f.minutesUntilThreshold <= 30 ? '🔴 ' : f.minutesUntilThreshold <= 60 ? '🟠 ' : '🟡 ') + '~' + f.minutesUntilThreshold + ' phút (' + fmtTime(f.estimatedTimestamp) + ')'
               : '🟢 Ổn định';
-            return '<tr><td>' + esc(n) + '</td><td>' + Math.round(f.currentUtil) + '%</td><td>' + (f.burnRatePerHour > 0 ? '+' + f.burnRatePerHour + '%/giờ' : '0') + '</td><td>' + eta + '</td></tr>';
+            return '<tr><td>' + esc(n) + '</td><td>' + Math.round(f.currentUtil) + '%</td><td>' + (f.burnRatePerHour > 0 ? '+' + f.burnRatePerHour + '%/giờ' : '0') + '</td><td>' + eta + '</td>' + weekCell(n) + '</tr>';
           }).join('') + '</tbody>'
         : '<tbody><tr><td class="empty-state">Chưa có profile nào.</td></tr></tbody>';
+
+      const proj = appData.projectUsage || [];
+      document.getElementById('project-table').innerHTML = proj.length
+        ? '<thead><tr><th>Dự án</th><th>% 5h đã dùng</th><th>Thư mục</th></tr></thead><tbody>' + proj.slice(0, 15).map(p =>
+            '<tr><td>' + esc(p.dir.split(/[\\\\/]/).pop()) + '</td><td>' + Math.round(p.pct) + '%</td><td style="color:#94a3b8;">' + esc(p.dir) + '</td></tr>'
+          ).join('') + '</tbody>'
+        : '<tbody><tr><td class="empty-state">Chưa có dữ liệu. Số liệu dồn dần mỗi lần plugin đo quota khi bạn làm việc.</td></tr></tbody>';
 
       const typeLabel = { auto: '🤖 Tự động', project: '📁 Dự án' };
       document.getElementById('history-table').innerHTML = hist.length
@@ -1087,6 +1120,11 @@ export function renderDashboardHtml() {
         ['Trả profile đang mượn', ['untemp'], []],
         ['Trạng thái mượn tạm', ['temp'], []],
         ['Dọn profile hỏng', ['cleanup', '--force'], [], true],
+        ['Đổi profile theo lịch', ['schedule'], [['text', 'Khung giờ HH:MM-HH:MM (vd: 09:00-18:00)'], ['profile', 'Profile']]],
+        ['Xóa lịch đổi profile', ['unschedule'], [['text', 'Số thứ tự hoặc all', 'all']]],
+        ['Làm mới token hết hạn', ['repair'], [['text', 'Profile (bỏ trống = tất cả)', '', true]]],
+        ['Tự làm mới token ở nền', ['repair', 'auto'], [['choice', 'Trạng thái', ['on', 'off']]]],
+        ['Đổi một cài đặt', ['settings', 'set'], [['text', 'Key (vd: auto.threshold)'], ['text', 'Giá trị']]],
       ]],
       ['📁 Dự án, nhánh Git & model', [
         ['Gắn profile cho thư mục', ['bind'], [['profile', 'Profile'], ['text', 'Đường dẫn thư mục dự án']]],
@@ -1145,6 +1183,11 @@ export function renderDashboardHtml() {
       'Trả profile đang mượn': 'Trả sớm cho giữ uy tín, quay về profile gốc ngay.',
       'Trạng thái mượn tạm': 'Đang mượn của ai, còn bao nhiêu phút nữa phải trả?',
       'Dọn profile hỏng': 'Đổ rác: xóa thật những profile hỏng. Không hoàn tác được, nên chạy "Cleanup (chỉ quét)" trước.',
+      'Đổi profile theo lịch': 'Tới giờ là tự đổi, mỗi khung giờ một lần. Khung qua đêm như 22:00-06:00 cũng được.',
+      'Xóa lịch đổi profile': 'Gỡ một dòng lịch theo số thứ tự, hoặc all để xóa hết.',
+      'Làm mới token hết hạn': 'Gửi một request rất nhỏ trong session riêng để lấy token mới, không cần chuyển profile.',
+      'Tự làm mới token ở nền': 'Mỗi 6 giờ tự làm mới token hết hạn, để profile nào cũng sẵn sàng khi cần.',
+      'Đổi một cài đặt': 'Như /profile settings set: xem danh sách key bằng nút ⚙️ Cài đặt ở trên.',
       'Gắn profile cho thư mục': 'Mở dự án này là tự dùng đúng tài khoản. Hết cảnh side project ăn quota công ty.',
       'Gỡ gắn thư mục': 'Thư mục này được tự do, dùng tài khoản nào cũng được.',
       'Thư mục đang gắn profile nào?': 'Hỏi nhanh: thư mục này đang theo phe nào?',
@@ -1173,7 +1216,7 @@ export function renderDashboardHtml() {
       'Mở thư mục profile': 'Mở thư mục chứa profile. Ngó thì được, đừng sửa tay.',
     };
     const QUICK = [['📋 Danh sách', ['list'], 'Điểm danh cả đội, kèm thanh quota.'], ['🟢 Đang dùng', ['current'], 'Mình đang là ai?'], ['📊 Usage', ['usage'], 'Quota 5h, 7d và từng model (lấy từ cache).'], ['🔄 Usage (làm mới)', ['usage', '--refresh'], 'Hỏi lại server số mới nhất. Đừng spam, server cũng biết mệt.'],
-      ['📈 Dự báo', ['forecast'], 'Bói xem bao giờ cạn quota, dựa trên tốc độ tiêu thụ thật.'], ['⏱️ Cooldown', ['cooldown'], 'Đếm ngược tới lúc quota 5h hồi sức.'], ['🩺 Doctor', ['doctor'], 'Khám tổng quát: token, file cấu hình, kết nối.'], ['🧹 Cleanup (chỉ quét)', ['cleanup'], 'Tìm profile trùng hoặc hỏng. Chỉ nhìn, không xóa.'],
+      ['📈 Dự báo', ['forecast'], 'Bói xem bao giờ cạn quota, dựa trên tốc độ tiêu thụ thật.'], ['⏱️ Cooldown', ['cooldown'], 'Đếm ngược tới lúc quota 5h hồi sức.'], ['🩺 Doctor', ['doctor'], 'Khám tổng quát: token, file cấu hình, kết nối.'], ['🧹 Cleanup (chỉ quét)', ['cleanup'], 'Tìm profile trùng hoặc hỏng. Chỉ nhìn, không xóa.'], ['🔧 Sửa token', ['repair'], 'Làm mới token hết hạn của các profile khác, không cần chuyển sang. Mất vài giây mỗi profile.'], ['⚙️ Cài đặt', ['settings'], 'Mọi cài đặt và giá trị hiện tại trong một bảng.'], ['🗓️ Lịch', ['schedule'], 'Các khung giờ tự đổi profile.'],
       ['📊 Thống kê', ['stats'], 'Đổi tay bao nhiêu lần, tự động bao nhiêu lần.'], ['🔤 Aliases', ['aliases'], 'Danh bạ biệt danh.'], ['🏷️ Tags', ['tags'], 'Ai thuộc nhóm nào.'], ['🚫 Đang nghỉ', ['disabled'], 'Danh sách profile đang nghỉ phép.'],
       ['🌿 Nhánh Git', ['branch-bindings'], 'Nhánh nào đi với tài khoản nào.'], ['🧠 Model', ['affinities'], 'Model nào đi với tài khoản nào.'], ['💰 Ngân sách', ['budget'], 'Trần chi tiêu hiện tại.'], ['🔔 Webhook', ['webhook'], 'Kênh báo nào đang bật.'],
       ['⚖️ Cân bằng tải', ['balance'], 'Đang chia việc theo kiểu nào.'], ['🤖 Auto', ['auto'], 'Auto-switch đang cấu hình ra sao.'], ['🛡️ Che email', ['mask'], 'Email đang được che hay đang lộ mặt.'], ['💻 Statusline', ['statusline'], 'Chuỗi trạng thái gọn để nhét vào prompt.'], ['ℹ️ Phiên bản', ['version'], 'Đang chạy bản nào.']];
