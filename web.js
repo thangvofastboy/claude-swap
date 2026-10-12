@@ -70,6 +70,8 @@ export function runSwapCli(home, args, password = '') {
   if (args.some(a => typeof a !== 'string' || a.length > 2048 || a.startsWith('--password'))) {
     return Promise.resolve({ code: 1, output: 'Tham số không hợp lệ.' })
   }
+  // a webhook URL is a secret: it would sit on the child's argv, where `ps` shows it
+  if (args[0] === 'webhook' && args.filter(a => a !== '--no-color')[1] === 'set') return Promise.resolve({ code: 1, output: 'Lệnh không được phép: webhook set' })
   const argv = [SWAP_JS, ...args, '--no-color']
   if (password) argv.push('--password-stdin')
   const env = { ...process.env }
@@ -118,6 +120,12 @@ export function runningDashboard(home = os.homedir()) {
   try {
     const raw = fs.readFileSync(pf, 'utf-8').trim()
     const state = raw.startsWith('{') ? JSON.parse(raw) : { pid: Number(raw), port: null }
+    // a pid reused by some other process (after a reboot): Linux names the command, elsewhere compare with boot time
+    // (Linux skips the uptime test: WSL/VM uptime stops while paused, which would make a live dashboard look stale)
+    if (process.platform === 'linux') {
+      const cmd = fs.readFileSync(`/proc/${state.pid}/cmdline`, 'utf-8')
+      if (!cmd.includes('web')) throw new Error('stale')
+    } else if (state.started && state.started < Date.now() - os.uptime() * 1000) throw new Error('stale')
     process.kill(state.pid, 0) // throws if no such process
     return state
   } catch {
@@ -203,6 +211,7 @@ export function renderDashboardHtml() {
   <title>claude-swap Dashboard — Quản lý Đa Tài Khoản Claude Code</title>
   <style>
     :root {
+      --ease: cubic-bezier(0.22, 1, 0.36, 1);
       --bg: #0b0f19;
       --card-bg: #111827;
       --card-border: #1f293d;
@@ -222,11 +231,12 @@ export function renderDashboardHtml() {
     .brand { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 1.25rem; color: #fff; }
     .brand-badge { background: #1e293b; color: #60a5fa; font-size: 0.75rem; padding: 2px 8px; border-radius: 999px; border: 1px solid #3b82f644; }
     nav { display: flex; gap: 8px; }
-    .tab-btn { background: transparent; border: none; color: var(--text-muted); padding: 8px 14px; white-space: nowrap; border-radius: 6px; cursor: pointer; font-size: 0.95rem; font-weight: 500; transition: all 0.2s; display: flex; align-items: center; gap: 6px; }
+    .tab-btn { background: transparent; border: none; color: var(--text-muted); padding: 8px 14px; white-space: nowrap; border-radius: 6px; cursor: pointer; font-size: 0.95rem; font-weight: 500; transition: color 0.2s var(--ease), background-color 0.2s var(--ease); display: flex; align-items: center; gap: 6px; }
     .tab-btn:hover { color: #fff; background: #1e293b; }
     .tab-btn.active { color: #fff; background: var(--accent); }
     .header-actions { display: flex; gap: 10px; align-items: center; }
-    .btn { background: var(--accent); color: #fff; border: none; padding: 8px 14px; border-radius: 6px; font-size: 0.88rem; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: background 0.2s; }
+    .btn { background: var(--accent); color: #fff; border: none; padding: 8px 14px; border-radius: 6px; font-size: 0.88rem; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: background-color 0.2s var(--ease), transform 0.1s var(--ease); }
+    .btn:active { transform: scale(0.97); }
     .btn:hover { background: var(--accent-hover); }
     .btn-secondary { background: #1e293b; color: var(--text); border: 1px solid var(--border); }
     .btn-secondary:hover { background: #334155; }
@@ -238,7 +248,7 @@ export function renderDashboardHtml() {
 
     main { flex: 1; max-width: 1280px; width: 100%; margin: 0 auto; padding: 24px; }
     .tab-content { display: none; }
-    .tab-content.active { display: block; animation: fadeIn 0.25s ease; }
+    .tab-content.active { display: block; animation: fadeIn 0.25s var(--ease); }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 
     /* Overview stats */
@@ -251,8 +261,9 @@ export function renderDashboardHtml() {
 
     /* Profile cards grid */
     .profiles-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 18px; margin-bottom: 32px; }
-    .profile-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 14px; position: relative; transition: border-color 0.2s, box-shadow 0.2s; }
-    .profile-card:hover { border-color: #3b82f688; }
+    .profile-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 14px; position: relative; transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease), transform 0.2s var(--ease); animation: cardIn 0.3s var(--ease) both; }
+    .profile-card:hover { border-color: #3b82f688; transform: translateY(-2px); box-shadow: 0 8px 24px #0006; }
+    @keyframes cardIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
     .profile-card.is-active { border-color: var(--accent); background: linear-gradient(180deg, #1e293b88 0%, #111827 100%); box-shadow: 0 0 20px #3b82f622; }
     .profile-header { display: flex; justify-content: space-between; align-items: flex-start; }
     .profile-title { display: flex; align-items: center; gap: 10px; }
@@ -267,7 +278,7 @@ export function renderDashboardHtml() {
     .quota-meta { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--text-muted); }
     .quota-val { font-weight: 600; color: #fff; }
     .progress-bar-bg { background: #1e293b; height: 8px; border-radius: 4px; overflow: hidden; width: 100%; }
-    .progress-bar-fill { height: 100%; border-radius: 4px; transition: width 0.4s ease; }
+    .progress-bar-fill { height: 100%; border-radius: 4px; transition: width 0.6s var(--ease), background-color 0.4s var(--ease); }
     .fill-green { background: var(--success); }
     .fill-yellow { background: var(--warning); }
     .fill-orange { background: #f97316; }
@@ -289,8 +300,8 @@ export function renderDashboardHtml() {
     .form-control:focus { outline: none; border-color: var(--accent); }
     .form-switch { display: flex; align-items: center; gap: 12px; cursor: pointer; }
     .form-switch input { display: none; }
-    .switch-slider { width: 44px; height: 24px; background: #374151; border-radius: 12px; position: relative; transition: background 0.2s; }
-    .switch-slider::after { content: ''; position: absolute; width: 18px; height: 18px; border-radius: 50%; background: #fff; top: 3px; left: 3px; transition: transform 0.2s; }
+    .switch-slider { width: 44px; height: 24px; background: #374151; border-radius: 12px; position: relative; transition: background-color 0.2s var(--ease); }
+    .switch-slider::after { content: ''; position: absolute; width: 18px; height: 18px; border-radius: 50%; background: #fff; top: 3px; left: 3px; transition: transform 0.25s var(--ease); }
     input:checked + .switch-slider { background: var(--accent); }
     input:checked + .switch-slider::after { transform: translateX(20px); }
 
@@ -299,7 +310,7 @@ export function renderDashboardHtml() {
     .docs-search input { width: 100%; max-width: 600px; padding: 12px 16px; border-radius: 8px; background: #111827; border: 1px solid var(--border); color: #fff; font-size: 0.95rem; }
     .docs-grid { display: grid; grid-template-columns: 240px 1fr; gap: 24px; }
     .docs-nav { position: sticky; top: 80px; height: fit-content; display: flex; flex-direction: column; gap: 4px; }
-    .docs-nav-link { color: var(--text-muted); padding: 8px 12px; border-radius: 6px; text-decoration: none; font-size: 0.9rem; transition: all 0.2s; }
+    .docs-nav-link { color: var(--text-muted); padding: 8px 12px; border-radius: 6px; text-decoration: none; font-size: 0.9rem; transition: color 0.2s var(--ease), background-color 0.2s var(--ease); }
     .docs-nav-link:hover, .docs-nav-link.active { color: #fff; background: #1e293b; }
     .docs-body { display: flex; flex-direction: column; gap: 32px; }
     .docs-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 24px; }
@@ -319,11 +330,12 @@ export function renderDashboardHtml() {
     .modal-close { background: none; border: none; color: var(--text-muted); font-size: 1.4rem; cursor: pointer; }
 
     /* Toast */
-    #toast { position: fixed; bottom: 24px; right: 24px; background: #1e293b; color: #fff; border: 1px solid var(--accent); padding: 12px 20px; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); display: none; z-index: 999; animation: slideUp 0.2s ease; }
-    @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    #toast { position: fixed; bottom: 24px; right: 24px; background: #1e293b; color: #fff; border: 1px solid var(--accent); padding: 12px 20px; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); z-index: 999; opacity: 0; visibility: hidden; transform: translateY(16px); transition: opacity 0.25s var(--ease), transform 0.25s var(--ease), visibility 0s linear 0.25s; }
+    #toast.show { opacity: 1; visibility: visible; transform: none; transition: opacity 0.25s var(--ease), transform 0.25s var(--ease), visibility 0s; }
 
 
     /* Stats & charts (categorical slots validated against #111827) */
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; } }
     :root { --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767; --grid: #1f2937; }
     .chart-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 12px; padding: 20px; margin-bottom: 20px; }
     .chart-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
@@ -762,8 +774,9 @@ export function renderDashboardHtml() {
     function showToast(msg) {
       const t = document.getElementById('toast');
       t.innerText = msg;
-      t.style.display = 'block';
-      setTimeout(() => { t.style.display = 'none'; }, 3000);
+      t.classList.add('show');
+      clearTimeout(t._hide);
+      t._hide = setTimeout(() => t.classList.remove('show'), 3000);
     }
 
     function switchTab(name) {
@@ -792,51 +805,91 @@ export function renderDashboardHtml() {
       document.getElementById('stat-auto').innerText = appData.auto.enabled ? ('Bật (' + appData.auto.threshold + '%)') : 'Tắt';
       document.getElementById('stat-balance').innerText = appData.balance.enabled ? (appData.balance.mode) : 'Tắt';
 
+      // One card per profile, kept across polls: only the numbers change in place, so the bars glide to their new
+      // width and hover state survives. A card is rebuilt only when what it shows besides the numbers changes.
       const container = document.getElementById('profiles-container');
-      container.innerHTML = '';
+      const old = new Map([...container.children].map(c => [c.dataset.name, c]));
+      const now = Date.now();
+      appData.profiles.forEach((p, i) => {
+        const key = JSON.stringify([p.name, p.active, p.email, p.tags, p.aliases, p.disabled, p.quota5h === null, p.quota7d === null, p.cooldownSec > 0]);
+        let card = old.get(p.name);
+        old.delete(p.name);
+        if (!card || card.dataset.key !== key) {
+          const fresh = buildCard(p);
+          fresh.dataset.key = key;
+          if (card) card.replaceWith(fresh);
+          card = fresh;
+        }
+        if (container.children[i] !== card) container.insertBefore(card, container.children[i] || null);
+        card.dataset.resetAt = p.cooldownSec > 0 ? String(now + p.cooldownSec * 1000) : '';
+        updateCard(card, p);
+      });
+      old.forEach(c => c.remove());
+      tickCooldowns();
+    }
 
-      appData.profiles.forEach(p => {
+    function fillClass(val, is7d) {
+      return 'progress-bar-fill ' + (is7d ? (val >= 85 ? 'fill-red' : 'fill-green') : val >= 95 ? 'fill-red' : val >= 80 ? 'fill-orange' : val >= 50 ? 'fill-yellow' : 'fill-green');
+    }
+
+    // the numbers of a card; a new bar starts at 0 and grows on the next frame
+    function updateCard(card, p) {
+      [[p.quota5h, false], [p.quota7d, true]].forEach(([q, is7d]) => {
+        const item = card.querySelector(is7d ? '[data-q="7d"]' : '[data-q="5h"]');
+        if (!item || q === null) return;
+        const val = Math.round(q);
+        item.querySelector('.quota-val').textContent = val + '%';
+        const fill = item.querySelector('.progress-bar-fill');
+        fill.className = fillClass(val, is7d);
+        requestAnimationFrame(() => { fill.style.width = val + '%'; });
+      });
+    }
+
+    // the reset countdown runs every second in the page instead of jumping on each 5 s poll
+    function tickCooldowns() {
+      document.querySelectorAll('.profile-card[data-reset-at]').forEach(card => {
+        const el = card.querySelector('.cooldown-text');
+        if (!el || !card.dataset.resetAt) return;
+        const left = Math.max(0, Math.round((Number(card.dataset.resetAt) - Date.now()) / 1000));
+        el.textContent = '⏱️ Reset sau: ' + Math.floor(left / 60) + 'm ' + String(left % 60).padStart(2, '0') + 's';
+      });
+    }
+    setInterval(() => { if (!document.hidden) tickCooldowns(); }, 1000);
+
+    function buildCard(p) {
         const card = document.createElement('div');
         card.className = 'profile-card' + (p.active ? ' is-active' : '');
+        card.dataset.name = p.name;
 
         let q5Html = '<span style="color:#64748b;">(Chưa có dữ liệu)</span>';
         if (p.quota5h !== null) {
-          const val = Math.round(p.quota5h);
-          const colorClass = val >= 95 ? 'fill-red' : val >= 80 ? 'fill-orange' : val >= 50 ? 'fill-yellow' : 'fill-green';
           q5Html = \`
             <div class="quota-meta">
               <span>Hạn mức 5 giờ</span>
-              <span class="quota-val">\${val}%</span>
+              <span class="quota-val"></span>
             </div>
             <div class="progress-bar-bg">
-              <div class="progress-bar-fill \${colorClass}" style="width: \${val}%;"></div>
+              <div class="progress-bar-fill" style="width: 0;"></div>
             </div>
           \`;
         }
 
         let q7Html = '';
         if (p.quota7d !== null) {
-          const val = Math.round(p.quota7d);
-          const colorClass = val >= 85 ? 'fill-red' : 'fill-green';
           q7Html = \`
-            <div class="quota-item" style="margin-top: 8px;">
+            <div class="quota-item" data-q="7d" style="margin-top: 8px;">
               <div class="quota-meta">
                 <span>Hạn mức 7 ngày</span>
-                <span class="quota-val">\${val}%</span>
+                <span class="quota-val"></span>
               </div>
               <div class="progress-bar-bg">
-                <div class="progress-bar-fill \${colorClass}" style="width: \${val}%;"></div>
+                <div class="progress-bar-fill" style="width: 0;"></div>
               </div>
             </div>
           \`;
         }
 
-        let cooldownHtml = '';
-        if (p.cooldownSec > 0) {
-          const mins = Math.floor(p.cooldownSec / 60);
-          const secs = p.cooldownSec % 60;
-          cooldownHtml = \`<div class="cooldown-text">⏱️ Reset sau: \${mins}m \${secs}s</div>\`;
-        }
+        const cooldownHtml = p.cooldownSec > 0 ? '<div class="cooldown-text"></div>' : '';
 
         const tagsHtml = p.tags.map(t => \`<span class="tag-pill">🏷️ \${esc(t)}</span>\`).join(' ');
         const aliasHtml = p.aliases.length ? \`<span style="color:#94a3b8; font-size:0.8rem;">(alias: \${esc(p.aliases.join(', '))})</span>\` : '';
@@ -856,7 +909,7 @@ export function renderDashboardHtml() {
           <div style="display: flex; gap: 6px; flex-wrap: wrap;">\${tagsHtml}</div>
 
           <div class="quota-box">
-            <div class="quota-item">\${q5Html}</div>
+            <div class="quota-item" data-q="5h">\${q5Html}</div>
             \${q7Html}
             \${cooldownHtml}
           </div>
@@ -869,8 +922,7 @@ export function renderDashboardHtml() {
             <button class="btn btn-secondary btn-sm btn-danger" style="margin-left: auto;" onclick="doDelete('\${p.name}')">Xóa</button>
           </div>
         \`;
-        container.appendChild(card);
-      });
+        return card;
     }
 
 
@@ -1493,8 +1545,9 @@ export function renderDashboardHtml() {
       });
     }
 
-    // Auto-refresh data every 5 seconds
-    setInterval(loadData, 5000);
+    // Auto-refresh every 5 seconds while the tab is visible, and at once when it comes back
+    setInterval(() => { if (!document.hidden) loadData(); }, 5000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) loadData(); });
     loadData();
   </script>
 </body>
@@ -1509,7 +1562,15 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
   let port = initialPort
   const token = crypto.randomBytes(24).toString('hex')
   const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url, `http://${HOST}:${port}`)
+    let url
+    try {
+      url = new URL(req.url, `http://${HOST}:${port}`)
+    } catch {
+      // a malformed request target would otherwise be an unhandled rejection that kills the server
+      res.writeHead(400, { 'Content-Type': 'text/plain' })
+      res.end('Bad Request')
+      return
+    }
 
     // DNS rebinding: a foreign site resolving its own name to 127.0.0.1 still sends its own Host
     const hostname = (req.headers.host || '').replace(/:\d+$/, '')
@@ -1672,8 +1733,9 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
       }
     }
   }
+  if (!server.listening) throw new Error(`Không còn cổng trống từ ${initialPort} đến ${port - 1}.`)
 
-  atomicWrite(pf, JSON.stringify({ pid: process.pid, port, token }))
+  atomicWrite(pf, JSON.stringify({ pid: process.pid, port, token, started: Date.now() }))
   const targetUrl = `http://${HOST}:${port}`
 
   if (shouldOpen) {

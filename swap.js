@@ -180,8 +180,10 @@ export function backup(filePath) {
 
 // ---------------------------------------------------------------- credentials
 
-export function useKeychain(home) {
-  return process.platform === 'darwin' && !fs.existsSync(credentialsFile(home))
+// macOS: Claude Code reads the Keychain item first and falls back to `.credentials.json` (it writes that file when the
+// Keychain refuses). Both can exist, so reads try the Keychain first and writes update every copy that exists.
+export function useKeychain() {
+  return process.platform === 'darwin'
 }
 
 // same account name Claude Code uses, so `-U` updates its item instead of adding a second one
@@ -214,19 +216,17 @@ export function keychainWriteCommand(service, account, data) {
   return `add-generic-password -U -a "${account}" -s "${service}" -X "${hex}"\n`
 }
 
-const SECURITY_STDIN_MAX = 4000 // `security -i` line buffer; longer payloads fall back to argv
+const SECURITY_STDIN_MAX = 4000 // `security -i` line buffer
 
+// Never on argv, where `ps` shows it: a payload too long for `security -i` (many MCP logins) is refused, and its
+// stale item deleted so it cannot win over the `.credentials.json` the caller writes instead.
 function writeKeychain(service, data) {
-  const account = keychainAccount()
-  const line = keychainWriteCommand(service, account, data)
-  const res =
-    line.length <= SECURITY_STDIN_MAX
-      ? child_process.spawnSync('security', ['-i'], { input: line, encoding: 'utf-8', timeout: 10000 })
-      : child_process.spawnSync(
-          'security',
-          ['add-generic-password', '-U', '-a', account, '-s', service, '-X', Buffer.from(data, 'utf-8').toString('hex')],
-          { encoding: 'utf-8', timeout: 10000 }
-        )
+  const line = keychainWriteCommand(service, keychainAccount(), data)
+  if (line.length > SECURITY_STDIN_MAX) {
+    deleteKeychain(service)
+    throw new SwapError('Credentials quá dài cho Keychain (security -i), dùng file .credentials.json.')
+  }
+  const res = child_process.spawnSync('security', ['-i'], { input: line, encoding: 'utf-8', timeout: 10000 })
   if (res.error || res.status !== 0) {
     const why = res.error?.message || `${res.stderr || res.stdout || ''}`.trim() || `exit ${res.status}`
     throw new SwapError(`Không ghi được Keychain: ${why}`)
@@ -250,14 +250,26 @@ function keychainService(home) {
 }
 
 export function readCredentials(home) {
-  if (useKeychain(home)) return readKeychain(keychainService(home))
+  const fromKeychain = useKeychain() ? readKeychain(keychainService(home)) : null
+  if (fromKeychain) return fromKeychain
   const f = credentialsFile(home)
   return fs.existsSync(f) ? fs.readFileSync(f, 'utf-8') : null
 }
 
 export function writeCredentials(home, data) {
-  if (useKeychain(home)) return writeKeychain(keychainService(home), data)
   const f = credentialsFile(home)
+  let fileNeeded = !useKeychain() || fs.existsSync(f)
+  // with the file in use, a Keychain item is only updated, never created: a second copy would shadow the file
+  if (useKeychain() && (!fileNeeded || readKeychain(keychainService(home)))) {
+    try {
+      writeKeychain(keychainService(home), data)
+    } catch (err) {
+      // too long or a locked Keychain: the file is what Claude Code falls back to
+      if (!fileNeeded && !/quá dài/.test(err.message)) throw err
+      fileNeeded = true
+    }
+  }
+  if (!fileNeeded) return
   backup(f)
   atomicWrite(f, data)
 }
@@ -276,7 +288,7 @@ export function keepLiveMcpOAuth(liveRaw, targetRaw) {
 }
 
 export function clearCredentials(home) {
-  if (useKeychain(home)) return deleteKeychain(keychainService(home))
+  if (useKeychain()) deleteKeychain(keychainService(home))
   const f = credentialsFile(home)
   backup(f)
   if (fs.existsSync(f)) {
@@ -383,15 +395,19 @@ export function saveProfile(home, name, force = false) {
     }
   }
   let existingTags = []
+  let oldCredentials = null
   if (fs.existsSync(target)) {
     try {
       const old = JSON.parse(fs.readFileSync(target, 'utf-8'))
       if (Array.isArray(old.tags)) existingTags = old.tags
+      // same account: keep its saved token when the live one cannot be read (locked Keychain over SSH, Deny)
+      const uuid = old.claude_json?.oauthAccount?.accountUuid
+      if (uuid && uuid === auth.oauthAccount?.accountUuid) oldCredentials = old.credentials ?? null
     } catch {}
   }
   const profile = {
     claude_json: auth,
-    credentials: readCredentials(home),
+    credentials: readCredentials(home) ?? oldCredentials,
     tags: existingTags,
   }
   if (Object.keys(profile.claude_json).length === 0 && !profile.credentials) {
@@ -923,14 +939,9 @@ export async function profileUsage(
   force = false
 ) {
   const row = { name, active, email: '', limits: [], note: '' }
-  let token = null
-  let expires = null
+  let profile
   try {
-    const profile = JSON.parse(fs.readFileSync(profilePath(home, name), 'utf-8'))
-    const creds = active ? readCredentials(home) : profile.credentials
-    const oauth = JSON.parse(creds || '{}').claudeAiOauth || {}
-    token = oauth.accessToken
-    expires = oauth.expiresAt
+    profile = JSON.parse(fs.readFileSync(profilePath(home, name), 'utf-8'))
   } catch {
     return { ...row, note: 'file profile bị hỏng' }
   }
@@ -938,14 +949,32 @@ export async function profileUsage(
   row.email = profileEmail(home, name)
   const key = `${name}|${row.email}`
   const hit = cache[key] && typeof cache[key] === 'object' ? cache[key] : {}
+  const cached = Array.isArray(hit.limits) ? hit.limits : []
+  const now = Date.now() / 1000
+  // a cached answer is served before the live credentials are read: on macOS that read is a `security` process
+  const fromCache = () => {
+    if (hit.retry_at && hit.retry_at > now) return { ...row, limits: cached, note: rateLimitedNote(hit, cached.length > 0) }
+    // failures are cached too, so an offline machine does not refetch on every prompt
+    if (!force && now - (hit.at || 0) < USAGE_TTL) return { ...row, limits: cached, note: cached.length ? '' : hit.note || '' }
+    return null
+  }
+  const early = active && fromCache()
+  if (early) return early
+
+  let token = null
+  let expires = null
+  try {
+    const oauth = JSON.parse((active ? readCredentials(home) : profile.credentials) || '{}').claudeAiOauth || {}
+    token = oauth.accessToken
+    expires = oauth.expiresAt
+  } catch {
+    return { ...row, note: 'file profile bị hỏng' }
+  }
   if (!token) {
     const note = 'không có token OAuth (API key không có quota gói)'
     cache[key] = { ...hit, note } // replaces an older note, which `list` would otherwise keep showing
     return { ...row, note }
   }
-
-  const cached = Array.isArray(hit.limits) ? hit.limits : []
-  const now = Date.now() / 1000
 
   if (typeof expires === 'number' && expires < Date.now()) {
     const note = `token đã hết hạn — chuyển sang profile này (swap ${name}) để CLI làm mới`
@@ -953,13 +982,8 @@ export async function profileUsage(
     return { ...row, note }
   }
 
-  if (hit.retry_at && hit.retry_at > now) {
-    return { ...row, limits: cached, note: rateLimitedNote(hit, cached.length > 0) }
-  }
-  // failures are cached too, so an offline machine does not refetch on every prompt
-  if (!force && now - (hit.at || 0) < USAGE_TTL) {
-    return { ...row, limits: cached, note: cached.length ? '' : hit.note || '' }
-  }
+  const served = fromCache()
+  if (served) return served
 
   try {
     const data = await fetchFn(token)
@@ -990,13 +1014,12 @@ export async function profileUsage(
 export async function usageRows(home, fetchFn = fetchUsage, force = false) {
   const cur = currentProfile(home)
   const cache = loadUsageCache(home)
+  const before = JSON.stringify(cache, null, 2)
   const profiles = listProfiles(home)
   const rows = await Promise.all(
     profiles.map(n => profileUsage(home, n, n === cur, fetchFn, cache, force))
   )
-  try {
-    atomicWrite(usageCacheFile(home), JSON.stringify(cache, null, 2))
-  } catch {}
+  saveUsageCache(home, cache, before)
   return rows
 }
 
@@ -1005,13 +1028,21 @@ export async function usageRows(home, fetchFn = fetchUsage, force = false) {
 export async function refreshUsage(home, names, fetchFn = fetchUsage) {
   const cur = currentProfile(home)
   const cache = loadUsageCache(home)
+  const before = JSON.stringify(cache, null, 2)
   await Promise.all(
     [...new Set(names)]
       .filter(n => n && profileExists(home, n))
       .map(n => profileUsage(home, n, n === cur, fetchFn, cache))
   )
+  saveUsageCache(home, cache, before)
+}
+
+// a run served from the cache leaves it as it was: skip the write (on Windows an antivirus scans every rename)
+function saveUsageCache(home, cache, before) {
+  const text = JSON.stringify(cache, null, 2)
+  if (text === before) return
   try {
-    atomicWrite(usageCacheFile(home), JSON.stringify(cache, null, 2))
+    atomicWrite(usageCacheFile(home), text)
   } catch {}
 }
 
@@ -1759,9 +1790,17 @@ export function tempSwap(home, nameOrAlias, durationStr) {
     throw new SwapError(`Profile '${name}' không tồn tại.`)
   }
   const durationMs = parseDuration(durationStr)
-  const orig = currentProfile(home) || ''
-  if (orig === name) {
+  // a temp on top of a temp still returns to the profile before the first one
+  // only while that temp is still in use: a manual swap since then makes the current profile the one to return to
+  const cur = currentProfile(home) || ''
+  const prev = loadTempProfile(home)
+  const inherited = prev && prev.expiresAt > Date.now() && prev.tempProfile === cur ? prev.originalProfile : ''
+  const orig = inherited || cur
+  if (cur === name) {
     throw new SwapError(`Profile '${name}' đang là profile active.`)
+  }
+  if (inherited && inherited === name) {
+    throw new SwapError(`'${name}' là profile gốc của lần mượn tạm này: dùng /profile untemp để quay lại.`)
   }
   const expiresAt = Date.now() + durationMs
 
@@ -1846,6 +1885,8 @@ export function findNextProfile(home, options = {}) {
       const hasApiKey = Boolean(profile.claude_json?.primaryApiKey)
       const oauth = JSON.parse(profile.credentials || '{}').claudeAiOauth || {}
       if (!oauth.accessToken && !hasApiKey) continue
+      // a rejected token (401, none, expired) would pass as 0% used; a network or 5xx failure keeps its last numbers
+      if (!hasApiKey && /401|token/i.test(hit.note || '')) continue
       if (!hasApiKey && typeof oauth.expiresAt === 'number' && oauth.expiresAt / 1000 < Date.now() / 1000) {
         continue
       }
@@ -1936,7 +1977,12 @@ export function removeScheduleRule(home, which) {
     const i = Number(which) - 1
     if (!Number.isInteger(i) || i < 0 || i >= sched.rules.length) throw new SwapError(`Không có lịch số ${which}. Xem: /profile schedule`)
     sched.rules.splice(i, 1)
+    // `applied` is `day|index`: follow the shift, so a rule already applied (and maybe overridden by hand) stays applied
+    const [day, idx] = String(sched.applied || '').split('|')
+    const n = Number(idx)
+    if (day && Number.isInteger(n)) sched.applied = n === i ? '' : n > i ? `${day}|${n - 1}` : sched.applied
   }
+  if (which === 'all') sched.applied = ''
   atomicWrite(scheduleFile(home), JSON.stringify(sched, null, 2))
   return sched.rules
 }
@@ -1951,7 +1997,8 @@ export function activeScheduleRule(rules, now = new Date()) {
     const to = minutesOf(r.to)
     const inside = from < to ? m >= from && m < to : m >= from || m < to
     if (!inside) continue
-    const started = from > to && m < to ? now.getTime() - 86400000 : now.getTime()
+    // yesterday by the calendar: a DST night is 23 or 25 hours long
+    const started = from > to && m < to ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).getTime() : now.getTime()
     return { rule: r, key: `${localDay(started)}|${i}` }
   }
   return null
@@ -2324,8 +2371,9 @@ export function importEncryptedProfiles(home, sourcePath, password, overwrite = 
     const iv = Buffer.from(container.iv, 'hex')
     const tag = Buffer.from(container.tag, 'hex')
     const data = Buffer.from(container.data, 'hex')
-    const key = crypto.pbkdf2Sync(password, salt, container.iterations || 100000, 32, 'sha512')
-    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv)
+    // capped: a tampered file must not stall the CPU before the tag check can reject it
+    const key = crypto.pbkdf2Sync(password, salt, Math.min(Number(container.iterations) || 100000, 1_000_000), 32, 'sha512')
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv, { authTagLength: 16 })
     decipher.setAuthTag(tag)
     const decrypted = Buffer.concat([decipher.update(data), decipher.final()])
     payload = JSON.parse(decrypted.toString('utf-8'))
@@ -2333,10 +2381,10 @@ export function importEncryptedProfiles(home, sourcePath, password, overwrite = 
     throw new SwapError('Mật khẩu giải mã không chính xác hoặc dữ liệu file bị hỏng.')
   }
 
-  const result = { added: [], exists: [] }
-  const profiles = payload.profiles || {}
+  const result = { added: [], exists: [], config: [] }
+  const profiles = payload.profiles && typeof payload.profiles === 'object' ? payload.profiles : {}
   for (const [name, data] of Object.entries(profiles)) {
-    if (!NAME_RE.test(name)) continue
+    if (!NAME_RE.test(name) || !data || typeof data !== 'object' || !data.claude_json || typeof data.claude_json !== 'object') continue
     const target = profilePath(home, name)
     if (fs.existsSync(target) && !overwrite) {
       result.exists.push(name)
@@ -2344,6 +2392,40 @@ export function importEncryptedProfiles(home, sourcePath, password, overwrite = 
     }
     atomicWrite(target, JSON.stringify(data, null, 2))
     result.added.push(name)
+  }
+
+  // auto-switch settings: only when this machine has none yet (--force is about profiles), known keys of the right type
+  const auto = payload.autoSwitch
+  if (auto && typeof auto === 'object' && !Array.isArray(auto) && !fs.existsSync(autoSwitchConfigFile(home))) {
+    const defaults = loadAutoSwitchConfig(home)
+    const clean = Object.fromEntries(
+      Object.entries(defaults).map(([k, v]) => {
+        const got = auto[k]
+        // a null default (pool, primaryProfile) stands for an unset string
+        const ok = Array.isArray(v) ? Array.isArray(got) && got.every(n => typeof n === 'string') : v === null ? got === null || typeof got === 'string' : typeof got === typeof v || (k === 'safeguardThreshold' && got === null)
+        return [k, ok ? got : v]
+      })
+    )
+    clean.order = clean.order.filter(n => profileExists(home, n))
+    if (clean.primaryProfile && !profileExists(home, clean.primaryProfile)) clean.primaryProfile = null
+    saveAutoSwitchConfig(home, clean)
+    result.config.push('auto-switch')
+  }
+  // project bindings: merged by directory, local ones kept unless --force, only for profiles that exist here
+  const bindings = payload.projectBindings
+  if (bindings && typeof bindings === 'object' && !Array.isArray(bindings)) {
+    const local = loadProjectBindings(home)
+    let added = 0
+    for (const [dir, name] of Object.entries(bindings)) {
+      if (typeof name !== 'string' || !NAME_RE.test(name) || !profileExists(home, name)) continue
+      if (Object.hasOwn(local, dir) && (!overwrite || local[dir] === name)) continue
+      local[dir] = name
+      added++
+    }
+    if (added) {
+      saveProjectBindings(home, local)
+      result.config.push(`${added} bind`)
+    }
   }
 
   return result
@@ -2372,10 +2454,8 @@ export function saveAliases(home, aliases) {
 export function resolveProfileOrAlias(home, nameOrAlias) {
   if (!nameOrAlias) return nameOrAlias
   const aliases = loadAliases(home)
-  if (aliases[nameOrAlias]) {
-    return aliases[nameOrAlias]
-  }
-  return nameOrAlias
+  // a real profile wins over an alias of the same name; hasOwn keeps 'constructor' etc. from Object.prototype out
+  return Object.hasOwn(aliases, nameOrAlias) && !profileExists(home, nameOrAlias) ? aliases[nameOrAlias] : nameOrAlias
 }
 
 export function setAlias(home, alias, profileName) {
@@ -2386,6 +2466,7 @@ export function setAlias(home, alias, profileName) {
   if (!profileExists(home, resolved)) {
     throw new SwapError(`Profile '${profileName}' không tồn tại.`)
   }
+  if (profileExists(home, alias.trim())) throw new SwapError(`'${alias.trim()}' đã là tên một profile.`)
   const aliases = loadAliases(home)
   aliases[alias.trim()] = resolved
   saveAliases(home, aliases)
@@ -2669,7 +2750,7 @@ export function calculateForecast(home, profileName, threshold = 95, history = l
     message:
       `Mức dùng: ${Math.round(currentUtil)}% | Tốc độ tăng: +${Math.round(burnRatePerHour * 10) / 10}%/giờ. ` +
       `Dự kiến chạm ngưỡng ${threshold}% sau ~${minutesUntilThreshold} phút ` +
-      `(${new Date(estimatedTimestamp).toLocaleTimeString('vi-VN')}).` +
+      `(${fmtReset(estimatedTimestamp).slice(6)}).` +
       (ageMin > STALE_FORECAST_MIN ? ` Số liệu đã cũ ${Math.round(ageMin)} phút, chỉ tham khảo.` : ''),
   }
 }
@@ -3249,7 +3330,9 @@ export function prepareSession(home = os.homedir(), name) {
     if (process.platform === 'darwin') {
       try {
         writeKeychain(sessionKeychainService(sDir), credentials)
-      } catch {}
+      } catch {
+        deleteKeychain(sessionKeychainService(sDir)) // a stale item would win over the file
+      }
     }
   } else {
     fs.rmSync(credFile, { force: true })
@@ -3381,8 +3464,8 @@ const AUTO_REPAIR_MS = 6 * 3600000
 export function maybeAutoRepair(home, spawn = spawnDetached) {
   const cfg = loadRepairConfig(home)
   if (!cfg.auto || Date.now() - cfg.lastRun < AUTO_REPAIR_MS || isolatedSession(home)) return false
-  atomicWrite(repairConfigFile(home), JSON.stringify({ ...cfg, lastRun: Date.now() }))
   if (!brokenProfiles(home).some(n => loginState(home, n) === 'expired')) return false
+  atomicWrite(repairConfigFile(home), JSON.stringify({ ...cfg, lastRun: Date.now() }))
   spawn(process.execPath, [SCRIPT_PATH, 'repair'])
   return true
 }
@@ -4397,8 +4480,12 @@ async function runCliInner(argv, home) {
         return 0
       }
       case 'add-token': {
-        const token = filteredArgv[1]
-        const pName = filteredArgv[2] && !filteredArgv[2].startsWith('--') ? filteredArgv[2] : null
+        // --token-stdin: the hook sends the token on stdin, so it never shows in `ps`
+        const fromStdin = filteredArgv.includes('--token-stdin')
+        const words = filteredArgv.filter(a => a !== '--token-stdin')
+        const token = fromStdin ? fs.readFileSync(0, 'utf-8').trim() : words[1]
+        const nameArg = words[fromStdin ? 1 : 2]
+        const pName = nameArg && !nameArg.startsWith('--') ? nameArg : null
         const emailIdx = filteredArgv.indexOf('--email')
         const email = emailIdx !== -1 ? filteredArgv[emailIdx + 1] : null
         const force = filteredArgv.includes('--force')
@@ -4825,6 +4912,7 @@ async function runCliInner(argv, home) {
         const force = filteredArgv.includes('--force')
         const res = importEncryptedProfiles(home, sourcePath, password, force)
         console.log(`📦 Đã nhập thành công: ${res.added.join(', ') || '(không có profile mới)'}`)
+        if (res.config.length) console.log(`⚙️ Đã khôi phục cấu hình: ${res.config.join(', ')}`)
         if (res.exists.length > 0) {
           console.log(`⚠️ Bỏ qua profile đã tồn tại (dùng --force để ghi đè): ${res.exists.join(', ')}`)
         }
@@ -4874,12 +4962,16 @@ async function runCliInner(argv, home) {
           return 0
         }
         // the hook polls `statusline json`, so it brings the current profile's quota up to date (USAGE_TTL-cached)
+        let statusData
         if (sub === 'json') {
           try {
             await refreshUsage(home, [currentProfile(home)])
             // a suggestion compares the other profiles: bring them up to date while the current one is running out
-            const d = statusLineData(home)
-            if (d && hotWindow(d.windows) && !loadAutoSwitchConfig(home).enabled) await refreshUsage(home, listProfiles(home))
+            statusData = statusLineData(home)
+            if (statusData && hotWindow(statusData.windows) && !loadAutoSwitchConfig(home).enabled) {
+              await refreshUsage(home, listProfiles(home))
+              statusData = undefined
+            }
             sendQuotaAlerts(home)
             maybeAutoRepair(home)
           } catch {}
@@ -4890,7 +4982,7 @@ async function runCliInner(argv, home) {
             : sub === 'ansi'
             ? statusLineData(home)?.ansi || ''
             : sub === 'json'
-            ? JSON.stringify(statusLineData(home))
+            ? JSON.stringify(statusData === undefined ? statusLineData(home) : statusData)
             : getStatusline(home)
         )
         return 0
@@ -5052,6 +5144,7 @@ async function runCliInner(argv, home) {
           const target = positionalArgs(filteredArgv, 2)[0]
           const res = syncPull(home, target, password, force)
           console.log(`☁️ Đã tải thành công: ${res.added.join(', ') || '(không có profile mới)'}`)
+          if (res.config.length) console.log(`⚙️ Đã khôi phục cấu hình: ${res.config.join(', ')}`)
           return 0
         }
         console.error(`❌ Lệnh sync không hợp lệ: ${sub}. Dùng: /profile sync [setup|push|pull|status]`)
@@ -5152,7 +5245,8 @@ async function runCliInner(argv, home) {
             Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100)
             state = runningDashboard(home)
           }
-          announce({ port, ...state })
+          if (!state?.token) throw new SwapError(lang === 'en' ? 'The dashboard did not start (no free port?).' : 'Dashboard không khởi động được (hết cổng trống?).')
+          announce(state)
           return 0
         }
 

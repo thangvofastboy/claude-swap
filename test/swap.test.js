@@ -127,6 +127,9 @@ import {
   formatProjectUsage,
   loadProjectUsage,
   refreshUsage,
+  readCredentials,
+  writeCredentials,
+  loadUsageCache,
   maskEmail,
   exportSafeShare,
   generateCompletion,
@@ -141,7 +144,8 @@ import {
   maskUrl,
   spawnDetached,
 } from '../swap.js'
-import { startWebDashboard, getDashboardData, stopWebDashboard } from '../web.js'
+import { startWebDashboard, getDashboardData, stopWebDashboard, runSwapCli } from '../web.js'
+import net from 'node:net'
 import child_process from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
@@ -520,6 +524,11 @@ describe('swap.js core functionality', () => {
     login(tmpHome, 'b', 'tok-b')
     saveProfile(tmpHome, 'personal')
 
+    const dir = path.join(tmpHome, 'proj')
+    fs.mkdirSync(dir)
+    bindProfile(tmpHome, dir, 'work')
+    saveAutoSwitchConfig(tmpHome, { ...loadAutoSwitchConfig(tmpHome), threshold: 80 })
+
     const exportFile = path.join(os.tmpdir(), `backup-${Date.now()}.enc`)
     const newHome = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-new-home-'))
 
@@ -534,6 +543,9 @@ describe('swap.js core functionality', () => {
       // Import with correct password into newHome
       assert.equal(await runCli(['import-enc', exportFile, '--password', 'secret123'], newHome), 0)
       assert.deepEqual(listProfiles(newHome), ['personal', 'work'])
+      // the settings and bindings travel with the profiles
+      assert.equal(loadAutoSwitchConfig(newHome).threshold, 80)
+      assert.equal(loadProjectBindings(newHome)[dir], 'work')
     } finally {
       try { fs.unlinkSync(exportFile) } catch {}
       try { fs.rmSync(newHome, { recursive: true, force: true }) } catch {}
@@ -1697,6 +1709,161 @@ describe('swap.js core functionality', () => {
     assert.deepEqual(spawned, ['repair'])
   })
 
+  test('regressions: alias vs profile name, failed-fetch candidate, schedule removal, auto repair stamp', () => {
+    login(tmpHome, 'p', 'tok-p')
+    saveProfile(tmpHome, 'rg-personal')
+    login(tmpHome, 'w', 'tok-w')
+    saveProfile(tmpHome, 'rg-work')
+    saveProfile(tmpHome, 'constructor')
+    // a real profile wins over an alias of the same name, and Object.prototype keys are not aliases
+    assert.throws(() => setAlias(tmpHome, 'rg-work', 'rg-personal'), /đã là tên một profile/)
+    fs.writeFileSync(path.join(tmpHome, '.config', 'claude-cli-profiles', '.aliases.json'), JSON.stringify({ 'rg-work': 'rg-personal' }))
+    assert.equal(resolveProfileOrAlias(tmpHome, 'rg-work'), 'rg-work')
+    assert.equal(resolveProfileOrAlias(tmpHome, 'constructor'), 'constructor')
+
+    // a profile whose last fetch failed is not "0% used"
+    swapProfile(tmpHome, 'constructor')
+    const config = { enabled: true, threshold: 95, safeguardThreshold: null }
+    const cache = {
+      'rg-personal|p@example.com': { limits: [['5 giờ', 10, '']] },
+      'rg-work|w@example.com': { at: Date.now() / 1000, note: 'lỗi HTTP 401 (token hết hạn/bị thu hồi)' },
+    }
+    assert.equal(findNextProfile(tmpHome, { config, cache }), 'rg-personal')
+
+    // removing a rule clears the index-keyed `applied`
+    addScheduleRule(tmpHome, '09:00-12:00', 'rg-personal')
+    addScheduleRule(tmpHome, '13:00-18:00', 'rg-work')
+    checkSchedule(tmpHome, config, {}, new Date(2026, 9, 10, 10))
+    removeScheduleRule(tmpHome, '1')
+    assert.deepEqual(checkSchedule(tmpHome, config, {}, new Date(2026, 9, 10, 13, 30)), { from: 'rg-personal', to: 'rg-work' })
+
+    // a tick that finds nothing expired does not block repair for 6h
+    setAutoRepair(tmpHome, true)
+    const spawned = []
+    assert.equal(maybeAutoRepair(tmpHome, () => spawned.push(1)), false)
+    const f = path.join(tmpHome, '.config', 'claude-cli-profiles', 'rg-personal.json')
+    fs.writeFileSync(f, JSON.stringify({ ...JSON.parse(fs.readFileSync(f, 'utf-8')), credentials: JSON.stringify({ claudeAiOauth: { accessToken: 'x', expiresAt: Date.now() - 1, refreshToken: 'r' } }) }))
+    assert.equal(maybeAutoRepair(tmpHome, () => spawned.push(1)), true)
+  })
+
+  test('a fresh cache is served without reading the live credentials, and is not rewritten', async () => {
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'fc-one')
+    const cacheFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json')
+    writeFreshCache(cacheFile, { 'fc-one|a@example.com': { limits: [['5 giờ', 42, '']] } })
+    fs.rmSync(path.join(tmpHome, '.claude', '.credentials.json')) // reading it now would say "no token"
+    const mtime = fs.statSync(cacheFile).mtimeMs
+    await refreshUsage(tmpHome, ['fc-one'], () => assert.fail('fetched'))
+    assert.equal(fs.statSync(cacheFile).mtimeMs, mtime)
+    const row = await profileUsage(tmpHome, 'fc-one', true, () => assert.fail('fetched'), loadUsageCache(tmpHome))
+    assert.equal(row.limits[0][1], 42)
+  })
+
+  test('regressions: unreadable live credentials, nested temp, DST night', () => {
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'r2-b')
+    login(tmpHome, 'c', 'tok-c')
+    saveProfile(tmpHome, 'r2-c')
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'r2-a')
+    // the live token cannot be read (locked Keychain): the saved one survives the re-save on swap
+    fs.rmSync(path.join(tmpHome, '.claude', '.credentials.json'))
+    swapProfile(tmpHome, 'r2-c')
+    const saved = JSON.parse(fs.readFileSync(path.join(tmpHome, '.config', 'claude-cli-profiles', 'r2-a.json'), 'utf-8'))
+    assert.match(saved.credentials, /tok-a/)
+
+    // temp on top of temp returns to the profile before the first one
+    tempSwap(tmpHome, 'r2-a', '10m')
+    tempSwap(tmpHome, 'r2-b', '10m')
+    assert.equal(loadTempProfile(tmpHome).originalProfile, 'r2-c')
+
+    // an overnight window keeps one key across a 23-hour day (only bites where the TZ has DST)
+    const rules = [{ from: '22:00', to: '06:00', profile: 'r2-b' }]
+    const key = h => activeScheduleRule(rules, new Date(2026, 2, 30, h, 30)).key
+    assert.equal(key(0), '2026-03-29|0')
+    assert.equal(key(1), '2026-03-29|0')
+  })
+
+  test('macOS: Keychain first, every existing copy updated, a long payload never goes on argv', () => {
+    // a fake `security` on PATH that keeps items as files and logs its argv
+    const bin = path.join(tmpHome, 'bin')
+    const kc = path.join(tmpHome, 'kc')
+    fs.mkdirSync(bin)
+    fs.mkdirSync(kc)
+    fs.writeFileSync(
+      path.join(bin, 'security'),
+      `#!/usr/bin/env node
+const fs = require('fs'), p = require('path'), a = process.argv.slice(2), kc = ${JSON.stringify(kc)}
+fs.appendFileSync(p.join(kc, 'argv.log'), a.join(' ') + '\\n')
+const item = s => p.join(kc, Buffer.from(s).toString('hex'))
+if (a[0] === 'find-generic-password') { try { process.stdout.write(fs.readFileSync(item(a[a.indexOf('-s') + 1]), 'utf-8')) } catch { process.exit(44) } }
+else if (a[0] === 'delete-generic-password') fs.rmSync(item(a[a.indexOf('-s') + 1]), { force: true })
+else if (a[0] === '-i') { const m = fs.readFileSync(0, 'utf-8').match(/-s "([^"]+)" -X "([0-9a-f]+)"/); fs.writeFileSync(item(m[1]), Buffer.from(m[2], 'hex').toString('utf-8')) }
+`,
+      { mode: 0o755 }
+    )
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')
+    const PATH = process.env.PATH
+    Object.defineProperty(process, 'platform', { value: 'darwin' })
+    process.env.PATH = `${bin}${path.delimiter}${PATH}`
+    try {
+      const file = path.join(tmpHome, '.claude', '.credentials.json')
+      const item = path.join(kc, Buffer.from('Claude Code-credentials').toString('hex'))
+      login(tmpHome, 'a', 'tok-file') // leaves a stale file next to the Keychain
+      fs.writeFileSync(item, JSON.stringify({ claudeAiOauth: { accessToken: 'tok-keychain' } }))
+      assert.match(readCredentials(tmpHome), /tok-keychain/)
+      writeCredentials(tmpHome, JSON.stringify({ claudeAiOauth: { accessToken: 'tok-new' } }))
+      assert.match(fs.readFileSync(item, 'utf-8'), /tok-new/)
+      assert.match(fs.readFileSync(file, 'utf-8'), /tok-new/)
+      // too long for `security -i`: the stale item is deleted, the file holds it, argv never sees it
+      const long = JSON.stringify({ claudeAiOauth: { accessToken: 'tok-long' }, mcpOAuth: { pad: 'x'.repeat(3000) } })
+      writeCredentials(tmpHome, long)
+      assert.ok(!fs.existsSync(item))
+      assert.equal(fs.readFileSync(file, 'utf-8'), long)
+      assert.equal(readCredentials(tmpHome), long)
+      assert.doesNotMatch(fs.readFileSync(path.join(kc, 'argv.log'), 'utf-8'), /746f6b2d|tok-/)
+      // only the file in use: it is updated and no Keychain item is created to shadow it
+      writeCredentials(tmpHome, JSON.stringify({ claudeAiOauth: { accessToken: 'tok-file-only' } }))
+      assert.ok(!fs.existsSync(item))
+      assert.match(fs.readFileSync(file, 'utf-8'), /tok-file-only/)
+    } finally {
+      Object.defineProperty(process, 'platform', platform)
+      process.env.PATH = PATH
+    }
+  })
+
+  test('regressions (round 3): stale temp origin, unrelated rule removal, network-failed candidate, webhook flag order', async () => {
+    for (const n of ['r3-a', 'r3-b', 'r3-c', 'r3-d']) {
+      login(tmpHome, n, `tok-${n}`)
+      saveProfile(tmpHome, n)
+    }
+    swapProfile(tmpHome, 'r3-a')
+    tempSwap(tmpHome, 'r3-b', '1h')
+    assert.throws(() => tempSwap(tmpHome, 'r3-a', '1h'), /untemp/)
+    swapProfile(tmpHome, 'r3-d') // a manual swap leaves the temp behind
+    tempSwap(tmpHome, 'r3-c', '1h')
+    assert.equal(loadTempProfile(tmpHome).originalProfile, 'r3-d')
+
+    // removing a rule after the applied one keeps it applied (a manual swap inside its window stays)
+    const config = { threshold: 95, safeguardThreshold: null }
+    addScheduleRule(tmpHome, '09:00-12:00', 'r3-a')
+    addScheduleRule(tmpHome, '13:00-18:00', 'r3-b')
+    checkSchedule(tmpHome, config, {}, new Date(2026, 9, 10, 10))
+    swapProfile(tmpHome, 'r3-d')
+    removeScheduleRule(tmpHome, '2')
+    assert.equal(checkSchedule(tmpHome, config, {}, new Date(2026, 9, 10, 10, 30)), null)
+
+    // a network failure keeps the last numbers usable; a rejected token does not
+    const cache = {
+      'r3-a|r3-a@example.com': { limits: [['5 giờ', 30, '']], note: 'lỗi mạng: fetch failed' },
+      'r3-b|r3-b@example.com': { limits: [['5 giờ', 5, '']], note: 'lỗi HTTP 401 (token hết hạn/bị thu hồi)' },
+      'r3-c|r3-c@example.com': { limits: [['5 giờ', 60, '']] },
+    }
+    assert.equal(findNextProfile(tmpHome, { config: { ...config, enabled: true }, cache }), 'r3-a')
+
+    assert.match((await runSwapCli(tmpHome, ['webhook', '--no-color', 'set', 'telegram', 'https://x'])).output, /không được phép/)
+  })
+
   test('weekly report sums up quota, projects and swaps', () => {
     login(tmpHome, 'a', 'tok-a')
     saveProfile(tmpHome, 'wr-one')
@@ -1990,6 +2157,16 @@ describe('swap.js core functionality', () => {
     assert.ok(!htmlText.includes(dash.token))
     assert.equal((await fetch(`${dash.url}/api/data`)).status, 401)
     const auth = { 'X-Dashboard-Token': dash.token }
+
+    // a malformed request target gets a 400 instead of killing the server
+    const raw = await new Promise(resolve => {
+      const sock = net.connect(dash.port, '127.0.0.1', () => sock.end('GET http://[ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n'))
+      let out = ''
+      sock.on('data', d => (out += d)).on('close', () => resolve(out)).on('error', () => resolve(out))
+    })
+    assert.match(raw, /^HTTP\/1\.1 400/)
+    assert.equal((await fetch(`${dash.url}/api/data`, { headers: auth })).status, 200)
+    assert.match((await runSwapCli(tmpHome, ['webhook', 'set', 'telegram', 'https://x'])).output, /không được phép/)
 
     // Verify GET /api/data
     const dataRes = await fetch(`${dash.url}/api/data`, { headers: auth })

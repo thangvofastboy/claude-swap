@@ -70,6 +70,7 @@ test('/profile maps subcommands including auto and rejects junk', async ($, on) 
     ['help'],
     ['overview', '--json'],
     ['list'],
+    ['statusline', 'json'], // `list` refreshes the quota cache
     ['save', 'work', '--force'],
     ['statusline', 'json'],
     ['new', 'personal'],
@@ -283,7 +284,7 @@ test('/profile dispatches new Batch 4 subcommands: disable, enable, disabled, ad
   await $.command.run({ command: 'profile', args: 'enable work' })
   await $.command.run({ command: 'profile', args: 'disabled' })
   await $.command.run({ command: 'profile', args: 'add-token sk-ant-api03-test my-api' })
-  await $.command.run({ command: 'profile', args: 'run work' })
+  await $.command.run({ command: 'profile', args: 'run work -- claude -p hi' })
 
   expect(calls).toEqual([
     ['disable', 'work'],
@@ -291,9 +292,9 @@ test('/profile dispatches new Batch 4 subcommands: disable, enable, disabled, ad
     ['enable', 'work'],
     ['statusline', 'json'],
     ['disabled'],
-    ['add-token', 'sk-ant-api03-test', 'my-api'],
+    ['add-token', '--token-stdin', 'my-api'], // the token itself goes on stdin
     ['statusline', 'json'],
-    ['run', 'work'],
+    ['run', 'work', '--', 'claude', '-p', 'hi'],
     ['statusline', 'json'],
   ])
 })
@@ -429,9 +430,9 @@ test('read-only commands do not spawn a second process for the status band', asy
   })
   on('ui.invalidate', () => ({ value: undefined }))
   on('ui.status', () => ({ value: undefined }))
-  await $.command.run({ command: 'profile', args: 'list' })
+  await $.command.run({ command: 'profile', args: 'cooldown' })
   await $.command.run({ command: 'profile', args: 'history 5' })
-  expect(calls).toEqual([['list'], ['history', '5']])
+  expect(calls).toEqual([['cooldown'], ['history', '5']])
   await $.command.run({ command: 'profile', args: 'undo' }) // may change the profile: refresh
   expect(calls[2]).toEqual(['undo'])
   expect(calls[3]).toEqual(['statusline', 'json'])

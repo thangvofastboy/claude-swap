@@ -122,25 +122,36 @@ async function nodeCandidates($: EngineInterface, script: string, argv: string[]
 let launcher = -1
 
 // the plugin is the repo itself: swap.js sits next to .claude-plugin/ and hooks/
-async function runSwap($: EngineInterface, argv: string[]) {
+// commands that run `claude` themselves (repair, upgrade) or talk to a remote: past the 30 s default
+const SLOW = new Set(['repair', 'upgrade', 'sync', 'run'])
+
+async function runSwap($: EngineInterface, argv: string[], stdin?: string) {
   const script = `${$.plugin.root}/swap.js`
+  const init = { timeoutMs: SLOW.has(argv[0]) ? 600_000 : 30_000, ...(stdin === undefined ? {} : { stdin }) }
   // the common case, `node` on PATH, costs no `$.env` lookups
+  // a rejection that took the whole timeout is the command running too long, not a missing node: running it again
+  // under another launcher would repeat its work. A quick one means this launcher could not start.
+  const start = Date.now()
+  const timedOut = () => Date.now() - start >= init.timeoutMs - 1000
   if (launcher <= 0) {
     try {
-      const ran = await $.process.run(['node', script, ...argv])
+      const ran = await $.process.run(['node', script, ...argv], init)
       launcher = 0
       return ran
-    } catch {}
+    } catch (error) {
+      if (timedOut()) throw error
+    }
   }
   const all = await nodeCandidates($, script, argv)
   const order = launcher > 0 ? [launcher, ...all.keys()].filter((i, n, a) => a.indexOf(i) === n) : [...all.keys()].slice(1)
   let failure: unknown
   for (const i of order) {
     try {
-      const ran = await $.process.run(all[i])
+      const ran = await $.process.run(all[i], init)
       launcher = i
       return ran
     } catch (error) {
+      if (timedOut()) throw error
       failure = error
     }
   }
@@ -265,9 +276,9 @@ async function saveSettings($: EngineInterface) {
   $.ui.invalidate('ui.render')
 }
 
-// commands that only read: they cannot change what the band shows, so they skip the extra `statusline json` process
+// commands that only read: they cannot change what the band shows (not `list`/`usage`: they refresh the quota cache), so they skip the extra `statusline json` process
 const READ_ONLY = new Set([
-  'help', 'overview', 'list', 'current', 'usage', 'folder', 'history', 'stats', 'cooldown', 'forecast', 'doctor', 'tags',
+  'help', 'overview', 'current', 'folder', 'history', 'stats', 'cooldown', 'forecast', 'doctor', 'tags',
   'aliases', 'disabled', 'branch-bindings', 'affinities', 'prompt', 'completion', 'version', 'share', 'export', 'web', 'dashboard',
 ])
 
@@ -322,12 +333,12 @@ export const register: Register = on => {
 
     try {
       const targetDir = e.cwd || '.'
-      const boundRan = await runSwap($, ['bind', 'get', targetDir])
+      // both at once: each is a node start-up, ~100 ms on Windows
+      const [boundRan, curRan] = await Promise.all([runSwap($, ['bind', 'get', targetDir]), runSwap($, ['current'])])
       const boundOut = boundRan.stdout.trim()
       const match = boundOut.match(/(?:đang liên kết với profile|bound to profile|profile):\s*([^\s()]+)/i)
       if (match && match[1]) {
         const boundProfile = match[1]
-        const curRan = await runSwap($, ['current'])
         const curProfile = curRan.stdout.trim()
         if (boundProfile !== curProfile) {
           await runSwap($, ['swap', boundProfile, '--project'])
@@ -550,6 +561,8 @@ export const register: Register = on => {
   on('command.run', { command: 'profile' }, async ($, e) => {
     const argv = toArgv(e.args)
     if (!argv) return { text: USAGE }
+    // an interactive `claude` has no terminal here: the hook only collects output
+    if (argv[0] === 'run' && !argv.includes('--')) return { text: `Chạy trong terminal: node "${$.plugin.root}/swap.js" run ${argv[1] || '<tên>'}` }
 
     // bare `/profile settings` opens the editor; with arguments (`settings set k v`) it runs as any command
     if (argv[0] === 'settings' && argv.length === 1) {
@@ -561,8 +574,10 @@ export const register: Register = on => {
     }
 
     // bare `/profile`: the overview's data, for the render hook to draw in colour above the help
+    // the token goes on stdin, not argv, where `ps` would show it
+    const token = argv[0] === 'add-token' && argv[1] && !argv[1].startsWith('--') ? argv[1] : undefined
     const [ran, ov] = await Promise.all([
-      runSwap($, argv),
+      token ? runSwap($, ['add-token', '--token-stdin', ...argv.slice(2)], token) : runSwap($, argv),
       argv.length === 1 && argv[0] === 'help' ? runSwap($, ['overview', '--json']).catch(() => null) : null,
     ])
     if (ov) {
@@ -570,7 +585,7 @@ export const register: Register = on => {
         overview = JSON.parse(ov.stdout.trim())
       } catch {}
     }
-    if (!READ_ONLY.has(argv[0]) || ran.exitCode !== 0) await refreshStatus($)
+    if (!READ_ONLY.has(argv[0]) || ran.exitCode !== 0) await refreshStatus($).catch(() => undefined)
     const out = `${ran.stdout}${ran.stderr}`.trim()
     // the new version is only on disk: have the host re-read plugins once this command has returned
     if (argv[0] === 'upgrade' && ran.exitCode === 0) {
