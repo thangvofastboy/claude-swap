@@ -3876,7 +3876,7 @@ export function exportSafeShare(home = os.homedir(), outputPath = null) {
 export function generateCompletion(shell = 'bash') {
   const subcommands = [
     'list', 'swap', 'new', 'save', 'delete', 'usage', 'auto', 'run', 'add-token',
-    'rename', 'disable', 'enable', 'disabled', 'upgrade', 'web', 'dashboard', 'balance',
+    'rename', 'disable', 'enable', 'disabled', 'upgrade', 'autoupdate', 'web', 'dashboard', 'balance',
     'webhook', 'budget', 'cost', 'mask', 'share', 'completion', 'alias', 'unalias',
     'aliases', 'bind', 'unbind', 'bind-branch', 'unbind-branch', 'branch-bindings',
     'tag', 'untag', 'tags', 'affinity', 'unaffinity', 'affinities', 'temp', 'untemp',
@@ -3939,6 +3939,39 @@ export function upgradePlugin(run = spawnClaudeSync) {
     if (out) outputs.push(out)
   }
   return outputs.join('\n')
+}
+
+const AUTO_UPDATE_MS = 6 * 3600000
+
+export function updateConfigFile(home) {
+  return path.join(profilesDir(home), '.update.json')
+}
+
+export function loadUpdateConfig(home) {
+  try {
+    return { auto: true, lastRun: 0, ...JSON.parse(fs.readFileSync(updateConfigFile(home), 'utf-8')) }
+  } catch {
+    return { auto: true, lastRun: 0 }
+  }
+}
+
+export function setAutoUpdate(home, auto) {
+  atomicWrite(updateConfigFile(home), JSON.stringify({ ...loadUpdateConfig(home), auto: Boolean(auto) }))
+}
+
+// From the hook at session start: at most every AUTO_UPDATE_MS, while `update.auto` is on. The stamp is written
+// before the network call, so an offline machine is not retried on every start. Returns the plugin manager's output
+// when a new version was installed, '' otherwise (skipped, current, or failed).
+export function maybeAutoUpdate(home, run = spawnClaudeSync) {
+  const cfg = loadUpdateConfig(home)
+  if (!cfg.auto || Date.now() - cfg.lastRun < AUTO_UPDATE_MS || isolatedSession(home)) return ''
+  atomicWrite(updateConfigFile(home), JSON.stringify({ ...cfg, lastRun: Date.now() }))
+  try {
+    const out = upgradePlugin(run)
+    return /updated from/i.test(out) ? out : ''
+  } catch {
+    return ''
+  }
 }
 
 // ---------------------------------------------------------------- cli
@@ -4193,6 +4226,7 @@ const SETTINGS = [
     (h, v) => saveNotificationConfig(h, { ...loadNotificationConfig(h), enabled: onOff(v) })],
   ['mask', 'bool', 'Che email trong list và dashboard', h => isMaskingEnabled(h), (h, v) => setMasking(h, onOff(v))],
   ['repair.auto', 'bool', 'Tự làm mới token hết hạn ở nền, 6 giờ một lần', h => loadRepairConfig(h).auto, (h, v) => setAutoRepair(h, onOff(v))],
+  ['update.auto', 'bool', 'Tự cập nhật plugin khi mở Claude, 6 giờ một lần', h => loadUpdateConfig(h).auto, (h, v) => setAutoUpdate(h, onOff(v))],
   ['lang', 'choice:vi,en', 'Ngôn ngữ', h => loadLanguage(h), (h, v) => setLanguage(h, v)],
 ]
 
@@ -4228,7 +4262,7 @@ export function formatSettings(home) {
 // Single-codepoint emoji only: a VS16 one (⚙️, ↩️, 🏷️) is drawn one cell wide by some terminals and breaks the columns.
 const SETTING_ICONS = {
   'auto.enabled': '🤖', 'auto.threshold': '🎯', 'auto.safeguard': '🚧', 'auto.return': '🔁', 'auto.primary': '⭐',
-  'auto.pool': '👥', 'auto.order': '🔢', balance: '🔄', statusline: '📊', notify: '🔔', mask: '🙈', 'repair.auto': '🔧', lang: '🌐',
+  'auto.pool': '👥', 'auto.order': '🔢', balance: '🔄', statusline: '📊', notify: '🔔', mask: '🙈', 'repair.auto': '🔧', 'update.auto': '⬆', lang: '🌐',
 }
 
 export function overviewData(home) {
@@ -4505,6 +4539,12 @@ async function runCliInner(argv, home) {
             ? '⬆️ Plugin updated. Run /reload-plugins (or restart Claude Code) to load the new version.'
             : '⬆️ Đã cập nhật plugin. Chạy /reload-plugins (hoặc khởi động lại Claude Code) để nạp bản mới.'
         )
+        return 0
+      }
+      case 'autoupdate': {
+        // machine-read by the session.start hook: prints the manager's output only when a new version was installed
+        const out = maybeAutoUpdate(home)
+        if (out) console.log(out)
         return 0
       }
       case 'run': {

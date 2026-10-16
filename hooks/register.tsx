@@ -51,6 +51,7 @@ const SUBCOMMANDS = new Set([
   'run',
   'version',
   'upgrade',
+  'autoupdate',
   'web',
   'dashboard',
   'balance',
@@ -85,6 +86,9 @@ function toArgv(args: string): string[] | undefined {
     return ['import', path, ...(words.includes('--force') ? ['--force'] : [])]
   }
   if (SUBCOMMANDS.has(words[0])) return words
+  // `<name> current`: this session only. A live session shares the config files with the others, so it is answered
+  // with the terminal command for an isolated one (`run <name>`) instead of a swap
+  if (words.length === 2 && words[1] === 'current') return ['run', words[0]]
   if (words.length === 1) return ['swap', words[0]]
   if (words.length === 2 && words[1] === '--project') return ['swap', words[0], '--project']
   return undefined
@@ -123,7 +127,7 @@ let launcher = -1
 
 // the plugin is the repo itself: swap.js sits next to .claude-plugin/ and hooks/
 // commands that run `claude` themselves (repair, upgrade) or talk to a remote: past the 30 s default
-const SLOW = new Set(['repair', 'upgrade', 'sync', 'run'])
+const SLOW = new Set(['repair', 'upgrade', 'autoupdate', 'sync', 'run'])
 
 async function runSwap($: EngineInterface, argv: string[], stdin?: string) {
   const script = `${$.plugin.root}/swap.js`
@@ -345,6 +349,15 @@ export const register: Register = on => {
         }
       }
     } catch {}
+
+    // network call, never awaited: it must not hold the session start. A new version is only on disk until reloaded.
+    void runSwap($, ['autoupdate'])
+      .then(ran => {
+        if (ran.exitCode !== 0 || !ran.stdout.trim()) return
+        $.ui.toast('⬆️ claude-swap đã cập nhật, đang nạp lại plugin...')
+        $.clock.after(500, () => void $.command.run({ command: 'reload-plugins' }).catch(() => undefined))
+      })
+      .catch(() => undefined)
 
     void refreshStatus($).catch(() => undefined)
     if (!ticking) {

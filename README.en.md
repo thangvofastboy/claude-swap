@@ -196,6 +196,8 @@ This part is a bit more serious, because typos in commands aren't fun.
 | `/profile add-token <tok> [name]` | Create a profile straight from a setup-token or API key, no browser needed |
 | `echo $TOK \| node swap.js add-token - [name]` | Feed the token via `stdin` so it stays out of your shell history |
 | `/profile upgrade` | Pull the latest version and reload it, no restart needed |
+| `/profile <name> current` | This session only: swaps nothing, answers with the `run <name>` command for an isolated session; other sessions untouched (`/profile <name>` still switches all) |
+| `/profile settings set update.auto on\|off` | Auto-update the plugin when Claude opens, every 6h (default on) |
 | `/profile disable <name>` | Send a profile on leave: auto-switch won't wake it up |
 | `/profile enable <name>` | Leave is over, back into the auto-switch rotation |
 | `/profile disabled [--json]` | Who's on leave |
@@ -364,6 +366,8 @@ Skills, agents, plugins, settings and memory live in `~/.claude/` and **belong t
 
 | Version | Highlights |
 | --- | --- |
+| **0.4.11** | Plugin updates itself when Claude opens (every 6h, off via `update.auto`); `/profile <name> current` opens an isolated session for this one only, others untouched |
+| **0.4.10** | Data-loss and auto-switch fixes, faster hot path, macOS/Windows hardening, smoother dashboard |
 | **0.4.9** | `/profile` opens with a coloured Overview: current profile, 5h/7d quota bars, every setting on/off; `overview [--json]` command |
 | **0.4.8** | Status line always has current numbers (also with auto-switch off) and refreshes every minute; `⚠` when the numbers are stale or failed; suggests a profile to move to when running out; notification when auto-switch swaps; `list` flags profiles with an expired token and no longer loses its numbers with `mask` on; `usage` draws 24h/7-day history; 7d budget per hour; a swap button on the band; a toast when a profile recovers; per-project usage in `stats`; `repair` renews expired tokens; webhook alerts for the 7d budget and recovered profiles; `stats --json`; the dashboard shows the 7d budget, per-project usage and a repair button; click a command in the `/profile` table to put it in the prompt box; `/profile settings` edits every setting in one table; `schedule` swaps by time of day; `repair auto`; per-model quota on the band; weekly webhook report; `help <keyword>`; compact band on narrow terminals; looks for `node` in the usual install places when the Desktop app's PATH lacks it |
 | **0.4.7** | Fixed the running-out forecast: counted from the latest measurement and silent when the data is stale, instead of warning `⚠ 5h ~12p` from an old reading |

@@ -196,6 +196,8 @@ Phần này nghiêm túc hơn một chút, vì gõ sai lệnh thì không vui.
 | `/profile add-token <tok> [tên]` | Tạo profile thẳng từ setup-token hoặc API key, không cần trình duyệt |
 | `echo $TOK \| node swap.js add-token - [tên]` | Đưa token qua `stdin` để nó không nằm lại trong lịch sử shell |
 | `/profile upgrade` | Kéo bản mới nhất về và tự nạp lại, khỏi khởi động lại Claude Code |
+| `/profile <tên> current` | Chỉ phiên này: không đổi gì, trả lệnh `run <tên>` để mở session cô lập; các session khác giữ nguyên (`/profile <tên>` vẫn đổi tất cả) |
+| `/profile settings set update.auto on\|off` | Tự cập nhật plugin khi mở Claude, 6 giờ một lần (mặc định bật) |
 | `/profile disable <tên>` | Cho profile nghỉ phép: auto-switch sẽ không gọi nó dậy |
 | `/profile enable <tên>` | Hết phép, quay lại vòng xoay auto-switch |
 | `/profile disabled [--json]` | Ai đang nghỉ phép |
@@ -364,6 +366,8 @@ Skill, agent, plugin, settings và memory nằm trong `~/.claude/` nên **không
 
 | Bản | Điểm chính |
 | --- | --- |
+| **0.4.11** | Tự cập nhật plugin khi mở Claude (6 giờ một lần, tắt bằng `update.auto`); `/profile <tên> current` mở session cô lập chỉ cho phiên đó, các session khác giữ nguyên |
+| **0.4.10** | Sửa lỗi mất dữ liệu và auto-switch, đường nóng nhanh hơn, cứng hóa macOS/Windows, dashboard mượt hơn |
 | **0.4.9** | `/profile` mở đầu bằng khối Tổng quan có màu và icon: profile đang dùng, thanh quota 5h/7d, mọi cài đặt bật/tắt; lệnh `overview [--json]` |
 | **0.4.8** | Status line luôn có số liệu mới (kể cả khi tắt auto-switch) và tự cập nhật mỗi phút; báo `⚠` khi số liệu cũ/lỗi; gợi ý profile thay thế khi sắp cạn; thông báo khi auto-switch đổi profile; `list` đánh dấu profile token hết hạn và sửa lỗi mất số liệu khi bật `mask`; `usage` có biểu đồ 24h/7 ngày; ngân sách 7d theo giờ; nút chuyển trên dải; báo profile hồi quota; usage theo dự án trong `stats`; `repair` làm mới token hết hạn; cảnh báo webhook về ngân sách 7d và hồi quota; `stats --json`; dashboard có ngân sách 7d, usage theo dự án, nút sửa token; bấm lệnh trong bảng `/profile` để đưa xuống ô nhập; `/profile settings` sửa mọi cài đặt trong một bảng; `schedule` đổi profile theo giờ; `repair auto`; quota riêng theo model trên dải; báo cáo tuần qua webhook; `help <từ khóa>`; dải gọn cho terminal hẹp; tìm `node` ở các chỗ cài phổ biến khi app Desktop không thấy trong PATH |
 | **0.4.7** | Sửa dự báo cạn quota: tính từ lúc đo gần nhất và im lặng khi số liệu đã cũ, thay vì báo `⚠ 5h ~12p` dựa trên số đo từ lâu |

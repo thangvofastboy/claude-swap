@@ -7,6 +7,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import {
+  maybeAutoUpdate,
+  setAutoUpdate,
   saveProfile,
   swapProfile,
   deleteProfile,
@@ -1707,6 +1709,27 @@ describe('swap.js core functionality', () => {
     assert.equal(maybeAutoRepair(tmpHome, spawn), true)
     assert.equal(maybeAutoRepair(tmpHome, spawn), false) // ran just now
     assert.deepEqual(spawned, ['repair'])
+  })
+
+  test('auto update runs at most every 6h, only while on, and reports only a real update', () => {
+    const file = path.join(tmpHome, '.config', 'claude-cli-profiles', '.update.json')
+    const calls = []
+    const run = (cmd, args) => {
+      calls.push(args[1])
+      return { status: 0, stdout: args[1] === 'update' ? 'Plugin "profile-swap" updated from 0.4.9 to 0.4.10' : 'ok', stderr: '' }
+    }
+    assert.match(maybeAutoUpdate(tmpHome, run), /updated from/)
+    assert.deepEqual(calls, ['marketplace', 'update'])
+    assert.equal(maybeAutoUpdate(tmpHome, run), '') // ran just now
+    assert.equal(calls.length, 2)
+    setAutoUpdate(tmpHome, false)
+    fs.writeFileSync(file, JSON.stringify({ auto: false, lastRun: 0 }))
+    assert.equal(maybeAutoUpdate(tmpHome, run), '') // off
+    assert.equal(calls.length, 2)
+    fs.writeFileSync(file, JSON.stringify({ auto: true, lastRun: 0 }))
+    assert.equal(maybeAutoUpdate(tmpHome, () => ({ status: 0, stdout: 'already up to date', stderr: '' })), '') // nothing new
+    fs.writeFileSync(file, JSON.stringify({ auto: true, lastRun: 0 }))
+    assert.equal(maybeAutoUpdate(tmpHome, () => ({ status: 1, stdout: '', stderr: 'offline' })), '') // a failure never throws
   })
 
   test('regressions: alias vs profile name, failed-fetch candidate, schedule removal, auto repair stamp', () => {

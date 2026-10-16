@@ -48,6 +48,22 @@ test('/profile <name> swaps through swap.js and shows it on the status line', as
   await expectBand($, 'work')
 })
 
+test('/profile <name> current swaps nothing and answers with the isolated-session command', async ($, on) => {
+  const calls: string[][] = []
+  on('process.run', async (_$, { argv }) => {
+    calls.push(argv.slice(2))
+    return ok('')
+  })
+  on('ui.invalidate', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+
+  const ran = await $.command.run({ command: 'profile', args: 'work current' })
+
+  expect(ran.text).toContain('swap.js')
+  expect(ran.text).toContain('run work')
+  expect(calls.some(c => c[0] === 'swap')).toBe(false)
+})
+
 test('/profile maps subcommands including auto and rejects junk', async ($, on) => {
   const calls: string[][] = []
   on('process.run', async (_$, { argv }) => {
@@ -154,6 +170,7 @@ test('session.start automatically switches to bound profile if different from cu
     ['bind', 'get', '/proj'],
     ['current'],
     ['swap', 'work', '--project'],
+    ['autoupdate'],
     ['statusline', 'json'],
   ])
 })
