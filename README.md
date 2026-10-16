@@ -366,6 +366,7 @@ Skill, agent, plugin, settings và memory nằm trong `~/.claude/` nên **không
 
 | Bản | Điểm chính |
 | --- | --- |
+| **0.4.12** | 429 không còn bị ghi đè giữa các session và backoff tăng dần; lịch đổi profile không bị đánh dấu xong khi profile đích đang bị 429; prompt không chờ usage quá 4 giây; đọc email profile nhanh hơn |
 | **0.4.11** | Tự cập nhật plugin khi mở Claude (6 giờ một lần, tắt bằng `update.auto`); `/profile <tên> current` mở session cô lập chỉ cho phiên đó, các session khác giữ nguyên |
 | **0.4.10** | Sửa lỗi mất dữ liệu và auto-switch, đường nóng nhanh hơn, cứng hóa macOS/Windows, dashboard mượt hơn |
 | **0.4.9** | `/profile` mở đầu bằng khối Tổng quan có màu và icon: profile đang dùng, thanh quota 5h/7d, mọi cài đặt bật/tắt; lệnh `overview [--json]` |

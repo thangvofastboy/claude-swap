@@ -366,6 +366,7 @@ Skills, agents, plugins, settings and memory live in `~/.claude/` and **belong t
 
 | Version | Highlights |
 | --- | --- |
+| **0.4.12** | 429 no longer overwritten across sessions, backoff grows per retry; a schedule rule is not marked done while its target is rate-limited; the prompt waits at most 4 s for usage; profile email read faster |
 | **0.4.11** | Plugin updates itself when Claude opens (every 6h, off via `update.auto`); `/profile <name> current` opens an isolated session for this one only, others untouched |
 | **0.4.10** | Data-loss and auto-switch fixes, faster hot path, macOS/Windows hardening, smoother dashboard |
 | **0.4.9** | `/profile` opens with a coloured Overview: current profile, 5h/7d quota bars, every setting on/off; `overview [--json]` command |

@@ -14,6 +14,7 @@ export const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage?cedar_ember=
 export const WARN_PCT = 80
 export const USAGE_TTL = 300 // seconds
 export const USAGE_BACKOFF = 600 // seconds
+const PROMPT_FETCH_MS = 4000 // the prompt waits on `auto check`: cap its usage fetch well under fetchUsage's 10 s
 export const LABEL_5H = '5 giờ'
 export const LABEL_7D = '7 ngày'
 export const USAGE_LIMITS = [
@@ -360,10 +361,20 @@ export function setCurrent(home, name) {
   }
 }
 
+// Called many times per prompt (cacheHit, alerts, ranking) and each profile file carries credentials: keep the
+// email by (inode, mtime, size). atomicWrite renames a new file in, so any rewrite changes the inode.
+const emailMemo = new Map()
 export function profileEmail(home, name) {
+  const file = profilePath(home, name)
   try {
-    const data = JSON.parse(fs.readFileSync(profilePath(home, name), 'utf-8'))
-    return data.claude_json?.oauthAccount?.emailAddress || ''
+    const st = fs.statSync(file)
+    const stamp = `${st.ino}:${st.mtimeMs}:${st.size}`
+    const memo = emailMemo.get(file)
+    if (memo && memo.stamp === stamp) return memo.email
+    const data = JSON.parse(fs.readFileSync(file, 'utf-8'))
+    const email = data.claude_json?.oauthAccount?.emailAddress || ''
+    emailMemo.set(file, { stamp, email })
+    return email
   } catch {
     return ''
   }
@@ -833,7 +844,7 @@ export function importProfiles(home, folderPath, overwrite = false) {
 
 // ---------------------------------------------------------------- usage
 
-export async function fetchUsage(token) {
+export async function fetchUsage(token, timeoutMs = 10000) {
   if (!token || token.startsWith('tok-') || token.startsWith('mock-')) {
     return {
       five_hour: { utilization: 0, resets_at: null },
@@ -846,7 +857,7 @@ export async function fetchUsage(token) {
       'anthropic-beta': 'oauth-2025-04-20',
       'User-Agent': 'claude-swap',
     },
-    signal: AbortSignal.timeout(10000),
+    signal: AbortSignal.timeout(timeoutMs),
   })
   if (!res.ok) {
     const err = new Error(`HTTP ${res.status}`)
@@ -908,14 +919,17 @@ export function loadUsageCache(home) {
   }
 }
 
-function retryAfter(headers) {
+// Seconds to wait after a 429: the server's Retry-After (delta-seconds or HTTP-date) when valid, otherwise
+// USAGE_BACKOFF doubled per consecutive 429 (`fails`); always 30 s..1 h. A NaN here would make `retry_at` NaN,
+// which reads as "not limited" and hammers the endpoint on every prompt.
+export function retryAfter(headers, fails = 0) {
+  let sec = NaN
   try {
     const val = headers?.get?.('Retry-After')
-    if (val) {
-      return Math.min(Math.max(parseFloat(val), 30), 3600)
-    }
+    if (val) sec = /^\s*\d+(\.\d+)?\s*$/.test(val) ? parseFloat(val) : (Date.parse(val) - Date.now()) / 1000
   } catch {}
-  return USAGE_BACKOFF
+  if (!Number.isFinite(sec)) sec = USAGE_BACKOFF * 2 ** Math.min(fails, 2)
+  return Math.min(Math.max(sec, 30), 3600)
 }
 
 function rateLimitedNote(hit, hasData) {
@@ -977,6 +991,12 @@ export async function profileUsage(
   }
 
   if (typeof expires === 'number' && expires < Date.now()) {
+    // the live profile: Claude Code renews its own token on the next request, so show the cached numbers and let
+    // the TTL stamp stop every prompt from re-reading the credentials until then
+    if (active) {
+      cache[key] = { ...hit, at: now }
+      return { ...row, limits: cached }
+    }
     const note = `token đã hết hạn — chuyển sang profile này (swap ${name}) để CLI làm mới`
     cache[key] = { ...hit, note }
     return { ...row, note }
@@ -996,7 +1016,8 @@ export async function profileUsage(
     return { ...row, limits, note: limits.length ? '' : 'không có dữ liệu quota' }
   } catch (err) {
     if (err.status === 429) {
-      hit.retry_at = now + retryAfter(err.headers)
+      hit.fails = (hit.fails || 0) + 1
+      hit.retry_at = now + retryAfter(err.headers, hit.fails - 1)
       cache[key] = hit
       return { ...row, limits: cached, note: rateLimitedNote(hit, cached.length > 0) }
     }
@@ -1042,7 +1063,12 @@ function saveUsageCache(home, cache, before) {
   const text = JSON.stringify(cache, null, 2)
   if (text === before) return
   try {
-    atomicWrite(usageCacheFile(home), text)
+    // Other sessions share this file: write back only the entries this run changed, over a fresh read, so a
+    // 429 mark or newer numbers another process just saved are not overwritten with this run's older snapshot.
+    const old = JSON.parse(before || '{}')
+    const merged = loadUsageCache(home)
+    for (const k of Object.keys(cache)) if (JSON.stringify(cache[k]) !== JSON.stringify(old[k])) merged[k] = cache[k]
+    atomicWrite(usageCacheFile(home), JSON.stringify(merged, null, 2))
   } catch {}
 }
 
@@ -2010,13 +2036,22 @@ export function checkSchedule(home, config = loadAutoSwitchConfig(home), cache =
   const sched = loadSchedule(home)
   const active = activeScheduleRule(sched.rules, now)
   if (!active || sched.applied === active.key) return null
-  atomicWrite(scheduleFile(home), JSON.stringify({ ...sched, applied: active.key }, null, 2))
   const cur = currentProfile(home)
   const target = active.rule.profile
   const hit = cacheHit(home, cache, target)
-  if (target === cur || !profileExists(home, target) || isRateLimited(hit) || isExhausted(hit, config)) return null
+  // a 429 on the target is a polling limit, not an exhausted quota: leave the rule unapplied so a later prompt retries
+  if (target !== cur && profileExists(home, target) && isRateLimited(hit)) return null
+  atomicWrite(scheduleFile(home), JSON.stringify({ ...sched, applied: active.key }, null, 2))
+  if (target === cur || !profileExists(home, target) || isExhausted(hit, config)) return null
   swapProfile(home, target, { type: 'auto', reason: `Lịch ${active.rule.from}-${active.rule.to}` })
   return { from: cur, to: target }
+}
+
+// the profile a rule is about to switch to (window active, not applied yet), so its quota can be fetched first
+function pendingScheduleTarget(home, now = new Date()) {
+  const sched = loadSchedule(home)
+  const active = activeScheduleRule(sched.rules, now)
+  return active && sched.applied !== active.key ? active.rule.profile : null
 }
 
 export function formatSchedule(home, lang = 'vi') {
@@ -2055,13 +2090,15 @@ export async function autoCheckAndSwap(home, options = {}) {
   const refresh = async names => {
     if (options.cache) return
     try {
-      await refreshUsage(home, names, options.fetchFn || fetchUsage)
+      await refreshUsage(home, names, options.fetchFn || (t => fetchUsage(t, PROMPT_FETCH_MS)))
     } catch {}
     cache = loadUsageCache(home)
   }
   if (cur) await refresh([cur])
 
   if (!options.cache) {
+    const due = pendingScheduleTarget(home)
+    if (due && due !== cur) await refresh([due]) // without it a missing cache entry reads as "not exhausted"
     const scheduled = checkSchedule(home, config, cache)
     if (scheduled) return { swapped: true, ...scheduled, isSchedule: true }
   }
@@ -3964,7 +4001,8 @@ export function setAutoUpdate(home, auto) {
 // when a new version was installed, '' otherwise (skipped, current, or failed).
 export function maybeAutoUpdate(home, run = spawnClaudeSync) {
   const cfg = loadUpdateConfig(home)
-  if (!cfg.auto || Date.now() - cfg.lastRun < AUTO_UPDATE_MS || isolatedSession(home)) return ''
+  const last = Number.isFinite(cfg.lastRun) && cfg.lastRun <= Date.now() ? cfg.lastRun : 0 // clock skew or junk: treat as never
+  if (!cfg.auto || Date.now() - last < AUTO_UPDATE_MS || isolatedSession(home)) return ''
   atomicWrite(updateConfigFile(home), JSON.stringify({ ...cfg, lastRun: Date.now() }))
   try {
     const out = upgradePlugin(run)

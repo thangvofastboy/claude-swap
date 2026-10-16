@@ -7,6 +7,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import {
+  retryAfter,
   maybeAutoUpdate,
   setAutoUpdate,
   saveProfile,
@@ -1673,6 +1674,10 @@ describe('swap.js core functionality', () => {
     // 02:00 on the 11th is the tail of the window that started on the 10th
     assert.equal(activeScheduleRule(loadSchedule(tmpHome).rules, at(2, 0, 11)).key, '2026-10-10|0')
     const config = { threshold: 95, safeguardThreshold: 85 }
+    // a 429 on the target leaves the rule unapplied, so the next prompt retries
+    const limited = { [`sc-night|${profileEmail(tmpHome, 'sc-night')}`]: { limits: [], retry_at: Date.now() / 1000 + 600 } }
+    assert.equal(checkSchedule(tmpHome, config, limited, at(22, 15)), null)
+    assert.equal(currentProfile(tmpHome), 'sc-day')
     assert.deepEqual(checkSchedule(tmpHome, config, {}, at(22, 30)), { from: 'sc-day', to: 'sc-night' })
     swapProfile(tmpHome, 'sc-day') // a manual swap inside the window is left alone
     assert.equal(checkSchedule(tmpHome, config, {}, at(23)), null)
@@ -1730,6 +1735,39 @@ describe('swap.js core functionality', () => {
     assert.equal(maybeAutoUpdate(tmpHome, () => ({ status: 0, stdout: 'already up to date', stderr: '' })), '') // nothing new
     fs.writeFileSync(file, JSON.stringify({ auto: true, lastRun: 0 }))
     assert.equal(maybeAutoUpdate(tmpHome, () => ({ status: 1, stdout: '', stderr: 'offline' })), '') // a failure never throws
+  })
+
+  test('429 backs off: bad Retry-After never yields NaN, repeats double, saves do not clobber other sessions', async () => {
+    const h = v => ({ get: () => v })
+    assert.equal(retryAfter(h('120')), 120)
+    assert.equal(retryAfter(h('1')), 30)
+    assert.equal(retryAfter(h('999999')), 3600)
+    assert.equal(retryAfter(h(new Date(Date.now() + 200000).toUTCString())) > 150, true) // HTTP-date
+    assert.equal(retryAfter(h('garbage')), 600)
+    assert.equal(retryAfter(h(null), 1), 1200)
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'rl-one')
+    let calls = 0
+    const fail429 = async () => {
+      calls++
+      const e = new Error('HTTP 429')
+      e.status = 429
+      e.headers = h('garbage')
+      throw e
+    }
+    const cache = {}
+    const row = await profileUsage(tmpHome, 'rl-one', false, fail429, cache)
+    assert.match(row.note, /429/)
+    const hit = Object.values(cache)[0]
+    assert.equal(Number.isFinite(hit.retry_at), true)
+    await profileUsage(tmpHome, 'rl-one', false, fail429, cache, true) // even forced, no second request
+    assert.equal(calls, 1)
+    // two runs in parallel: the one that saves later must keep the other's entry
+    const file = path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json')
+    fs.writeFileSync(file, JSON.stringify({ 'other|x@y': { limits: [], at: 1 } }))
+    await refreshUsage(tmpHome, ['rl-one'], fail429)
+    const disk = JSON.parse(fs.readFileSync(file, 'utf-8'))
+    assert.ok(disk['other|x@y'])
   })
 
   test('regressions: alias vs profile name, failed-fetch candidate, schedule removal, auto repair stamp', () => {
