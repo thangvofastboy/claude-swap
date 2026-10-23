@@ -672,7 +672,7 @@ export function importConfig(home, cfg) {
   const exists = n => typeof n === 'string' && profileExists(home, n)
   const out = { aliases: 0, tags: 0, notes: 0, disabled: 0, skipped: 0, autoSwitch: false }
   for (const [alias, target] of Object.entries(cfg.aliases || {})) {
-    if (!exists(target) || profileExists(home, alias) || loadAliases(home)[alias]) {
+    if (!exists(target) || !NAME_RE.test(alias) || profileExists(home, alias) || loadAliases(home)[alias]) {
       out.skipped++
       continue
     }
@@ -686,12 +686,12 @@ export function importConfig(home, cfg) {
   for (const [name, info] of Object.entries(cfg.profiles || {})) {
     if (!exists(name) || !info || typeof info !== 'object') continue
     for (const t of Array.isArray(info.tags) ? info.tags : []) {
-      if (typeof t === 'string' && t.trim()) {
-        addProfileTag(home, name, t)
+      if (typeof t === 'string' && stripControl(t)) {
+        addProfileTag(home, name, stripControl(t))
         out.tags++
       }
     }
-    if (typeof info.note === 'string' && info.note.trim()) {
+    if (typeof info.note === 'string' && stripControl(info.note)) {
       setProfileNote(home, name, info.note)
       out.notes++
     }
@@ -718,11 +718,17 @@ export function importConfig(home, cfg) {
   return out
 }
 
+// text that ends up on a terminal (notes, tags, aliases from an imported file) must not carry escape sequences
+export function stripControl(text) {
+  return String(text ?? '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').trim()
+}
+
 export function setProfileNote(home, name, text) {
   const f = profilePath(home, name)
   if (!fs.existsSync(f)) throw new SwapError(`Profile '${name}' không tồn tại.`)
   const data = JSON.parse(fs.readFileSync(f, 'utf-8'))
-  if (text) data.note = text.trim()
+  const clean = stripControl(text)
+  if (clean) data.note = clean
   else delete data.note
   atomicWrite(f, JSON.stringify(data, null, 2))
 }
@@ -1470,12 +1476,12 @@ export function profileListReport(home, color = null, lang = null, opts = {}) {
       const older = dups.some(d => tokenExpiry(home, d) > tokenExpiry(home, n))
       badges.push(paint('1;33', `⇆ trùng ${dups.join(', ')}${older ? ' (token cũ hơn)' : ''}`))
     }
-    const note = profileNote(home, n)
+    const note = stripControl(profileNote(home, n))
     if (note) badges.push(paint('36', `📝 ${note.length > 30 ? `${note.slice(0, 29)}…` : note}`))
     const al = aliasNames[n]
-    if (al) badges.push(paint('1;35', `🔤 ${al.join(', ')}`))
+    if (al) badges.push(paint('1;35', `🔤 ${stripControl(al.join(', '))}`))
     const tags = getProfileTags(home, n)
-    if (tags.length) badges.push(paint('36', `🏷️ ${tags.join(', ')}`))
+    if (tags.length) badges.push(paint('36', `🏷️ ${stripControl(tags.join(', '))}`))
     if (disabledList.includes(n)) badges.push(paint('1;33', '(disabled)'))
     // the numbers above are from before this failure (an expired token keeps the last good limits)
     if (limits.length && hit.note) badges.push(paint('1;33', `⚠ ${shortNote(hit.note)}`))

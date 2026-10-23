@@ -1550,6 +1550,16 @@ describe('swap.js core functionality', () => {
     assert.equal(cfg.autoReturn, true)
   })
 
+  test('notes, tags and aliases imported from a file cannot carry terminal escapes', async () => {
+    login(tmpHome, 'esc_a', 'tok-a')
+    assert.equal(await runCli(['new', 'esc'], tmpHome), 0)
+    const evil = 'x\u001b[2J\u001b]0;pwned\u0007y'
+    importConfig(tmpHome, { aliases: { [evil]: 'esc' }, profiles: { esc: { tags: [evil], note: evil } } })
+    assert.doesNotMatch(profileNote(tmpHome, 'esc'), /[\u0000-\u001f]/)
+    assert.deepEqual(Object.keys(loadAliases(tmpHome)), [])
+    assert.doesNotMatch(profileListReport(tmpHome, false), /\u001b/)
+  })
+
   test('human commands are coloured, machine-read ones and --no-color stay plain', async () => {
     login(tmpHome, 'c_a', 'tok-a')
     saveProfile(tmpHome, 'col-a')
