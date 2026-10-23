@@ -619,6 +619,19 @@ test('without node on PATH it tries the usual install places, then sticks with t
   expect(tried).toEqual(['/usr/local/bin/node'])
 })
 
+test('the band shows the Fable 7-day usage, even when it is low', async ($, on) => {
+  const withFable = JSON.stringify({ ...JSON.parse(WORK), fable: { pct: 14, left: '3d' } })
+  on('process.run', async () => ok(`[status] ${withFable}`))
+  on('ui.invalidate', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  await $.prompt.submit({ text: 'hi' })
+  const ui = await band($)
+  expect(await ui.find({ type: 'Text', text: 'Fable 7d ' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '14%' })).toBeDefined()
+  await ui.unmount()
+})
+
 test('a narrow band drops the bars; /profile help <keyword> keeps its buttons', async ($, on) => {
   on('process.run', async () => ok(`[status] ${WORK}`))
   on('ui.invalidate', () => ({ value: undefined }))

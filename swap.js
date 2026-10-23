@@ -364,20 +364,24 @@ export function setCurrent(home, name) {
 // Called many times per prompt (cacheHit, alerts, ranking) and each profile file carries credentials: keep the
 // email by (inode, mtime, size). atomicWrite renames a new file in, so any rewrite changes the inode.
 const emailMemo = new Map()
-export function profileEmail(home, name) {
+function profileIdentity(home, name) {
   const file = profilePath(home, name)
   try {
     const st = fs.statSync(file)
     const stamp = `${st.ino}:${st.mtimeMs}:${st.size}`
     const memo = emailMemo.get(file)
-    if (memo && memo.stamp === stamp) return memo.email
-    const data = JSON.parse(fs.readFileSync(file, 'utf-8'))
-    const email = data.claude_json?.oauthAccount?.emailAddress || ''
-    emailMemo.set(file, { stamp, email })
-    return email
+    if (memo && memo.stamp === stamp) return memo
+    const acct = JSON.parse(fs.readFileSync(file, 'utf-8')).claude_json?.oauthAccount
+    const fresh = { stamp, email: acct?.emailAddress || '', id: accountId(acct) || '' }
+    emailMemo.set(file, fresh)
+    return fresh
   } catch {
-    return ''
+    return { email: '', id: '' }
   }
+}
+
+export function profileEmail(home, name) {
+  return profileIdentity(home, name).email
 }
 
 export function accountId(oauthAccount) {
@@ -406,11 +410,13 @@ export function saveProfile(home, name, force = false) {
     }
   }
   let existingTags = []
+  let existingNote
   let oldCredentials = null
   if (fs.existsSync(target)) {
     try {
       const old = JSON.parse(fs.readFileSync(target, 'utf-8'))
       if (Array.isArray(old.tags)) existingTags = old.tags
+      if (old.note) existingNote = old.note
       // same account: keep its saved token when the live one cannot be read (locked Keychain over SSH, Deny)
       const uuid = old.claude_json?.oauthAccount?.accountUuid
       if (uuid && uuid === auth.oauthAccount?.accountUuid) oldCredentials = old.credentials ?? null
@@ -420,6 +426,7 @@ export function saveProfile(home, name, force = false) {
     claude_json: auth,
     credentials: readCredentials(home) ?? oldCredentials,
     tags: existingTags,
+    ...(existingNote ? { note: existingNote } : {}),
   }
   if (Object.keys(profile.claude_json).length === 0 && !profile.credentials) {
     throw new SwapError('Không thấy thông tin đăng nhập nào. Hãy /login trong Claude CLI trước.')
@@ -430,6 +437,7 @@ export function saveProfile(home, name, force = false) {
 }
 
 export function swapProfile(home, name, options = {}) {
+  if (autoHold) throw new HeldSwap()
   const session = isolatedSession(home)
   if (session) {
     throw new SwapError(
@@ -541,6 +549,227 @@ export function recordSwapHistory(home, entry) {
   atomicWrite(swapHistoryFile(home), JSON.stringify(list, null, 2))
 }
 
+// other profiles that hold the same account (a second `new` of one login)
+export function duplicateProfiles(home, name) {
+  const id = profileIdentity(home, name).id
+  return id ? listProfiles(home).filter(n => n !== name && profileIdentity(home, n).id === id) : []
+}
+
+// when the token expires (ms); 0 when the profile has none
+export function tokenExpiry(home, name) {
+  try {
+    const exp = JSON.parse(JSON.parse(fs.readFileSync(profilePath(home, name), 'utf-8')).credentials || '{}').claudeAiOauth?.expiresAt
+    return typeof exp === 'number' ? (exp > 1e11 ? exp : exp * 1000) : 0
+  } catch {
+    return 0
+  }
+}
+
+export function profileNote(home, name) {
+  try {
+    return JSON.parse(fs.readFileSync(profilePath(home, name), 'utf-8')).note || ''
+  } catch {
+    return ''
+  }
+}
+
+// profiles holding one account, the one with the freshest token kept: [{ keep, drop }]
+export function dedupePlan(home) {
+  const groups = new Map()
+  for (const n of listProfiles(home)) {
+    const id = profileIdentity(home, n).id
+    if (id) groups.set(id, [...(groups.get(id) || []), n])
+  }
+  return [...groups.values()]
+    .filter(g => g.length > 1)
+    .map(g => {
+      const keep = g.reduce((a, b) => (tokenExpiry(home, b) > tokenExpiry(home, a) ? b : a))
+      return { keep, drop: g.filter(n => n !== keep) }
+    })
+}
+
+export function applyDedupe(home, plan) {
+  for (const { keep, drop } of plan) {
+    for (const d of drop) {
+      for (const t of getProfileTags(home, d)) addProfileTag(home, keep, t)
+      if (!profileNote(home, keep) && profileNote(home, d)) setProfileNote(home, keep, profileNote(home, d))
+      remapProfileState(home, d, keep)
+      deleteProfile(home, d)
+    }
+  }
+  return plan
+}
+
+// sessions that prompted lately, per profile: two live sessions on one profile race each other's token refresh
+const PRESENCE_MIN = 15
+function presenceFile(home) {
+  return path.join(profilesDir(home), '.presence.json')
+}
+
+// other sessions that prompted on this profile lately (not `except`, the caller's own)
+export function liveSessionsOn(home, name, except = '') {
+  let mine = {}
+  try {
+    mine = JSON.parse(fs.readFileSync(presenceFile(home), 'utf-8'))[name] || {}
+  } catch {}
+  const now = Date.now()
+  return Object.entries(mine).filter(([id, t]) => id !== except && now - t < PRESENCE_MIN * 60000).map(([id]) => id)
+}
+
+export function recordPresence(home, name, sessionId) {
+  const now = Date.now()
+  let all = {}
+  try {
+    all = JSON.parse(fs.readFileSync(presenceFile(home), 'utf-8'))
+  } catch {}
+  const mine = all[name] || {}
+  if (now - (mine[sessionId] || 0) < 60000) return []
+  const live = Object.fromEntries(Object.entries(mine).filter(([, t]) => now - t < PRESENCE_MIN * 60000))
+  live[sessionId] = now
+  all[name] = live
+  atomicWrite(presenceFile(home), JSON.stringify(all, null, 2))
+  return Object.keys(live).filter(id => id !== sessionId)
+}
+
+// each profile's login checked with one real request (a local expiry date cannot see a token revoked on the server)
+export async function verifyProfiles(home, names = listProfiles(home), fetchFn = fetchUsage) {
+  const rows = []
+  for (const n of names) {
+    const state = loginState(home, n)
+    if (state === 'expired') {
+      rows.push({ name: n, status: 'skip', text: 'access token đã hết hạn, Claude Code tự làm mới khi dùng (lỗi thì chạy /profile repair)' })
+      continue
+    }
+    if (state !== 'ok') {
+      rows.push({ name: n, status: 'fail', text: 'không có token, cần /login lại' })
+      continue
+    }
+    let token = ''
+    let apiKey = false
+    try {
+      const p = JSON.parse(fs.readFileSync(profilePath(home, n), 'utf-8'))
+      apiKey = Boolean(p.claude_json?.primaryApiKey)
+      token = JSON.parse(p.credentials || '{}').claudeAiOauth?.accessToken || ''
+    } catch {}
+    if (apiKey) {
+      rows.push({ name: n, status: 'skip', text: 'API key, không kiểm tra qua OAuth' })
+      continue
+    }
+    try {
+      await fetchFn(token)
+      rows.push({ name: n, status: 'ok', text: 'token hợp lệ' })
+    } catch (err) {
+      if (err.status === 401 || err.status === 403) rows.push({ name: n, status: 'fail', text: 'bị thu hồi trên máy chủ, cần /login lại' })
+      else rows.push({ name: n, status: 'unknown', text: `không kiểm tra được (${safeError(err)})` })
+    }
+  }
+  return rows
+}
+
+// the profiles' settings from an export-config file; only what names an existing profile is applied
+export function importConfig(home, cfg) {
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new SwapError('File cấu hình không đúng định dạng.')
+  const exists = n => typeof n === 'string' && profileExists(home, n)
+  const out = { aliases: 0, tags: 0, notes: 0, disabled: 0, skipped: 0, autoSwitch: false }
+  for (const [alias, target] of Object.entries(cfg.aliases || {})) {
+    if (!exists(target) || profileExists(home, alias) || loadAliases(home)[alias]) {
+      out.skipped++
+      continue
+    }
+    try {
+      setAlias(home, alias, target)
+      out.aliases++
+    } catch {
+      out.skipped++
+    }
+  }
+  for (const [name, info] of Object.entries(cfg.profiles || {})) {
+    if (!exists(name) || !info || typeof info !== 'object') continue
+    for (const t of Array.isArray(info.tags) ? info.tags : []) {
+      if (typeof t === 'string' && t.trim()) {
+        addProfileTag(home, name, t)
+        out.tags++
+      }
+    }
+    if (typeof info.note === 'string' && info.note.trim()) {
+      setProfileNote(home, name, info.note)
+      out.notes++
+    }
+  }
+  if (Array.isArray(cfg.disabled)) {
+    const list = cfg.disabled.filter(exists)
+    saveDisabledProfiles(home, [...loadDisabledProfiles(home), ...list]) // saved as a set
+    out.disabled = list.length
+  }
+  if (cfg.autoSwitch && typeof cfg.autoSwitch === 'object') {
+    const a = cfg.autoSwitch
+    const pct = v => typeof v === 'number' && Number.isFinite(v) && v >= 1 && v <= 100
+    const picked = {}
+    if (typeof a.enabled === 'boolean') picked.enabled = a.enabled
+    if (typeof a.autoReturn === 'boolean') picked.autoReturn = a.autoReturn
+    if (pct(a.threshold)) picked.threshold = a.threshold
+    if (pct(a.safeguardThreshold)) picked.safeguardThreshold = a.safeguardThreshold
+    if (a.pool === null || typeof a.pool === 'string') picked.pool = a.pool
+    if (Array.isArray(cfg.autoSwitch.order)) picked.order = cfg.autoSwitch.order.filter(exists)
+    if (exists(cfg.autoSwitch.primaryProfile)) picked.primaryProfile = cfg.autoSwitch.primaryProfile
+    saveAutoSwitchConfig(home, { ...loadAutoSwitchConfig(home), ...picked })
+    out.autoSwitch = true
+  }
+  return out
+}
+
+export function setProfileNote(home, name, text) {
+  const f = profilePath(home, name)
+  if (!fs.existsSync(f)) throw new SwapError(`Profile '${name}' không tồn tại.`)
+  const data = JSON.parse(fs.readFileSync(f, 'utf-8'))
+  if (text) data.note = text.trim()
+  else delete data.note
+  atomicWrite(f, JSON.stringify(data, null, 2))
+}
+
+// a profile name for a login that has none, from its email (sanitised, numbered when taken)
+export function autoProfileName(home, email) {
+  const base = (String(email).split('@')[0] || 'account').replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 50) || 'account'
+  let name = base
+  for (let i = 2; profileExists(home, name) || loadAliases(home)[name]; i++) name = `${base}-${i}`
+  return name
+}
+
+// the email of the login in use when no profile holds it (a /login after the last save), else ''
+export function unsavedLogin(home) {
+  const data = fs.existsSync(claudeJson(home)) ? loadClaudeJson(home) : {}
+  const id = accountId(data.oauthAccount)
+  if (!id) return ''
+  const known = listProfiles(home).some(n => {
+    try {
+      return accountId(JSON.parse(fs.readFileSync(profilePath(home, n), 'utf-8')).claude_json?.oauthAccount) === id
+    } catch {
+      return false
+    }
+  })
+  return known ? '' : data.oauthAccount.emailAddress || id
+}
+
+// the profile this one was swapped to from, for `swap -`
+export function previousProfile(home) {
+  const cur = currentProfile(home)
+  return loadSwapHistory(home).find(e => e.to === cur && e.from !== cur && profileExists(home, e.from))?.from || null
+}
+
+// why swapping to `name` now is a poor idea ('' when fine): no login at all, or a quota window that is still full.
+// An expired access token is not a risk, Claude Code renews it from the refresh token.
+export function swapRisk(home, name) {
+  const resolved = resolveProfileOrAlias(home, name)
+  if (resolved === currentProfile(home) || !profileExists(home, resolved)) return ''
+  if (loginState(home, resolved) === 'no_token') return 'không có token đăng nhập'
+  const hit = cacheHit(home, loadUsageCache(home), resolved)
+  for (const label of [LABEL_5H, LABEL_7D]) {
+    const lim = findLimit(hit, label)
+    if (lim && limitPct(hit, label) >= WARN_PCT && parseResetTime(hit, lim) > Date.now()) return `${label} đã dùng ${Math.round(limitPct(hit, label))}%`
+  }
+  return ''
+}
+
 export function formatSwapHistory(home, limit = 10) {
   const list = loadSwapHistory(home)
   if (list.length === 0) {
@@ -586,13 +815,61 @@ export function formatSwapStats(home) {
   ].join('\n')
 }
 
-export function deleteProfile(home, name) {
+// a deleted profile stays restorable for TRASH_DAYS
+export const TRASH_DAYS = 7
+
+function trashDir(home) {
+  const d = path.join(profilesDir(home), '.trash')
+  fs.mkdirSync(d, { recursive: true, mode: 0o700 })
+  return d
+}
+
+// the trash holds live tokens: anything older than TRASH_DAYS is removed whenever it is touched
+function purgeTrash(home) {
+  const dir = trashDir(home)
+  const cutoff = Date.now() - TRASH_DAYS * 86400000
+  for (const f of fs.readdirSync(dir)) {
+    const at = Number(f.split('.').at(-2))
+    if (Number.isFinite(at) && at < cutoff) fs.rmSync(path.join(dir, f), { force: true })
+  }
+  return dir
+}
+
+function moveToTrash(home, name, file) {
+  fs.renameSync(file, path.join(purgeTrash(home), `${name}.${Date.now()}.json`))
+}
+
+export function trashedProfiles(home) {
+  const dir = purgeTrash(home)
+  return fs
+    .readdirSync(dir)
+    .filter(f => f.endsWith('.json'))
+    .map(f => ({ name: f.slice(0, f.lastIndexOf('.', f.length - 6)), at: Number(f.split('.').at(-2)), file: path.join(dir, f) }))
+    .sort((a, b) => b.at - a.at)
+}
+
+export function restoreProfile(home, name) {
+  checkName(name)
+  if (profileExists(home, name)) throw new SwapError(`Profile '${name}' đã tồn tại.`)
+  const found = trashedProfiles(home).find(t => t.name === name)
+  if (!found) throw new SwapError(`Không có '${name}' trong thùng rác (giữ ${TRASH_DAYS} ngày).`)
+  atomicWrite(profilePath(home, name), fs.readFileSync(found.file, 'utf-8'))
+  fs.rmSync(found.file, { force: true })
+  return name
+}
+
+export function deleteProfile(home, name, { purge = false } = {}) {
   const resolved = resolveProfileOrAlias(home, name)
   const f = profilePath(home, resolved)
   if (!fs.existsSync(f)) {
     throw new SwapError(`Không có profile '${name}'.`)
   }
-  fs.unlinkSync(f)
+  if (purge) fs.unlinkSync(f)
+  else moveToTrash(home, resolved, f)
+  editStateFile(path.join(profilesDir(home), '.presence.json'), p => {
+    delete p[resolved]
+    return p
+  })
   if (readCurrent(home) === resolved) {
     setCurrent(home, null)
   }
@@ -620,24 +897,9 @@ function editStateFile(file, edit) {
 }
 
 // Every dotfile beside the profiles that is keyed by or points at a profile name must be handled here.
-export function renameProfile(home, oldName, newName) {
-  const from = resolveProfileOrAlias(home, oldName)
-  const to = checkName(newName)
-  const src = profilePath(home, from)
-  if (!fs.existsSync(src)) throw new SwapError(`Không có profile '${oldName}'.`)
-  if (from === to) throw new SwapError('Tên mới trùng tên cũ.')
-  const target = profilePath(home, to)
-  // "Work" -> "work" on a case-insensitive disk resolves to the very same file: that is a rename, not a clash
-  const sameFile = () => fs.statSync(target).ino === fs.statSync(src).ino
-  if (fs.existsSync(target) && !(from.toLowerCase() === to.toLowerCase() && sameFile())) {
-    throw new SwapError(`Profile '${to}' đã tồn tại.`)
-  }
-  if (loadAliases(home)[to]) throw new SwapError(`'${to}' đang là alias của '${loadAliases(home)[to]}'. Xóa alias trước (/profile unalias ${to}).`)
-  const session = isolatedSession(home)
-  if (session === from) throw new SwapError(`Đang ở trong session cô lập của '${from}'. Thoát session đó rồi đổi tên.`)
-
-  renameWithRetry(src, target)
-
+// every state file that is keyed by or points at profile `from` now says `to` (rename, and dedupe, which folds one
+// profile into another)
+function remapProfileState(home, from, to) {
   const dir = profilesDir(home)
   const swap = v => (v === from ? to : v)
   const swapKeys = obj => Object.fromEntries(Object.entries(obj).map(([k, v]) => [k === from ? to : k, v]))
@@ -648,6 +910,7 @@ export function renameProfile(home, oldName, newName) {
     } catch {}
   }
   const state = f => path.join(dir, f)
+  editStateFile(state('.presence.json'), p => Object.fromEntries(Object.entries(p).map(([k, v]) => [swap(k), v])))
   editStateFile(state('.aliases.json'), a => Object.fromEntries(Object.entries(a).map(([k, v]) => [k, swap(v)])))
   editStateFile(state('.model-affinity.json'), a => Object.fromEntries(Object.entries(a).map(([k, v]) => [k, swap(v)])))
   editStateFile(state('.project-bindings.json'), b => Object.fromEntries(Object.entries(b).map(([k, v]) => [k, swap(v)])))
@@ -676,6 +939,27 @@ export function renameProfile(home, oldName, newName) {
       if (bound === to && fs.readFileSync(marker, 'utf-8').trim() === from) fs.writeFileSync(marker, `${to}\n`, 'utf-8')
     } catch {}
   }
+}
+
+export function renameProfile(home, oldName, newName) {
+  const from = resolveProfileOrAlias(home, oldName)
+  const to = checkName(newName)
+  const src = profilePath(home, from)
+  if (!fs.existsSync(src)) throw new SwapError(`Không có profile '${oldName}'.`)
+  if (from === to) throw new SwapError('Tên mới trùng tên cũ.')
+  const target = profilePath(home, to)
+  // "Work" -> "work" on a case-insensitive disk resolves to the very same file: that is a rename, not a clash
+  const sameFile = () => fs.statSync(target).ino === fs.statSync(src).ino
+  if (fs.existsSync(target) && !(from.toLowerCase() === to.toLowerCase() && sameFile())) {
+    throw new SwapError(`Profile '${to}' đã tồn tại.`)
+  }
+  if (loadAliases(home)[to]) throw new SwapError(`'${to}' đang là alias của '${loadAliases(home)[to]}'. Xóa alias trước (/profile unalias ${to}).`)
+  const session = isolatedSession(home)
+  if (session === from) throw new SwapError(`Đang ở trong session cô lập của '${from}'. Thoát session đó rồi đổi tên.`)
+
+  renameWithRetry(src, target)
+
+  remapProfileState(home, from, to)
   // the isolated `run` session keeps its tokens under the old name: move it (its Keychain item is per directory)
   try {
     const oldDir = sessionDir(home, from)
@@ -1127,7 +1411,8 @@ function shortDuration(ms) {
   return m >= 60 ? `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m` : `${m}m`
 }
 
-export function profileListReport(home, color = null, lang = null) {
+// opts: sort ('5h' | '7d' | 'reset', least used or soonest reset first), only ('ok' | 'hot' | 'expired')
+export function profileListReport(home, color = null, lang = null, opts = {}) {
   const currentLang = lang || loadLanguage(home)
   const profiles = listProfiles(home)
   if (profiles.length === 0) {
@@ -1139,6 +1424,7 @@ export function profileListReport(home, color = null, lang = null) {
   const cache = loadUsageCache(home)
   const disabledList = loadDisabledProfiles(home)
   const masking = isMaskingEnabled(home)
+  const history = loadUsageHistory(home)
   const useColor = shouldColor(color)
   const paint = (code, text) => (useColor ? `\x1b[${code}m${text}\x1b[0m` : text)
 
@@ -1155,35 +1441,64 @@ export function profileListReport(home, color = null, lang = null) {
     return { shown: `${chartBar(pct, 8, useColor)} ${useColor ? `${pctColor(n)}${num}\x1b[0m` : num}${warn}` }
   }
 
-  const rows = profiles.map(n => {
+  const aliasNames = {}
+  for (const [a, p] of Object.entries(loadAliases(home))) (aliasNames[p] ||= []).push(a)
+
+  let rows = profiles.map(n => {
     const email = maskEmail(profileEmail(home, n), masking) || ''
     const hit = cacheHit(home, cache, n)
     const limits = Array.isArray(hit.limits) ? hit.limits : []
+    const lim5 = findLimit(hit, LABEL_5H)
+    const reset5 = lim5 ? parseResetTime(hit, lim5) : NaN
+    const worst = Math.max(limitPct(hit, LABEL_5H), limitPct(hit, LABEL_7D))
+    const login = loginState(home, n)
+    const fc = calculateForecast(home, n, 95, history)
+    const fcBadge = fc.hasData && !fc.stale && fc.trend === 'increasing' && fc.minutesUntilThreshold > 0 && fc.currentUtil < 95
+      ? paint('36', `📈 95% sau ${shortDuration(fc.minutesUntilThreshold * 60000)}`)
+      : null
     const at = cell(hit)
     const resetCell = label => (resetIn(hit, findLimit(hit, label)) || '—').padEnd(RESET_W)
     const quota = limits.length
-      ? [at(LABEL_5H).shown, at(LABEL_7D).shown, paint('36', resetCell(LABEL_5H)), paint('36', resetCell(LABEL_7D).trimEnd())].join('  ')
+      ? [at(LABEL_5H).shown, paint('36', resetCell(LABEL_5H)), at(LABEL_7D).shown, paint('36', resetCell(LABEL_7D).trimEnd())].join('  ')
       : hit.note
         ? paint('1;33', `(${hit.note})`)
-        : paint('90', '—'.padEnd(CELL_W) + '  ' + '—'.padEnd(CELL_W) + '  ' + '—'.padEnd(RESET_W) + '  —')
+        : paint('90', '—'.padEnd(CELL_W) + '  ' + '—'.padEnd(RESET_W) + '  ' + '—'.padEnd(CELL_W) + '  —')
     const badges = []
+    if (fcBadge) badges.push(fcBadge)
+    const dups = duplicateProfiles(home, n)
+    if (dups.length) {
+      const older = dups.some(d => tokenExpiry(home, d) > tokenExpiry(home, n))
+      badges.push(paint('1;33', `⇆ trùng ${dups.join(', ')}${older ? ' (token cũ hơn)' : ''}`))
+    }
+    const note = profileNote(home, n)
+    if (note) badges.push(paint('36', `📝 ${note.length > 30 ? `${note.slice(0, 29)}…` : note}`))
+    const al = aliasNames[n]
+    if (al) badges.push(paint('1;35', `🔤 ${al.join(', ')}`))
     const tags = getProfileTags(home, n)
     if (tags.length) badges.push(paint('36', `🏷️ ${tags.join(', ')}`))
     if (disabledList.includes(n)) badges.push(paint('1;33', '(disabled)'))
     // the numbers above are from before this failure (an expired token keeps the last good limits)
     if (limits.length && hit.note) badges.push(paint('1;33', `⚠ ${shortNote(hit.note)}`))
-    return { n, email, quota, badges, active: n === cur }
+    const dot = !limits.length ? '⚪' : worst >= 95 ? '🔴' : worst >= WARN_PCT ? '🟠' : worst >= 50 ? '🟡' : '🟢'
+    return {
+      n, email, quota, badges, dot, active: n === cur,
+      key: { '5h': lim5 ? limitPct(hit, LABEL_5H) : Infinity, '7d': findLimit(hit, LABEL_7D) ? limitPct(hit, LABEL_7D) : Infinity, reset: Number.isFinite(reset5) ? reset5 : Infinity }[opts.sort] ?? 0,
+      keep: opts.only === 'hot' ? worst >= WARN_PCT : opts.only === 'expired' ? login !== 'ok' : opts.only === 'ok' ? login === 'ok' && !hit.note : true,
+    }
   })
+  if (opts.sort) rows.sort((a, b) => a.key - b.key)
+  rows = rows.filter(r => r.keep)
+  if (rows.length === 0) return currentLang === 'en' ? 'No profile matches the filter.' : 'Không có profile nào khớp bộ lọc.'
 
   const nameW = Math.max(7, ...rows.map(r => r.n.length))
   const emailW = Math.max(5, ...rows.map(r => r.email.length))
-  const head = paint('1;36', `   ${'PROFILE'.padEnd(nameW)}  ${'EMAIL'.padEnd(emailW)}  ${'5H'.padEnd(CELL_W)}  ${'7D'.padEnd(CELL_W)}  ${'RESET 5H'.padEnd(RESET_W)}  RESET 7D`)
+  const head = paint('1;36', `     ${'PROFILE'.padEnd(nameW)}  ${'EMAIL'.padEnd(emailW)}  ${'5H'.padEnd(CELL_W)}  ${'RESET 5H'.padEnd(RESET_W)}  ${'7D'.padEnd(CELL_W)}  RESET 7D`)
   const lines = rows.map(r => {
     const name = paint(r.active ? '1;32' : '1;37', r.n.padEnd(nameW))
     const email = r.email.padEnd(emailW)
-    return `${r.active ? '🟢' : '⚪'} ${name}  ${email}  ${r.quota}${r.badges.length ? '  ' + r.badges.join('  ') : ''}`.trimEnd()
+    return `${r.active ? paint('1;32', '▶') : ' '} ${r.dot} ${name}  ${email}  ${r.quota}${r.badges.length ? '  ' + r.badges.join('  ') : ''}`.trimEnd()
   })
-  const rule = paint('90', '─'.repeat(3 + nameW + emailW + CELL_W * 2 + RESET_W + 8 + 10))
+  const rule = paint('90', '─'.repeat(5 + nameW + emailW + CELL_W * 2 + RESET_W + 8 + 10))
   return [head, rule, ...lines].join('\n')
 }
 
@@ -1663,6 +1978,12 @@ export function recoveredProfiles(home, cache, cur) {
 
 // A model's own 7-day limit (Fable, Opus…) at or past WARN_PCT, with the working profile that has the most of it left:
 // "Fable 7d 85% → minhvong 13%". '' when no model limit is hot.
+// the Fable 7-day limit of this profile, always (modelNote only speaks once a model is running out)
+function fableUsage(hit) {
+  const lim = (Array.isArray(hit.limits) ? hit.limits : []).find(l => /^7 ngày fable$/i.test(String(l[0])))
+  return lim ? { pct: Math.round(Number(lim[1]) || 0), left: resetIn(hit, lim) } : null
+}
+
 function modelNote(home, cache, hit, cur) {
   const hot = (Array.isArray(hit.limits) ? hit.limits : []).filter(l => String(l[0]).startsWith(`${LABEL_7D} `) && Number(l[1]) >= WARN_PCT)
   if (!hot.length) return ''
@@ -1727,6 +2048,7 @@ export function statusLineData(home) {
     pace: hot7d ? paceNote(weeklyPace(home, cur, cache)) : '',
     recovered: recoveredProfiles(home, cache, cur),
     models: isRateLimited(hit) ? '' : modelNote(home, cache, hit, cur),
+    fable: fableUsage(hit),
     mode: statuslineMode(home),
   }
   return { ...data, text: statusLineText(home, data), ansi: statusLineAnsi(data) }
@@ -1741,6 +2063,7 @@ export function statusLineText(home, data = null) {
   for (const w of d.windows) {
     parts.push(`${w.name} ${chartBar(w.pct, 8)} ${w.pct}%${w.pct >= WARN_PCT ? '🔥' : ''}${w.left ? ` ⏳${w.left}` : ''}`)
   }
+  if (d.fable && !d.models?.includes('Fable')) parts.push(`Fable 7d ${d.fable.pct}%${d.fable.left ? ` ⏳${d.fable.left}` : ''}`)
   for (const note of [d.warn, d.pace, d.models, d.stale, d.suggest]) if (note) parts.push(note)
   return parts.join(' │ ')
 }
@@ -2107,7 +2430,25 @@ export function formatSchedule(home, lang = 'vi') {
   ].join('\n')
 }
 
+// Raised by swapProfile while `autoCheckAndSwap({ hold: true })` runs: another live session is on the profile, so
+// nothing may move the account under it. A temp revert or schedule that hits it keeps its state and retries next prompt.
+class HeldSwap extends Error {}
+let autoHold = false
+
 export async function autoCheckAndSwap(home, options = {}) {
+  if (!options.hold) return autoCheckAndSwapNow(home, options)
+  autoHold = true
+  try {
+    return await autoCheckAndSwapNow(home, options)
+  } catch (err) {
+    if (err instanceof HeldSwap) return { swapped: false, reason: 'held' }
+    throw err
+  } finally {
+    autoHold = false
+  }
+}
+
+async function autoCheckAndSwapNow(home, options = {}) {
   // Check if temp profile expired
   const tempRes = checkTempExpiry(home)
   if (tempRes.expired && tempRes.revertedTo) {
@@ -3785,6 +4126,17 @@ export function sendQuotaAlerts(home, cache = loadUsageCache(home)) {
       text: `⚠ [claude-swap] ${cur}: 7 ngày đang dùng ${perHour(pace.rate)}, vượt mức ${perHour(pace.budget)} để đủ tới lúc reset (còn ${Math.round(100 - pace.pct)}% cho ${shortDuration(pace.hoursLeft * 3600000)}).`,
     })
   }
+  const disabledNow = loadDisabledProfiles(home)
+  for (const n of listProfiles(home)) {
+    const state = loginState(home, n)
+    if (state !== 'no_token' || disabledNow.includes(n)) continue
+    alerts.push({
+      key: `${profileEmail(home, n)}|login|${state}`,
+      event: 'login_problem',
+      profile: n,
+      text: `⚠ [claude-swap] ${n}: không còn token đăng nhập, cần /login lại rồi /profile new ${n} --force.`,
+    })
+  }
   for (const n of recoveredProfiles(home, cache, cur)) {
     alerts.push({
       key: `${profileEmail(home, n)}|recovered|${resetKey(cacheHit(home, cache, n), [LABEL_5H, LABEL_7D])}`,
@@ -3978,7 +4330,7 @@ export function generateCompletion(shell = 'bash') {
   const subcommands = [
     'list', 'swap', 'new', 'save', 'delete', 'usage', 'auto', 'run', 'add-token',
     'rename', 'disable', 'enable', 'disabled', 'upgrade', 'autoupdate', 'web', 'dashboard', 'balance',
-    'webhook', 'budget', 'cost', 'mask', 'share', 'completion', 'alias', 'unalias',
+    'webhook', 'budget', 'cost', 'mask', 'share', 'completion', 'alias', 'unalias', 'dedupe', 'note', 'restore', 'export-config', 'import-config', 'verify',
     'aliases', 'bind', 'unbind', 'bind-branch', 'unbind-branch', 'branch-bindings',
     'tag', 'untag', 'tags', 'affinity', 'unaffinity', 'affinities', 'temp', 'untemp',
     'statusline', 'prompt', 'notify', 'history', 'undo', 'stats', 'cooldown', 'doctor',
@@ -4109,14 +4461,20 @@ function helpText(color, lang) {
       `🔀 ${bold('claude-swap')} — Command Usage Guide:`,
       '',
       `📌 ${bold('Profile Management & Switching:')}`,
-      `  ${cmd('/profile list')}              List profiles with quotas & usage bars`,
+      `  ${cmd('/profile list [--sort 5h|7d|reset] [--only ok|hot|expired]')}  List profiles with quotas, usage bars & filters`,
       `  ${cmd('/profile <name|alias>')}      Quick switch to profile or alias`,
       `  ${cmd('/profile pick')}              Interactive profile picker with arrow keys ↑ ↓`,
       `  ${cmd('/profile alias <name> <p>')}  Set short alias for profile`,
       `  ${cmd('/profile unalias <name>')}    Delete alias`,
       `  ${cmd('/profile aliases')}           List all aliases`,
       `  ${cmd('/profile current')}           Show currently active profile`,
-      `  ${cmd('/profile new <name>')}        Create new profile from current login`,
+      `  ${cmd('/profile new <name> [--alias a]')}  Create new profile from current login`,
+      `  ${cmd('/profile dedupe [--apply]')}    Merge profiles that share one account (keeps the freshest token)`,
+      `  ${cmd('/profile note <name> <text>')}    Note for a profile (--clear removes it)`,
+      `  ${cmd('/profile restore <tên>')}       Restore a deleted profile (within ${TRASH_DAYS} days)`,
+      `  ${cmd('/profile export-config')}       Export settings (aliases, tags, notes, auto-switch), no tokens`,
+      `  ${cmd('/profile import-config <file>')}  Import exported settings (existing profiles only)`,
+      `  ${cmd('/profile verify [name]')}       Check each token with the server; catches revoked logins`,
       `  ${cmd('/profile save <name>')}       Save current credentials to profile`,
       `  ${cmd('/profile rename <old> <new>')} Rename a profile (aliases, bindings, history follow)`,
       `  ${cmd('/profile delete <name>')}     Delete profile`,
@@ -4196,14 +4554,20 @@ function helpText(color, lang) {
     `🔀 ${bold('claude-swap')} — Hướng dẫn sử dụng các lệnh:`,
     '',
     `📌 ${bold('Quản lý & Chuyển đổi Profile:')}`,
-    `  ${cmd('/profile list')}              Liệt kê danh sách profiles kèm quota & thanh usage`,
+    `  ${cmd('/profile list [--sort 5h|7d|reset] [--only ok|hot|expired]')}  Liệt kê profiles kèm quota, thanh usage & bộ lọc`,
     `  ${cmd('/profile <tên|alias>')}       Chuyển nhanh sang profile hoặc bí danh (alias)`,
     `  ${cmd('/profile pick')}              Chọn profile tương tác bằng phím mũi tên ↑ ↓`,
     `  ${cmd('/profile alias <tên> <p>')}   Đặt bí danh viết tắt cho profile`,
     `  ${cmd('/profile unalias <tên>')}     Xóa bí danh`,
     `  ${cmd('/profile aliases')}           Xem danh sách các bí danh`,
     `  ${cmd('/profile current')}           Hiển thị tên profile đang active`,
-    `  ${cmd('/profile new <tên>')}         Tạo profile mới từ tài khoản hiện tại`,
+    `  ${cmd('/profile new <tên> [--alias a]')}  Tạo profile mới từ tài khoản hiện tại`,
+      `  ${cmd('/profile dedupe [--apply]')}  Gộp profile trùng tài khoản (giữ token mới nhất)`,
+      `  ${cmd('/profile note <tên> <nội dung>')}  Ghi chú cho profile (--clear để xoá)`,
+      `  ${cmd('/profile restore <tên>')}     Khôi phục profile vừa xoá (trong ${TRASH_DAYS} ngày)`,
+      `  ${cmd('/profile export-config')}     Xuất cấu hình (alias, tag, ghi chú, auto-switch), không có token`,
+      `  ${cmd('/profile import-config <file>')}  Nhập cấu hình đã xuất (chỉ áp cho profile có sẵn)`,
+      `  ${cmd('/profile verify [tên]')}     Kiểm tra token với máy chủ, bắt được token bị thu hồi`,
     `  ${cmd('/profile save <tên>')}        Lưu thông tin đăng nhập hiện tại vào profile`,
     `  ${cmd('/profile rename <cũ> <mới>')} Đổi tên profile (alias, liên kết, lịch sử đi theo)`,
     `  ${cmd('/profile delete <tên>')}      Xóa profile`,
@@ -4526,6 +4890,11 @@ async function runCliInner(argv, home) {
     }
   }
 
+  // the calling session's id (from the plugin hook): taken out so it never reads as a name
+  const sessAt = filteredArgv.indexOf('--session')
+  const sessionArg = sessAt > 0 ? filteredArgv[sessAt + 1] || '' : ''
+  if (sessAt > 0) filteredArgv.splice(sessAt, 2)
+
   const lang = loadLanguage(home)
   const cmd = filteredArgv[0]
   const color = !noColor && shouldColor()
@@ -4597,7 +4966,12 @@ async function runCliInner(argv, home) {
         try {
           await usageRows(home, fetchUsage, refresh)
         } catch {}
-        console.log(profileListReport(home, color, lang))
+        const opt = flag => (filteredArgv.includes(flag) ? filteredArgv[filteredArgv.indexOf(flag) + 1] : undefined)
+        const sort = opt('--sort')
+        const only = opt('--only')
+        if (sort && !['5h', '7d', 'reset'].includes(sort)) throw new SwapError('--sort nhận 5h, 7d hoặc reset.')
+        if (only && !['ok', 'hot', 'expired'].includes(only)) throw new SwapError('--only nhận ok, hot hoặc expired.')
+        console.log(profileListReport(home, color, lang, { sort, only }))
         return 0
       }
       case 'current': {
@@ -4800,19 +5174,52 @@ async function runCliInner(argv, home) {
       case 'new':
       case 'save': {
         const force = filteredArgv.includes('--force')
-        const name = filteredArgv.slice(1).find(a => a !== '--force')
+        const aliasAt = filteredArgv.indexOf('--alias')
+        const alias = aliasAt > 0 ? filteredArgv[aliasAt + 1] : null
+        const name = filteredArgv.slice(1).find((a, i) => a !== '--force' && a !== '--alias' && filteredArgv[i] !== '--alias')
         if (!name) {
           throw new SwapError('Thiếu tên profile.')
         }
         const verb = cmd === 'new' ? 'tạo' : 'lưu'
+        if (alias && (profileExists(home, alias.trim()) || alias.trim() === name)) throw new SwapError(`'${alias.trim()}' đã là tên một profile.`)
         const saved = saveProfile(home, name, force)
-        console.log(`✨ Đã ${verb}: ${saved}`)
+        if (alias) setAlias(home, alias, name)
+        console.log(`✨ Đã ${verb}: ${saved}${alias ? ` (alias: ${alias})` : ''}`)
+        const dups = duplicateProfiles(home, name)
+        if (dups.length) console.log(`⚠️ Tài khoản ${profileEmail(home, name)} đã có ở profile: ${dups.join(', ')}`)
         return 0
       }
       case 'swap': {
-        const name = filteredArgv[1]
-        if (!name) throw new SwapError('Thiếu tên profile.')
         const isProject = filteredArgv.includes('--project')
+        let name = filteredArgv.slice(1).find(a => !a.startsWith('--'))
+        let picked = false
+        if (!name) {
+          // no name: the best profile left (same ranking as auto-switch)
+          try {
+            await usageRows(home, fetchUsage)
+          } catch {}
+          name = findNextProfile(home)
+          if (!name) throw new SwapError('Không có profile nào phù hợp để chuyển (hết quota, bị tắt hoặc không có token).')
+          picked = true
+          console.log(`🎯 Chọn '${name}' (phù hợp nhất lúc này)`)
+        } else if (name === '-') {
+          name = previousProfile(home)
+          if (!name) throw new SwapError('Chưa có profile trước đó trong lịch sử.')
+        }
+        const force = filteredArgv.includes('--force')
+        const from = currentProfile(home)
+        const busy = from && from !== resolveProfileOrAlias(home, name) ? liveSessionsOn(home, from, sessionArg) : []
+        if (busy.length && !force) {
+          throw new SwapError(`${busy.length} phiên khác đang dùng '${from}' trong ${PRESENCE_MIN} phút qua. Đổi tài khoản lúc này khiến các phiên đó dùng sai tài khoản. Chạy việc dài bằng /profile run, hoặc thêm --force để vẫn chuyển.`)
+        }
+        const risk = picked || isProject || force ? '' : swapRisk(home, name)
+        if (risk) throw new SwapError(`'${name}': ${risk}. Dùng /profile swap ${name} --force để vẫn chuyển.`)
+        const unsaved = force || isProject || isolatedSession(home) ? '' : unsavedLogin(home)
+        if (unsaved) {
+          const saved = autoProfileName(home, unsaved)
+          saveProfile(home, saved)
+          console.log(`💾 Tài khoản ${unsaved} chưa có profile, đã lưu thành '${saved}' trước khi chuyển (đổi tên bằng /profile rename).`)
+        }
         swapProfile(home, name, {
           type: isProject ? 'project' : 'manual',
           reason: isProject ? 'Project binding' : '',
@@ -4827,11 +5234,79 @@ async function runCliInner(argv, home) {
         console.log(`✏️ Đã đổi tên profile '${res.from}' ➔ '${res.to}'`)
         return 0
       }
+      case 'dedupe': {
+        const plan = dedupePlan(home)
+        if (plan.length === 0) {
+          console.log('✅ Không có tài khoản nào nằm ở nhiều profile.')
+          return 0
+        }
+        const lines = plan.map(g => `  giữ '${g.keep}', bỏ ${g.drop.map(d => `'${d}'`).join(', ')}`)
+        if (!filteredArgv.includes('--apply')) {
+          console.log(`🔍 Sẽ gộp (chưa thay đổi gì, thêm --apply để thực hiện):\n${lines.join('\n')}`)
+          return 0
+        }
+        applyDedupe(home, plan)
+        console.log(`🧹 Đã gộp:\n${lines.join('\n')}`)
+        return 0
+      }
+      case 'note': {
+        const name = filteredArgv[1]
+        if (!name) throw new SwapError('Cú pháp: /profile note <tên> <nội dung> | --clear')
+        const text = filteredArgv.slice(2).join(' ')
+        const target = resolveProfileOrAlias(home, name)
+        setProfileNote(home, target, filteredArgv.includes('--clear') ? '' : text)
+        console.log(text && !filteredArgv.includes('--clear') ? `📝 ${target}: ${text}` : `📝 Đã xoá ghi chú của '${target}'.`)
+        return 0
+      }
       case 'delete': {
         const name = filteredArgv[1]
         if (!name) throw new SwapError('Thiếu tên profile.')
-        deleteProfile(home, name)
-        console.log(`🗑️ Đã xoá '${name}'.`)
+        const target = resolveProfileOrAlias(home, name)
+        const email = profileEmail(home, target)
+        if (email && !filteredArgv.includes('--force') && duplicateProfiles(home, target).length === 0) {
+          throw new SwapError(`'${target}' là profile duy nhất giữ tài khoản ${email}. Thêm --force để xoá (vẫn khôi phục được trong ${TRASH_DAYS} ngày bằng /profile restore ${target}).`)
+        }
+        const purge = filteredArgv.includes('--purge')
+        deleteProfile(home, name, { purge })
+        console.log(purge
+          ? `🗑️ Đã xoá hẳn '${target}', không khôi phục được.`
+          : `🗑️ Đã xoá '${target}'. Token vẫn được giữ ${TRASH_DAYS} ngày để khôi phục (/profile restore ${target}); xoá hẳn bằng /profile delete ${target} --purge.`)
+        return 0
+      }
+      case 'verify': {
+        const only = filteredArgv[1]
+        if (only && !profileExists(home, only)) throw new SwapError(`Profile '${only}' không tồn tại.`)
+        const rows = await verifyProfiles(home, only ? [only] : listProfiles(home))
+        const icon = { ok: '✅', fail: '❌', skip: '➖', unknown: '❔' }
+        for (const r of rows) console.log(`${icon[r.status]} ${r.name}: ${r.text}`)
+        return rows.some(r => r.status === 'fail') ? 1 : 0
+      }
+      case 'import-config': {
+        const file = filteredArgv[1]
+        if (!file) throw new SwapError('Thiếu đường dẫn file cấu hình.')
+        let cfg
+        try {
+          cfg = JSON.parse(fs.readFileSync(path.resolve(file), 'utf-8'))
+        } catch (err) {
+          throw new SwapError(`Không đọc được ${file}: ${safeError(err)}`)
+        }
+        const r = importConfig(home, cfg)
+        console.log(`📥 Đã nhập: ${r.aliases} alias, ${r.tags} tag, ${r.notes} ghi chú, ${r.disabled} profile tắt${r.autoSwitch ? ', cấu hình auto-switch' : ''}. Bỏ qua ${r.skipped} alias không hợp lệ.`)
+        return 0
+      }
+      case 'restore': {
+        const name = filteredArgv[1]
+        if (!name) throw new SwapError('Thiếu tên profile.')
+        restoreProfile(home, name)
+        console.log(`♻️ Đã khôi phục '${name}'.`)
+        return 0
+      }
+      case 'export-config': {
+        const cfg = loadAutoSwitchConfig(home)
+        const profiles = Object.fromEntries(
+          listProfiles(home).map(n => [n, { email: profileEmail(home, n) || null, tags: getProfileTags(home, n), note: profileNote(home, n) || null }])
+        )
+        console.log(JSON.stringify({ aliases: loadAliases(home), disabled: loadDisabledProfiles(home), autoSwitch: cfg, profiles }, null, 2))
         return 0
       }
       case 'auto': {
@@ -4916,7 +5391,13 @@ async function runCliInner(argv, home) {
             console.log('ℹ️ Bỏ qua auto-switch trong session cô lập (/profile run).')
             return 0
           }
-          const res = await autoCheckAndSwap(home)
+          const cur = currentProfile(home)
+          if (sessionArg && cur) {
+            const others = recordPresence(home, cur, sessionArg)
+            if (others.length) console.log(`[presence] ⚠ ${others.length + 1} phiên cùng dùng '${cur}': token có thể bị làm mới chồng chéo, nên dùng một phiên cho mỗi profile.`)
+          }
+          const hold = cur ? liveSessionsOn(home, cur, sessionArg).length > 0 : false
+          const res = await autoCheckAndSwap(home, { hold })
           if (res.swapped) {
             const why = res.isTempRevert
               ? 'hết hạn mượn tạm'
@@ -4930,6 +5411,8 @@ async function runCliInner(argv, home) {
             console.log(`[auto-swap] 🔀 Đã tự động chuyển từ '${res.from}' sang '${res.to}' (${why}).`)
           } else if (res.reason === 'no_candidate') {
             console.log(`[auto-swap] ⚠️ Profile '${res.current}' đạt mức ${res.util}% nhưng không có profile thay thế khả dụng.`)
+          } else if (res.reason === 'held') {
+            console.log(`⏸ Tự động chuyển tạm hoãn: còn phiên khác đang dùng '${cur}' (xem /profile run để tách riêng).`)
           } else if (res.reason === 'disabled') {
             console.log('ℹ️ Tự động chuyển profile đang tắt.')
           } else {

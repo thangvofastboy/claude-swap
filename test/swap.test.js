@@ -41,6 +41,14 @@ import {
   addProfileTag,
   setAlias,
   loadAliases,
+  duplicateProfiles,
+  unsavedLogin,
+  dedupePlan,
+  trashedProfiles,
+  profileNote,
+  setProfileNote,
+  getProfileTags,
+  swapRisk,
   removeAlias,
   resolveProfileOrAlias,
   bindBranch,
@@ -48,7 +56,6 @@ import {
   getBoundBranchProfile,
   matchBranchPattern,
   recordUsageSnapshot,
-  getProfileTags,
   calculateForecast,
   formatForecastReport,
   interactivePickProfile,
@@ -148,6 +155,9 @@ import {
   quotaSnapshot,
   maskUrl,
   spawnDetached,
+  recordPresence,
+  verifyProfiles,
+  importConfig,
 } from '../swap.js'
 import { startWebDashboard, getDashboardData, stopWebDashboard, runSwapCli } from '../web.js'
 import net from 'node:net'
@@ -185,6 +195,11 @@ function readToken(home) {
   return JSON.parse(
     fs.readFileSync(path.join(home, '.claude', '.credentials.json'), 'utf-8')
   ).claudeAiOauth.accessToken
+}
+
+// whether a profile file exists in the test home
+function loadProfileJson(home, name) {
+  return fs.existsSync(path.join(home, '.config', 'claude-cli-profiles', `${name}.json`))
 }
 
 describe('swap.js core functionality', () => {
@@ -353,12 +368,14 @@ describe('swap.js core functionality', () => {
     login(tmpHome, 'b', 'tok-b')
     saveProfile(tmpHome, 'personal')
 
+    setAlias(tmpHome, 'w', 'work')
     const out = profileListReport(tmpHome, false)
-    assert.ok(out.includes('⚪ work'))
-    assert.ok(out.includes('🟢 personal'))
+    assert.ok(out.includes('🔤 w'))
+    assert.ok(out.includes('▶ ⚪ personal'))
+    assert.ok(!out.includes('▶ ⚪ work'))
     assert.ok(out.includes('b@example.com'))
     // columns line up: the email starts at the same offset on every row
-    const col = email => Array.from(out.split('\n').find(r => r.includes(email))).slice(1).join('').indexOf(email) // icons differ in UTF-16 length, not in width
+    const col = email => Array.from(out.split('\n').find(r => r.includes(email))).slice(3).join('').indexOf(email) // icons differ in UTF-16 length, not in width
     assert.equal(col('b@example.com'), col('a@example.com'))
     assert.ok(out.includes('🏷️ office'))
   })
@@ -1308,8 +1325,229 @@ describe('swap.js core functionality', () => {
       'rs|rs_a@example.com': { limits: [['5 giờ', 10, '', new Date(Date.now() + 90 * 60000 + 30000).toISOString()], ['7 ngày', 20, '', new Date(Date.now() + 2 * 86400000 + 5 * 3600000).toISOString()]] },
     })
     const out = profileListReport(tmpHome, false)
-    assert.match(out, /RESET 5H {2}RESET 7D/)
-    assert.match(out, /1h\d\dm {5}2d\dh/)
+    assert.match(out, /RESET 5H {2}7D {15}  RESET 7D/)
+    assert.match(out, /1h\d\dm .*2d\dh/)
+  })
+
+  test('list sorts and filters, and new --alias sets the alias', async () => {
+    login(tmpHome, 'so_a', 'tok-a')
+    assert.equal(await runCli(['new', 'hi', '--alias', 'h1'], tmpHome), 0)
+    assert.equal(loadAliases(tmpHome).h1, 'hi')
+    login(tmpHome, 'so_b', 'tok-b')
+    saveProfile(tmpHome, 'lo')
+    writeFreshCache(path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json'), {
+      'hi|so_a@example.com': { limits: [['5 giờ', 90, '', new Date(Date.now() + 3600000).toISOString()], ['7 ngày', 10, '', '']] },
+      'lo|so_b@example.com': { limits: [['5 giờ', 5, '', new Date(Date.now() + 3600000).toISOString()], ['7 ngày', 10, '', '']] },
+    })
+    const rows = profileListReport(tmpHome, false, null, { sort: '5h' }).split('\n').slice(2)
+    assert.match(rows[0], /lo/)
+    assert.match(profileListReport(tmpHome, false, null, { only: 'hot' }), /hi/)
+    assert.doesNotMatch(profileListReport(tmpHome, false, null, { only: 'hot' }), /\blo\b/)
+    assert.equal(await runCli(['list', '--sort', 'nope'], tmpHome), 1)
+  })
+
+  test('new warns on a duplicate account, swap - goes back, swap refuses a full profile, bare swap picks one', async () => {
+    login(tmpHome, 'sw_a', 'tok-a')
+    assert.equal(await runCli(['new', 'one'], tmpHome), 0)
+    assert.deepEqual(duplicateProfiles(tmpHome, 'one'), [])
+    assert.equal(await runCli(['new', 'one2'], tmpHome), 0)
+    assert.deepEqual(duplicateProfiles(tmpHome, 'one2'), ['one'])
+    login(tmpHome, 'sw_b', 'tok-b')
+    assert.equal(await runCli(['new', 'two'], tmpHome), 0)
+    assert.equal(await runCli(['swap', 'one'], tmpHome), 0)
+    assert.equal(await runCli(['swap', 'two'], tmpHome), 0)
+    assert.equal(await runCli(['swap', '-'], tmpHome), 0)
+    assert.equal(currentProfile(tmpHome), 'one')
+    writeFreshCache(path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json'), {
+      'two|sw_b@example.com': { limits: [['5 giờ', 90, '', new Date(Date.now() + 3600000).toISOString()]] },
+    })
+    assert.match(swapRisk(tmpHome, 'two'), /90%/)
+    assert.equal(await runCli(['swap', 'two'], tmpHome), 1)
+    assert.equal(currentProfile(tmpHome), 'one')
+    assert.equal(await runCli(['swap', 'two', '--force'], tmpHome), 0)
+    assert.equal(await runCli(['swap'], tmpHome), 0) // picks a profile other than the current one
+    assert.notEqual(currentProfile(tmpHome), 'two')
+  })
+
+  test('swap saves a login no profile holds before switching; --force skips it', async () => {
+    login(tmpHome, 'un_a', 'tok-a')
+    assert.equal(await runCli(['new', 'keep'], tmpHome), 0)
+    login(tmpHome, 'un_b', 'tok-b') // a /login after the last save
+    assert.equal(unsavedLogin(tmpHome), 'un_b@example.com')
+    assert.equal(await runCli(['swap', 'keep'], tmpHome), 0)
+    assert.equal(loadProfileJson(tmpHome, 'un_b'), true)
+    assert.equal(unsavedLogin(tmpHome), '')
+    login(tmpHome, 'un_c', 'tok-c')
+    assert.equal(await runCli(['swap', 'keep', '--force'], tmpHome), 0)
+    assert.equal(loadProfileJson(tmpHome, 'un_c'), false)
+  })
+
+  test('dedupe keeps the freshest token, note and tags survive, alias follows', async () => {
+    login(tmpHome, 'dd_a', 'tok-a')
+    assert.equal(await runCli(['new', 'old'], tmpHome), 0)
+    addProfileTag(tmpHome, 'old', 'team')
+    setProfileNote(tmpHome, 'old', 'project X')
+    setAlias(tmpHome, 'o', 'old')
+    assert.equal(await runCli(['new', 'fresh'], tmpHome), 0)
+    const dir = path.join(tmpHome, '.config', 'claude-cli-profiles')
+    const f = JSON.parse(fs.readFileSync(path.join(dir, 'fresh.json'), 'utf-8'))
+    f.credentials = JSON.stringify({ claudeAiOauth: { accessToken: 'x', expiresAt: Date.now() + 9e6 } })
+    fs.writeFileSync(path.join(dir, 'fresh.json'), JSON.stringify(f))
+    assert.deepEqual(dedupePlan(tmpHome), [{ keep: 'fresh', drop: ['old'] }])
+    assert.equal(await runCli(['dedupe'], tmpHome), 0)
+    assert.equal(loadProfileJson(tmpHome, 'old'), true) // dry run: nothing removed
+    assert.equal(await runCli(['dedupe', '--apply'], tmpHome), 0)
+    assert.equal(loadProfileJson(tmpHome, 'old'), false)
+    assert.deepEqual(getProfileTags(tmpHome, 'fresh'), ['team'])
+    assert.equal(profileNote(tmpHome, 'fresh'), 'project X')
+    assert.equal(loadAliases(tmpHome).o, 'fresh')
+  })
+
+  test('note is kept by a re-save and shown in list', async () => {
+    login(tmpHome, 'nt_a', 'tok-a')
+    assert.equal(await runCli(['new', 'nt'], tmpHome), 0)
+    assert.equal(await runCli(['note', 'nt', 'cho', 'project', 'Y'], tmpHome), 0)
+    assert.equal(await runCli(['save', 'nt', '--force'], tmpHome), 0)
+    assert.equal(profileNote(tmpHome, 'nt'), 'cho project Y')
+    assert.match(profileListReport(tmpHome, false), /📝 cho project Y/)
+  })
+
+  test('delete keeps a trash copy that restore brings back; the only copy of a login needs --force', async () => {
+    login(tmpHome, 'tr_a', 'tok-a')
+    assert.equal(await runCli(['new', 'solo'], tmpHome), 0)
+    assert.equal(await runCli(['delete', 'solo'], tmpHome), 1) // only copy of tr_a
+    assert.equal(await runCli(['delete', 'solo', '--force'], tmpHome), 0)
+    assert.equal(loadProfileJson(tmpHome, 'solo'), false)
+    assert.deepEqual(trashedProfiles(tmpHome).map(t => t.name), ['solo'])
+    assert.equal(await runCli(['restore', 'solo'], tmpHome), 0)
+    assert.equal(loadProfileJson(tmpHome, 'solo'), true)
+    assert.equal(trashedProfiles(tmpHome).length, 0)
+    assert.equal(await runCli(['restore', 'solo'], tmpHome), 1) // already exists
+  })
+
+  test('export-config carries aliases, tags and notes but no tokens', async () => {
+    login(tmpHome, 'ex_a', 'tok-secret')
+    assert.equal(await runCli(['new', 'exp'], tmpHome), 0)
+    setAlias(tmpHome, 'e', 'exp')
+    setProfileNote(tmpHome, 'exp', 'note here')
+    let out = ''
+    const orig = console.log
+    console.log = m => { out += m + '\n' }
+    try {
+      assert.equal(await runCli(['export-config'], tmpHome), 0)
+    } finally {
+      console.log = orig
+    }
+    assert.doesNotMatch(out, /tok-secret/)
+    const cfg = JSON.parse(out)
+    assert.equal(cfg.aliases.e, 'exp')
+    assert.equal(cfg.profiles.exp.note, 'note here')
+  })
+
+  test('swap is refused while another session is live on the current profile', async () => {
+    login(tmpHome, 'ps_a', 'tok-a')
+    assert.equal(await runCli(['new', 'pa'], tmpHome), 0)
+    login(tmpHome, 'ps_b', 'tok-b')
+    assert.equal(await runCli(['new', 'pb'], tmpHome), 0)
+    assert.equal(await runCli(['swap', 'pa'], tmpHome), 0)
+    recordPresence(tmpHome, 'pa', 'other-session')
+    assert.equal(await runCli(['swap', 'pb', '--session', 'mine'], tmpHome), 1)
+    assert.equal(currentProfile(tmpHome), 'pa')
+    assert.equal(await runCli(['swap', 'pb', '--session', 'other-session'], tmpHome), 0)
+    assert.equal(await runCli(['swap', 'pa', '--force', '--session', 'mine'], tmpHome), 0)
+  })
+
+  test('verify reports a revoked token and a good one; import-config applies only to existing profiles', async () => {
+    login(tmpHome, 'vf_a', 'tok-a')
+    assert.equal(await runCli(['new', 'vfa'], tmpHome), 0)
+    const rows = await verifyProfiles(tmpHome, ['vfa'], async () => {
+      throw Object.assign(new Error('HTTP 401'), { status: 401 })
+    })
+    assert.equal(rows[0].status, 'fail')
+    assert.match(rows[0].text, /thu hồi/)
+    const ok = await verifyProfiles(tmpHome, ['vfa'], async () => ({}))
+    assert.equal(ok[0].status, 'ok')
+    const r = importConfig(tmpHome, {
+      aliases: { al: 'vfa', bad: 'missing' },
+      profiles: { vfa: { tags: ['t1'], note: 'imported' }, ghost: { note: 'x' } },
+      disabled: ['vfa', 'ghost'],
+    })
+    assert.equal(r.aliases, 1)
+    assert.equal(r.notes, 1)
+    assert.deepEqual(getProfileTags(tmpHome, 'vfa'), ['t1'])
+    assert.equal(loadAliases(tmpHome).al, 'vfa')
+    assert.deepEqual(loadDisabledProfiles(tmpHome), ['vfa'])
+    assert.equal(loadProfileJson(tmpHome, 'ghost'), false)
+  })
+
+  test('auto-switch holds while another session is live, and swaps once it is gone', async () => {
+    login(tmpHome, 'h_a', 'tok-a')
+    saveProfile(tmpHome, 'hot')
+    login(tmpHome, 'h_b', 'tok-b')
+    saveProfile(tmpHome, 'cool')
+    swapProfile(tmpHome, 'hot')
+    const cache = {
+      'hot|h_a@example.com': { limits: [['5 giờ', 98, '20:00']], resets_at: '2026-10-08T20:00:00Z' },
+      'cool|h_b@example.com': { limits: [['5 giờ', 10, '20:00']], resets_at: '2026-10-08T20:00:00Z' },
+    }
+    const config = { enabled: true, threshold: 90, order: [] }
+    const held = await autoCheckAndSwap(tmpHome, { cache, config, hold: true })
+    assert.equal(held.swapped, false)
+    assert.equal(held.reason, 'held')
+    assert.equal(currentProfile(tmpHome), 'hot')
+    const free = await autoCheckAndSwap(tmpHome, { cache, config, hold: false })
+    assert.equal(free.swapped, true)
+    assert.equal(currentProfile(tmpHome), 'cool')
+  })
+
+  test('dedupe of the profile in use moves current and bindings; one email with two account ids is not a duplicate', async () => {
+    login(tmpHome, 'dp_a', 'tok-a')
+    assert.equal(await runCli(['new', 'in-use'], tmpHome), 0)
+    assert.equal(await runCli(['new', 'copy'], tmpHome), 0) // same account, now current
+    const dir = path.join(tmpHome, '.config', 'claude-cli-profiles')
+    const f = JSON.parse(fs.readFileSync(path.join(dir, 'in-use.json'), 'utf-8'))
+    f.credentials = JSON.stringify({ claudeAiOauth: { accessToken: 'x', expiresAt: Date.now() + 9e6 } })
+    fs.writeFileSync(path.join(dir, 'in-use.json'), JSON.stringify(f))
+    assert.equal(currentProfile(tmpHome), 'copy')
+    assert.equal(await runCli(['dedupe', '--apply'], tmpHome), 0)
+    assert.equal(currentProfile(tmpHome), 'in-use')
+
+    login(tmpHome, 'dp_b', 'tok-b', { oauthAccount: { emailAddress: 'dp_a@example.com', accountUuid: 'other-uuid' } })
+    assert.equal(await runCli(['new', 'org'], tmpHome), 0)
+    assert.deepEqual(duplicateProfiles(tmpHome, 'org'), [])
+    assert.deepEqual(dedupePlan(tmpHome), [])
+  })
+
+  test('verify treats an expired access token as renewable; delete --purge skips the trash; new --alias checks before saving', async () => {
+    login(tmpHome, 'vp_a', 'tok-a')
+    assert.equal(await runCli(['new', 'vp'], tmpHome), 0)
+    const dir = path.join(tmpHome, '.config', 'claude-cli-profiles')
+    const f = JSON.parse(fs.readFileSync(path.join(dir, 'vp.json'), 'utf-8'))
+    f.credentials = JSON.stringify({ claudeAiOauth: { accessToken: 'x', refreshToken: 'r', expiresAt: Date.now() - 1000 } })
+    fs.writeFileSync(path.join(dir, 'vp.json'), JSON.stringify(f))
+    assert.equal((await verifyProfiles(tmpHome, ['vp']))[0].status, 'skip')
+    assert.equal(await runCli(['new', 'second', '--alias', 'vp'], tmpHome), 1) // alias = existing profile name
+    assert.equal(loadProfileJson(tmpHome, 'second'), false)
+    assert.equal(await runCli(['delete', 'vp', '--force', '--purge'], tmpHome), 0)
+    assert.equal(trashedProfiles(tmpHome).length, 0)
+  })
+
+  test('list --sort puts profiles without quota data last; import-config ignores values of the wrong type', async () => {
+    login(tmpHome, 'so2_a', 'tok-a')
+    assert.equal(await runCli(['new', 'known'], tmpHome), 0)
+    login(tmpHome, 'so2_b', 'tok-b')
+    assert.equal(await runCli(['new', 'unknown'], tmpHome), 0)
+    writeFreshCache(path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json'), {
+      'known|so2_a@example.com': { limits: [['5 giờ', 50, '', new Date(Date.now() + 3600000).toISOString()]] },
+    })
+    const rows = profileListReport(tmpHome, false, null, { sort: '5h' }).split('\n').slice(2)
+    assert.match(rows[0], /known/)
+    importConfig(tmpHome, { autoSwitch: { enabled: 'yes', threshold: 'high', pool: 5, autoReturn: true } })
+    const cfg = JSON.parse(fs.readFileSync(path.join(tmpHome, '.config', 'claude-cli-profiles', '.auto-switch.json'), 'utf-8'))
+    assert.equal(typeof cfg.enabled, 'boolean')
+    assert.equal(typeof cfg.threshold, 'number')
+    assert.ok(cfg.pool === null || typeof cfg.pool === 'string')
+    assert.equal(cfg.autoReturn, true)
   })
 
   test('human commands are coloured, machine-read ones and --no-color stay plain', async () => {

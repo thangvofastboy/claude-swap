@@ -3,6 +3,12 @@ import type { EngineInterface, Register } from 'claude-code'
 const SUBCOMMANDS = new Set([
   'help',
   'list',
+  'dedupe',
+  'note',
+  'restore',
+  'export-config',
+  'import-config',
+  'verify',
   'current',
   'usage',
   'folder',
@@ -131,6 +137,11 @@ let launcher = -1
 const SLOW = new Set(['repair', 'upgrade', 'autoupdate', 'sync', 'run'])
 
 async function runSwap($: EngineInterface, argv: string[], stdin?: string) {
+  // a swap must say which session asks, or swap.js counts this very session as "another one" on the profile
+  if (argv[0] === 'swap' && !argv.includes('--session')) {
+    const sid = await $.session.id().catch(() => '')
+    if (sid) argv = [...argv, '--session', sid]
+  }
   const script = `${$.plugin.root}/swap.js`
   const init = { timeoutMs: SLOW.has(argv[0]) ? 600_000 : 30_000, ...(stdin === undefined ? {} : { stdin }) }
   // the common case, `node` on PATH, costs no `$.env` lookups
@@ -178,6 +189,7 @@ type StatusData = {
   next?: string
   pace?: string // '7d ≈0.7%/h': the 7-day quota left per hour until its reset
   models?: string // 'Fable 7d 85% → minhvong 13%': a model's own 7-day limit running out
+  fable?: { pct: number; left: string } | null // the Fable 7-day limit, shown even when it is low
   recovered?: string[] // other profiles whose full window has reset since
   mode?: 'line' | 'band'
   text?: string
@@ -201,6 +213,10 @@ function parseStatus(raw: string): StatusData | null {
 // `band` (default) draws the coloured band above it. Whichever is not in use is cleared:
 // a plugin's pinned text survives a reload, so the very first call must clear a line an older version left behind.
 let pinned = true
+
+// What the session itself is running, read off its own model requests: not in swap.js's data.
+const live = { model: '', effort: '', advisor: 0 }
+const shortModel = (id: string) => id.replace(/^claude-/, '').replace(/-\d{8}$/, '')
 
 // the suggestion last toasted, so one profile running out toasts once, not on every refresh
 let lastSuggest = ''
@@ -470,7 +486,8 @@ export const register: Register = on => {
 
   on('prompt.submit', async ($, e, next) => {
     try {
-      const ran = await runSwap($, ['auto', 'check'])
+      const sid = await $.session.id().catch(() => '')
+      const ran = await runSwap($, sid ? ['auto', 'check', '--session', sid] : ['auto', 'check'])
       const out = `${ran.stdout}${ran.stderr}`.trim()
       // the auto-swap notice would otherwise show nowhere: the hook only reads the [status] line
       const swapped = out.match(/^\[auto-swap\] (🔀 .*)$/m)
@@ -478,11 +495,34 @@ export const register: Register = on => {
         $.ui.toast(swapped[1])
         void reloadPanel($)
       }
+      const presence = out.match(/^\[presence\] (.*)$/m)
+      if (presence) $.ui.toast(presence[1])
       const line = out.match(/^\[status\] ?(.*)$/m)
       if (line && line[1].trim() !== lastRaw) showStatus($, line[1].trim())
     } catch {}
 
     return next(e)
+  })
+
+  // the main loop's model, effort and advisor calls, for the band; a subagent's request is not the session's
+  on('turn.step', async function* ($, e, next) {
+    if (e.agentId === undefined) {
+      const effort = e.effort === undefined ? '' : String(e.effort)
+      if (live.model !== e.model || live.effort !== effort) {
+        live.model = e.model
+        live.effort = effort
+        $.ui.invalidate('ui.render')
+      }
+    }
+    const r = yield* next(e)
+    if (e.agentId === undefined) {
+      const used = (r.serverToolUses ?? []).filter(u => u.name === 'advisor').length
+      if (used) {
+        live.advisor += used
+        $.ui.invalidate('ui.render')
+      }
+    }
+    return r
   })
 
   // coloured status band: ● profile │ 5h [███░░░░░] 34% ⏳2h10m │ 7d [██████░░] 73% ⏳3d4h │ ⚠ 5h ~12p
@@ -514,6 +554,22 @@ export const register: Register = on => {
             </Box>
           )
         })}
+        {live.model ? (
+          <Box>
+            {sep}
+            <Text color="magenta" bold>🤖 {shortModel(live.model)}</Text>
+            {live.effort && !compact ? <Text color="magenta"> · effort {live.effort}</Text> : null}
+            {live.advisor > 0 && !compact ? <Text color="magenta"> · advisor ×{live.advisor}</Text> : null}
+          </Box>
+        ) : null}
+        {status.fable && !status.models?.includes('Fable') ? (
+          <Box>
+            {sep}
+            <Text color="cyan" bold>Fable 7d </Text>
+            <Text color={loadColor(status.fable.pct)} bold>{String(status.fable.pct)}%</Text>
+            {status.fable.left && !compact ? <Text color="cyan"> ⏳{status.fable.left}</Text> : null}
+          </Box>
+        ) : null}
         {[status.warn, status.pace, status.models, status.stale, status.suggest].filter(Boolean).map(note => (
           <Box key={note}>{sep}<Text color="yellow" bold>{note}</Text></Box>
         ))}
