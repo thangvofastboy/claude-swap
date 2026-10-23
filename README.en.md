@@ -363,6 +363,14 @@ Skills, agents, plugins, settings and memory live in `~/.claude/` and **belong t
 
 ---
 
+## 🆕 What's new in 0.5
+
+| Release | Highlights |
+| --- | --- |
+| **0.5.0** | Add forms inside the `/profile settings` pane (alias, tag, bind, schedule, temp, budget, webhook; the webhook URL goes on stdin); the pane has tabs, cards and rows that light up under the pointer; `/profile auto step <%>` rotates accounts by a per-stint quota, with a notice on each switch; `/profile web` edits every setting and removes any configuration item. |
+
+---
+
 ## 🆕 What's new in 0.4
 
 | Version | Highlights |

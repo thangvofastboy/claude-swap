@@ -363,6 +363,14 @@ Skill, agent, plugin, settings và memory nằm trong `~/.claude/` nên **không
 
 ---
 
+## 🆕 Có gì mới ở dòng 0.5
+
+| Bản | Điểm chính |
+| --- | --- |
+| **0.5.0** | Form thêm ngay trong pane `/profile settings` (alias, tag, bind, lịch, mượn tạm, budget, webhook; URL webhook đi qua stdin); pane có tab, thẻ và dòng làm nổi khi trỏ chuột; `/profile auto step <%>` xoay account theo hạn mức mỗi lượt, có thông báo mỗi lần chuyển; `/profile web` chỉnh được mọi cài đặt và gỡ được từng mục cấu hình. |
+
+---
+
 ## 🆕 Có gì mới ở dòng 0.4
 
 | Bản | Điểm chính |
