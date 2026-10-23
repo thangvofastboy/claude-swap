@@ -66,6 +66,7 @@ const SUBCOMMANDS = new Set([
   'unschedule',
   'settings',
   'overview',
+  'panel',
 ])
 const USAGE =
   'Dùng: /profile | /profile list | /profile <tên|alias> | /profile pick | /profile web | /profile balance | /profile webhook | /profile lang [vi|en] | /profile run <tên> | /profile add-token <tok> | /profile disable <tên> | /profile auto | /profile sync | /profile upgrade'
@@ -244,10 +245,108 @@ let settings: Setting[] = []
 let draft: Record<string, Setting['value']> = {}
 let settingsNote = ''
 
+// the rest of the pane (`panel` in swap.js): every profile, every feature's stored items (each with the argv that removes it),
+// the help's commands, and which tab shows
+type Window = { name: string; pct: number; left: string }
+type PanelProfile = { name: string; email: string; active: boolean; disabled: boolean; tags: string[]; windows: Window[] }
+type Feature = { key: string; title: string; items: { text: string; remove?: string[] }[] }
+type Panel = Omit<Overview, 'settings'> & { profileList: PanelProfile[]; features: Feature[] }
+const TABS = [['overview', '🔀 Tổng quan'], ['profiles', '👤 Profile'], ['settings', '🧰 Cài đặt'], ['features', '🧩 Tính năng'], ['commands', '📜 Lệnh']] as const
+type Tab = (typeof TABS)[number][0]
+let panel: Panel | null = null
+let commands: HelpRow[] = []
+let tab: Tab = 'settings'
+
+// the features tab's add forms: free text in an Input, a profile or a choice in a Select. The values stay here until the add runs.
+// a secret goes on stdin, never argv. `bind` binds the session's folder: swap.js runs there (the cwd $.process.run defaults to)
+type Vals = Record<string, string>
+type FormField = { name: string; label: string; kind: 'text' | 'profile' | 'choice'; choices?: string[]; def?: string; placeholder?: string }
+type Form = { key: string; fields: FormField[]; argv: (v: Vals) => string[]; stdin?: (v: Vals) => string }
+const FORMS: Form[] = [
+  { key: 'alias', fields: [{ name: 'name', label: 'tên', kind: 'text', placeholder: 'pm' }, { name: 'profile', label: 'profile', kind: 'profile' }], argv: v => ['alias', v.name, v.profile] },
+  { key: 'tag', fields: [{ name: 'profile', label: 'profile', kind: 'profile' }, { name: 'tag', label: 'tag', kind: 'text', placeholder: 'work' }], argv: v => ['tag', v.profile, v.tag] },
+  { key: 'bind', fields: [{ name: 'profile', label: 'profile', kind: 'profile' }], argv: v => ['bind', v.profile] },
+  { key: 'bind-branch', fields: [{ name: 'pattern', label: 'pattern', kind: 'text', placeholder: 'feat/*' }, { name: 'profile', label: 'profile', kind: 'profile' }], argv: v => ['bind-branch', v.pattern, v.profile] },
+  { key: 'affinity', fields: [{ name: 'model', label: 'model', kind: 'text', placeholder: 'opus' }, { name: 'profile', label: 'profile', kind: 'profile' }], argv: v => ['affinity', v.model, v.profile] },
+  { key: 'schedule', fields: [{ name: 'range', label: 'khung giờ', kind: 'text', placeholder: '09:00-18:00' }, { name: 'profile', label: 'profile', kind: 'profile' }], argv: v => ['schedule', v.range, v.profile] },
+  { key: 'temp', fields: [{ name: 'profile', label: 'profile', kind: 'profile' }, { name: 'duration', label: 'thời gian', kind: 'text', def: '1h', placeholder: '30m' }], argv: v => ['temp', v.profile, v.duration] },
+  { key: 'budget', fields: [{ name: 'profile', label: 'profile', kind: 'profile' }, { name: 'amount', label: 'hạn mức', kind: 'text', placeholder: '50' }], argv: v => ['budget', 'set', v.profile, v.amount] },
+  { key: 'webhook', fields: [{ name: 'type', label: 'loại', kind: 'choice', choices: ['telegram', 'discord', 'slack', 'generic'] }, { name: 'url', label: 'URL', kind: 'text', placeholder: 'https://…' }], argv: v => ['webhook', 'set', v.type, '--url-stdin'], stdin: v => v.url },
+]
+let formFields: Record<string, string> = {}
+let busy = false // one pane action at a time: a double press must not add a schedule twice or run two repairs
+
+
 async function loadSettings($: EngineInterface) {
-  const { stdout } = await runSwap($, ['settings', '--json'])
-  settings = JSON.parse(stdout.trim())
+  const [{ stdout }, help] = await Promise.all([runSwap($, ['panel']), commands.length ? null : runSwap($, ['help', '/profile']).catch(() => null)]) // a keyword on every command line: all of them, without the overview
+  const data = JSON.parse(stdout.trim())
+  settings = data.settings
+  panel = data
+  if (help) commands = helpRows(help.stdout)
   draft = {}
+}
+
+// a button, or an add form, on the pane: run that subcommand, say how it went, redraw from fresh data. Resolves true when it succeeded.
+async function panelAction($: EngineInterface, argv: string[], stdin?: string): Promise<boolean> {
+  if (busy) {
+    $.ui.toast('⏳ Đang chạy lệnh trước, đợi chút…')
+    return false
+  }
+  busy = true
+  try {
+    const ran = await runSwap($, [...argv, '--no-color'], stdin)
+    const out = `${ran.stdout}${ran.stderr}`.trim()
+    $.ui.toast(out.split('\n')[0] || 'OK')
+    await reloadPanel($)
+    await refreshStatus($).catch(() => undefined)
+    return ran.exitCode === 0
+  } finally {
+    busy = false
+  }
+}
+
+// fresh pane data once the profile or a setting may have changed (an auto-swap, a /profile command); edits in progress stay
+async function reloadPanel($: EngineInterface) {
+  if (!panel) return
+  const kept = draft
+  await loadSettings($).catch(() => undefined)
+  draft = kept
+  $.ui.invalidate('ui.render')
+}
+
+function setFormField($: EngineInterface, key: string, value: string) {
+  formFields = { ...formFields, [key]: value }
+  $.ui.invalidate('ui.render')
+}
+
+const profileNames = (): string[] => panel?.profileList.map(r => r.name) ?? []
+
+// what a form shows: what was typed or picked, else the default (the active profile, the first choice, the field's `def`)
+function formValues(f: Form): Vals {
+  const active = panel?.profileList.find(r => r.active)?.name ?? profileNames()[0] ?? ''
+  return Object.fromEntries(
+    f.fields.map(x => {
+      const fallback = x.kind === 'profile' ? active : x.kind === 'choice' ? (x.choices?.[0] ?? '') : (x.def ?? '')
+      return [x.name, formFields[`${f.key}.${x.name}`] ?? fallback]
+    })
+  )
+}
+
+// the add button: every field must be filled; the form clears only when the subcommand succeeded
+function submitForm($: EngineInterface, f: Form) {
+  const v = Object.fromEntries(Object.entries(formValues(f)).map(([k, x]) => [k, String(x).trim()]))
+  const missing = f.fields.find(x => !v[x.name])
+  if (missing) {
+    $.ui.toast(`⚠ Điền ${missing.label}`)
+    return
+  }
+  void panelAction($, f.argv(v), f.stdin?.(v))
+    .then(ok => {
+      if (!ok) return
+      formFields = Object.fromEntries(Object.entries(formFields).filter(([k]) => !k.startsWith(`${f.key}.`)))
+      $.ui.invalidate('ui.render')
+    })
+    .catch(err => $.ui.toast(`⚠ ${String(err)}`))
 }
 
 function edit($: EngineInterface, key: string, value: Setting['value']) {
@@ -273,7 +372,7 @@ async function saveSettings($: EngineInterface) {
   const saved = changed.length - errors.length
   if (!errors.length) {
     $.ui.toast(saved ? `✅ Đã lưu ${saved} cài đặt` : 'Không có gì thay đổi')
-    await $.ui.close({ id: 'settings' })
+    $.ui.invalidate('ui.render') // the pane stays open: the other tabs are still in use
     return
   }
   settingsNote = `⚠ Đã lưu ${saved}/${changed.length}. ${errors.join(' · ')}`
@@ -282,7 +381,7 @@ async function saveSettings($: EngineInterface) {
 
 // commands that only read: they cannot change what the band shows (not `list`/`usage`: they refresh the quota cache), so they skip the extra `statusline json` process
 const READ_ONLY = new Set([
-  'help', 'overview', 'current', 'folder', 'history', 'stats', 'cooldown', 'forecast', 'doctor', 'tags',
+  'help', 'overview', 'panel', 'current', 'folder', 'history', 'stats', 'cooldown', 'forecast', 'doctor', 'tags',
   'aliases', 'disabled', 'branch-bindings', 'affinities', 'prompt', 'completion', 'version', 'share', 'export', 'web', 'dashboard',
 ])
 
@@ -290,6 +389,7 @@ const READ_ONLY = new Set([
 // Raw colours rather than theme keys, so the band and the table look alike on any theme.
 const loadColor = (pct: number) => (pct >= 95 ? 'red' : pct >= 80 ? '#ff8700' : pct >= 50 ? 'yellow' : 'green')
 const BAR_WIDTH = 8
+const METER = 16 // cells in a pane's quota bar
 
 // `/profile` help, row by row: a command (yellow in swap.js's formatHelpReport) with its description, or a title
 const SGR = /\x1b\[[0-9;]*m/g
@@ -374,7 +474,10 @@ export const register: Register = on => {
       const out = `${ran.stdout}${ran.stderr}`.trim()
       // the auto-swap notice would otherwise show nowhere: the hook only reads the [status] line
       const swapped = out.match(/^\[auto-swap\] (🔀 .*)$/m)
-      if (swapped) $.ui.toast(swapped[1])
+      if (swapped) {
+        $.ui.toast(swapped[1])
+        void reloadPanel($)
+      }
       const line = out.match(/^\[status\] ?(.*)$/m)
       if (line && line[1].trim() !== lastRaw) showStatus($, line[1].trim())
     } catch {}
@@ -514,59 +617,229 @@ export const register: Register = on => {
     )
   })
 
-  // the settings editor: a toggle for on/off, a button cycling through choices, a field for numbers and text
+  // `/profile settings`: one pane, a row of tabs, everything a click away. Each item sits on a card (rounded border);
+  // a row lights up under the pointer (`hover` scope, one per row). Keys: 1-5 change tab, s saves.
   on('ui.render', { component: 'Pane', requestId: 'settings' }, ($, e) => {
-    const { Box, Text, Button, Input } = $.ui.resolve(e)
-    const width = Math.max(...settings.map(r => r.key.length), 8)
-    const shown = (v: Setting['value']) => (v === '' ? '—' : String(v))
-    return (
+    const { Box, Text, Button, Input, Select } = $.ui.resolve(e)
+    const run = (argv: string[]) => void panelAction($, argv).catch(err => $.ui.toast(`⚠ ${String(err)}`))
+    const fill = (text: string) => void $.prompt.fill({ text }).catch(() => undefined)
+    const goTo = (id: Tab) => () => {
+      tab = id
+      $.ui.invalidate('ui.render')
+    }
+    const p = panel
+
+    // one quota window: its name, a bar coloured by load, the percentage, the time to reset
+    const meter = (w: Window) => {
+      const filled = Math.round((w.pct / 100) * METER)
+      const color = loadColor(w.pct)
+      return (
+        <Box key={`w:${w.name}`} marginRight={2}>
+          <Text color="cyan" bold>{`${w.name} `}</Text>
+          <Text color="gray">[</Text>
+          <Text color={color}>{'█'.repeat(filled)}</Text>
+          <Text color="gray">{'░'.repeat(METER - filled)}]</Text>
+          <Text color={color} bold>{` ${String(w.pct).padStart(3)}%`}</Text>
+          {w.left ? <Text color="cyan">{` ⏳${w.left}`}</Text> : null}
+        </Box>
+      )
+    }
+
+    const tabs = (
+      <Box>
+        {TABS.map(([id, label], i) => (
+          <Box key={`tab:${id}`} marginRight={1}>
+            <Button key={`tab:${id}`} variant={tab === id ? 'primary' : 'secondary'} hotkey={String(i + 1)} onPress={goTo(id)}>
+              {label}
+            </Button>
+          </Box>
+        ))}
+      </Box>
+    )
+
+    const overviewBody = !p?.profile ? (
+      <Text color="yellow" bold>⚠ Chưa có profile nào active. Tạo bằng: /profile new {'<tên>'}</Text>
+    ) : (
       <Box flexDirection="column">
-        {settings.map(r => {
-          const value = r.key in draft ? draft[r.key] : r.value
-          const changed = r.key in draft && draft[r.key] !== r.value
-          const control =
-            r.type === 'bool' ? (
-              <Button key={`set:${r.key}`} plain onPress={() => edit($, r.key, !value)}>
-                <Text color={value ? 'green' : 'gray'} bold>{value ? '● on ' : '○ off'}</Text>
+        <Box marginBottom={1}>
+          <Text color="green" bold>{`👤 ${p.profile}`}</Text>
+          {p.email ? <Text color="gray">{`   ${p.email}`}</Text> : null}
+        </Box>
+        {p.windows.length ? p.windows.map(meter) : <Text dimColor>chưa có số liệu quota (mở /profile usage để tải)</Text>}
+        {p.rateLimited ? <Text color="yellow" bold>⏳ máy chủ usage đang bận (429), quota sẽ hiện lại sau</Text> : null}
+        {p.stale ? <Text color="yellow">{p.stale}</Text> : null}
+        <Box marginTop={1}>
+          <Text color="gray">{`📦 ${p.profiles} profile`}</Text>
+          {p.disabled ? <Text color="red">{`   🚫 ${p.disabled} tắt`}</Text> : null}
+          <Text color="gray">{`   🧰 ${settings.filter(r => r.type === 'bool' && r.value === true).length} tính năng bật`}</Text>
+        </Box>
+      </Box>
+    )
+
+    const profilesBody = (
+      <Box flexDirection="column">
+        {(p?.profileList || []).map(r => (
+          <Box key={`p:${r.name}`} hover={{ scope: `pf:${r.name}` }} flexDirection="column" borderStyle="round" borderColor={r.active ? 'green' : 'gray'} paddingX={1} marginBottom={1}>
+            <Box>
+              <Text color={r.active ? 'green' : 'white'} bold>{`${r.active ? '● ' : '○ '}${r.name}`}</Text>
+              <Text color="gray">{`   ${r.email}`}</Text>
+              {r.tags.map(t => <Text key={`t:${r.name}:${t}`} color="magenta">{` #${t}`}</Text>)}
+              {r.disabled ? <Text color="red" bold>{'   🚫 tắt'}</Text> : null}
+            </Box>
+            {r.windows.length ? <Box>{r.windows.map(meter)}</Box> : <Text dimColor>chưa có số liệu quota</Text>}
+            <Box marginTop={1}>
+              {r.active ? (
+                <Text color="green" bold>✓ đang dùng</Text>
+              ) : (
+                <Button key={`p-swap:${r.name}`} variant="primary" onPress={() => run(['swap', r.name])}>{'⇄ Dùng'}</Button>
+              )}
+              <Text> </Text>
+              <Button key={`p-dis:${r.name}`} onPress={() => run([r.disabled ? 'enable' : 'disable', r.name])}>
+                {r.disabled ? '↺ Bật lại' : '⊘ Tắt'}
               </Button>
-            ) : r.type === 'choice' ? (
-              <Button
-                key={`set:${r.key}`}
-                plain
-                onPress={() => {
-                  const list = r.choices || []
-                  edit($, r.key, list[(list.indexOf(String(value)) + 1) % list.length] ?? '')
-                }}
-              >
-                <Text color="cyan" bold>{`⇄ ${shown(value)}`}</Text>
-              </Button>
-            ) : (
-              <Input key={`set:${r.key}`} value={String(value)} placeholder="—" onInput={v => edit($, r.key, v)} onSubmit={v => edit($, r.key, v)} />
-            )
+              <Text> </Text>
+              <Button key={`p-repair:${r.name}`} onPress={() => run(['repair', r.name])}>{'🔧 Repair'}</Button>
+              <Text> </Text>
+              <Button key={`p-del:${r.name}`} onPress={() => fill(`/profile delete ${r.name}`)}>{'🗑 Xóa…'}</Button>
+            </Box>
+          </Box>
+        ))}
+        <Box>
+          <Button key="p-new" variant="primary" onPress={() => fill('/profile new ')}>{'＋ Tạo từ login hiện tại'}</Button>
+          <Text> </Text>
+          <Button key="p-token" onPress={() => fill('/profile add-token ')}>{'＋ Thêm bằng token'}</Button>
+        </Box>
+        <Text dimColor>{'🗑 Xóa… đưa lệnh xuống ô nhập, bạn gửi đi mới thật sự xóa.'}</Text>
+      </Box>
+    )
+
+    // one add form: its fields in a row, each a text Input or a Select, then the add button
+    const control = (f: Form, x: FormField) => {
+      const key = `${f.key}.${x.name}`
+      const current = formValues(f)[x.name]
+      if (x.kind === 'text') {
+        return (
+          <Input key={`in:${key}`} value={current} placeholder={x.placeholder} onInput={v => setFormField($, key, v)} onSubmit={v => setFormField($, key, v)} />
+        )
+      }
+      const names = x.kind === 'profile' ? profileNames() : (x.choices ?? [])
+      if (!names.length) return <Text color="yellow">chưa có profile</Text>
+      return <Select key={`sel:${key}`} options={names.map(n => ({ value: n }))} value={current} onSelect={v => setFormField($, key, v)} />
+    }
+
+    const featuresBody = (
+      <Box flexDirection="column">
+        {(p?.features || []).map(f => {
+          const form = FORMS.find(x => x.key === f.key)
           return (
-            <Box key={`row:${r.key}`}>
-              <Text color={changed ? 'yellow' : 'white'} bold>{`${changed ? '* ' : '  '}${r.key.padEnd(width)}  `}</Text>
-              {control}
-              <Text dimColor>{`  ${r.desc}`}</Text>
+            <Box key={`f:${f.key}`} flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} marginBottom={1}>
+              <Text color="cyan" bold>{`${f.title}  ${f.items.length ? `(${f.items.length})` : ''}`}</Text>
+              {f.items.length ? f.items.map((it, i) => (
+                <Box key={`fi:${f.key}:${i}`} hover={{ scope: `fi:${f.key}:${i}` }}>
+                  <Text>{`  ${it.text}   `}</Text>
+                  {it.remove ? (
+                    <Button key={`f-rm:${f.key}:${i}`} onPress={() => run(it.remove!)}>{'✕ Gỡ'}</Button>
+                  ) : null}
+                </Box>
+              )) : <Text dimColor>{'  chưa có'}</Text>}
+              {form ? (
+                <Box flexWrap="wrap" marginTop={1} alignItems="center">
+                  {form.fields.map(x => (
+                    <Box key={`ff:${f.key}:${x.name}`} marginRight={2} alignItems="center">
+                      <Text color="gray">{`${x.label} `}</Text>
+                      {control(form, x)}
+                    </Box>
+                  ))}
+                  <Button key={`add:${f.key}`} variant="primary" onPress={() => submitForm($, form)}>{'＋ Thêm'}</Button>
+                </Box>
+              ) : null}
             </Box>
           )
         })}
-        {settingsNote ? <Text color="yellow">{settingsNote}</Text> : null}
-        <Box>
-          <Button key="settings-save" variant="primary" hotkey="s" onPress={() =>
-              void saveSettings($).catch(err => {
-                settingsNote = `⚠ ${String(err)}`
-                $.ui.invalidate('ui.render')
-              })
-            }>
-            💾 Lưu
-          </Button>
-          <Text> </Text>
-          <Button key="settings-cancel" role="dismiss" onPress={() => void $.ui.close({ id: 'settings' })}>
-            Hủy
-          </Button>
-          <Text dimColor>{`  ${Object.keys(draft).length} thay đổi chưa lưu`}</Text>
+      </Box>
+    )
+
+    const settingsBody = (() => {
+      const width = Math.max(...settings.map(r => r.key.length), 8)
+      const shown = (v: Setting['value']) => (v === '' ? '—' : String(v))
+      return (
+        <Box flexDirection="column">
+          {settings.map(r => {
+            const value = r.key in draft ? draft[r.key] : r.value
+            const changed = r.key in draft && draft[r.key] !== r.value
+            const control =
+              r.type === 'bool' ? (
+                <Button key={`set:${r.key}`} onPress={() => edit($, r.key, !value)}>
+                  {value ? '● bật' : '○ tắt'}
+                </Button>
+              ) : r.type === 'choice' ? (
+                <Button
+                  key={`set:${r.key}`}
+                  onPress={() => {
+                    const list = r.choices || []
+                    edit($, r.key, list[(list.indexOf(String(value)) + 1) % list.length] ?? '')
+                  }}
+                >
+                  {`⇄ ${shown(value)}`}
+                </Button>
+              ) : (
+                <Input key={`set:${r.key}`} value={String(value)} placeholder="—" onInput={v => edit($, r.key, v)} onSubmit={v => edit($, r.key, v)} />
+              )
+            return (
+              <Box key={`row:${r.key}`} hover={{ scope: `st:${r.key}` }}>
+                <Text color={changed ? 'yellow' : 'white'} bold>{`${changed ? '* ' : '  '}${r.key.padEnd(width)}  `}</Text>
+                {control}
+                <Text dimColor>{`  ${r.desc}`}</Text>
+              </Box>
+            )
+          })}
+          {settingsNote ? <Text color="yellow">{settingsNote}</Text> : null}
+          <Box marginTop={1}>
+            <Button key="settings-save" variant="primary" hotkey="s" onPress={() =>
+                void saveSettings($).catch(err => {
+                  settingsNote = `⚠ ${String(err)}`
+                  $.ui.invalidate('ui.render')
+                })
+              }>
+              {`💾 Lưu${Object.keys(draft).length ? ` (${Object.keys(draft).length})` : ''}`}
+            </Button>
+            <Text> </Text>
+            <Button key="settings-cancel" role="dismiss" onPress={() => void $.ui.close({ id: 'settings' })}>
+              Đóng
+            </Button>
+          </Box>
         </Box>
+      )
+    })()
+
+    const commandsBody = (
+      <Box flexDirection="column">
+        {commands.map((r, i) =>
+          r.cmd ? (
+            <Box key={`c${i}`} hover={{ scope: `cm:${i}` }}>
+              <Button key={`cmd:${r.cmd}`} plain onPress={() => fill(helpDraft(r.cmd!))}>
+                <Text color="yellow" bold>{r.cmd.padEnd(30)}</Text>
+              </Button>
+              <Text dimColor>{` ${r.desc}`}</Text>
+            </Box>
+          ) : r.title?.trim() ? <Text key={`c${i}`} color="cyan" bold>{r.title}</Text> : null
+        )}
+        <Text dimColor>{'💡 Bấm một lệnh để đưa nó xuống ô nhập.'}</Text>
+      </Box>
+    )
+
+    const body = tab === 'overview' ? overviewBody : tab === 'profiles' ? profilesBody : tab === 'features' ? featuresBody : tab === 'commands' ? commandsBody : settingsBody
+    return (
+      <Box flexDirection="column">
+        <Box>
+          <Text color="cyan" bold>{'🔀 claude-swap'}</Text>
+          {p?.profile ? <Text color="green" bold>{`   ● ${p.profile}`}</Text> : null}
+        </Box>
+        <Box marginTop={1}>{tabs}</Box>
+        <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={2} paddingY={1} marginTop={1}>
+          {body}
+        </Box>
+        <Text dimColor>{'Bấm tab hoặc phím 1–5 · trỏ chuột vào dòng để làm nổi · sửa rồi 💾 Lưu (phím s) · Esc đóng'}</Text>
       </Box>
     )
   })
@@ -581,8 +854,8 @@ export const register: Register = on => {
     if (argv[0] === 'settings' && argv.length === 1) {
       await loadSettings($)
       settingsNote = ''
-      const opened = await $.ui.open({ id: 'settings', title: 'claude-swap · Cài đặt', focus: true, closeOnEscape: true })
-      if (opened.isPlaced) return { text: '⚙️ Đã mở bảng cài đặt: sửa rồi bấm 💾 Lưu (phím s), Esc để đóng.' }
+      const opened = await $.ui.open({ id: 'settings', title: 'claude-swap', focus: true, closeOnEscape: true })
+      if (opened.isPlaced) return { text: '⚙️ Đã mở bảng điều khiển: phím 1-5 đổi tab, sửa cài đặt rồi bấm 💾 Lưu (phím s), Esc để đóng.' }
       await $.ui.close({ id: 'settings' })
     }
 
@@ -598,7 +871,10 @@ export const register: Register = on => {
         overview = JSON.parse(ov.stdout.trim())
       } catch {}
     }
-    if (!READ_ONLY.has(argv[0]) || ran.exitCode !== 0) await refreshStatus($).catch(() => undefined)
+    if (!READ_ONLY.has(argv[0]) || ran.exitCode !== 0) {
+      await refreshStatus($).catch(() => undefined)
+      if (argv[0] !== 'settings') await reloadPanel($)
+    }
     const out = `${ran.stdout}${ran.stderr}`.trim()
     // the new version is only on disk: have the host re-read plugins once this command has returned
     if (argv[0] === 'upgrade' && ran.exitCode === 0) {

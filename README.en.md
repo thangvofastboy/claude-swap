@@ -213,6 +213,7 @@ This part is a bit more serious, because typos in commands aren't fun.
 | `/profile auto order <list>` | Who steps in first (e.g. `work,personal,backup`) |
 | `/profile auto pool <tag\|all>`| Only switch within a tagged group |
 | `/profile auto safeguard [on\|off\|<%>]` | Don't jump into an account that has nearly burned its weekly quota (default `85%`) |
+| `/profile auto step [<%>\|off]` | Per-stint quota: each account uses at most N% of its 5h quota (counted from when it was switched to), then rotates to the next account in `auto order` (or by name), round and round. Every switch shows a notice in Claude (and on the desktop with `notify` on). Example: `/profile auto step 5`. |
 | `/profile auto return [on\|off]` | Go back to the primary profile once it has recovered |
 | `/profile auto primary <name>` | Choose "home" for auto-return |
 | `/profile auto check` | Don't wait for the next prompt: check now, switch if over the line. Each prompt only asks for the current profile's quota, and asks everyone's only when it has to pick a replacement |

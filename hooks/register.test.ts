@@ -646,7 +646,15 @@ test('/profile settings opens an editor; Save writes only the changed rows throu
   ]
   on('process.run', async (_$, { argv }) => {
     calls.push(argv.slice(2))
-    return ok(argv[3] === '--json' ? JSON.stringify(rows) : '✅ ok')
+    const panel = {
+      profile: 'work', email: 'w@x', profiles: 2, disabled: 0, rateLimited: false, stale: '', windows: [], settings: rows,
+      profileList: [
+        { name: 'work', email: 'w@x', active: true, disabled: false, tags: [], windows: [{ name: '5h', pct: 34, left: '1h' }] },
+        { name: 'home', email: 'h@x', active: false, disabled: false, tags: ['me'], windows: [] },
+      ],
+      features: [{ key: 'alias', title: 'Alias', items: [{ text: 'w → work', remove: ['unalias', 'w'] }] }],
+    }
+    return ok(argv[2] === 'panel' ? JSON.stringify(panel) : argv[2] === 'help' ? '🔀 x:\n  \x1b[1;33m/profile list\x1b[0m   List' : '✅ ok')
   })
   const opened: string[] = []
   const closed: string[] = []
@@ -657,7 +665,7 @@ test('/profile settings opens an editor; Save writes only the changed rows throu
   on('ui.toast', () => ({ value: undefined }))
 
   const ran = await $.command.run({ command: 'profile', args: 'settings' })
-  expect(ran.text).toContain('bảng cài đặt')
+  expect(ran.text).toContain('bảng điều khiển')
   expect(opened).toEqual(['settings'])
   const ui = await $.ui.mount({ plugin: 'profile-swap', surface: 'terminal', component: 'Pane', requestId: 'settings', props: { title: 'x', isFocused: true, bodyColumns: 120, placement: 'dock' } })
   await ui.press({ key: 'set:auto.enabled' })
@@ -669,5 +677,75 @@ test('/profile settings opens an editor; Save writes only the changed rows throu
   await ui.unmount()
   const sets = calls.filter(c => c[0] === 'settings' && c[1] === 'set').map(c => c.slice(2, 4))
   expect(sets).toEqual([['auto.enabled', 'on'], ['statusline', 'line'], ['auto.threshold', '90']])
-  expect(closed).toContain('settings')
+  expect(closed).not.toContain('settings') // the pane stays: its other tabs are still in use
+})
+
+test('/profile settings pane: profiles tab swaps and disables, features tab removes an item, commands tab lists the help', async ($, on) => {
+  const calls: string[][] = []
+  const panel = {
+    profile: 'work', email: 'w@x', profiles: 2, disabled: 0, rateLimited: false, stale: '', windows: [], settings: [],
+    profileList: [
+      { name: 'work', email: 'w@x', active: true, disabled: false, tags: [], windows: [] },
+      { name: 'home', email: 'h@x', active: false, disabled: false, tags: [], windows: [] },
+    ],
+    features: [{ key: 'alias', title: 'Alias', items: [{ text: 'w → work', remove: ['unalias', 'w'] }] }],
+  }
+  on('process.run', async (_$, { argv }) => {
+    calls.push(argv.slice(2))
+    return ok(argv[2] === 'panel' ? JSON.stringify(panel) : argv[2] === 'help' ? '🔀 x:\n  \x1b[1;33m/profile list\x1b[0m   List' : '✅ ok')
+  })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  await $.command.run({ command: 'profile', args: 'settings' })
+  const ui = await $.ui.mount({ plugin: 'profile-swap', surface: 'terminal', component: 'Pane', requestId: 'settings', props: { title: 'x', isFocused: true, bodyColumns: 160, placement: 'dock' } })
+  await ui.press({ key: 'tab:profiles' })
+  await ui.press({ key: 'p-swap:home' })
+  await ui.press({ key: 'p-dis:home' })
+  await new Promise(r => setTimeout(r, 30))
+  await ui.press({ key: 'tab:features' })
+  await ui.press({ key: 'f-rm:alias:0' })
+  await new Promise(r => setTimeout(r, 30))
+  await ui.press({ key: 'tab:commands' })
+  expect(await ui.find({ key: 'cmd:/profile list' })).toBeDefined()
+  await ui.unmount()
+  const acts = calls.filter(c => ['swap', 'disable', 'unalias'].includes(c[0])).map(c => c.slice(0, 2))
+  expect(acts).toEqual([['swap', 'home'], ['disable', 'home'], ['unalias', 'w']])
+})
+
+test('/profile settings features tab: the alias form adds what was typed; the webhook URL goes on stdin, never argv', async ($, on) => {
+  const calls: { argv: string[]; stdin?: string }[] = []
+  const panel = {
+    profile: 'work', email: 'w@x', profiles: 2, disabled: 0, rateLimited: false, stale: '', windows: [], settings: [],
+    profileList: [
+      { name: 'work', email: 'w@x', active: true, disabled: false, tags: [], windows: [] },
+      { name: 'home', email: 'h@x', active: false, disabled: false, tags: [], windows: [] },
+    ],
+    features: [{ key: 'alias', title: 'Alias', items: [] }, { key: 'webhook', title: 'Webhook', items: [] }],
+  }
+  on('process.run', async (_$, payload) => {
+    const argv = payload.argv.slice(2)
+    calls.push({ argv, stdin: payload.init?.stdin })
+    return ok(argv[0] === 'panel' ? JSON.stringify(panel) : argv[0] === 'help' ? '🔀 x:' : '✅ ok')
+  })
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  await $.command.run({ command: 'profile', args: 'settings' })
+  const ui = await $.ui.mount({ plugin: 'profile-swap', surface: 'terminal', component: 'Pane', requestId: 'settings', props: { title: 'x', isFocused: true, bodyColumns: 160, placement: 'dock' } })
+  await ui.press({ key: 'tab:features' })
+  await ui.input({ key: 'in:alias.name', text: 'pm' })
+  await ui.press({ key: 'add:alias' })
+  await ui.press({ key: 'add:alias' }) // a double press runs the command once
+  await new Promise(r => setTimeout(r, 30))
+  expect(calls.filter(c => c.argv[0] === 'alias').length).toBe(1)
+  await ui.input({ key: 'in:webhook.url', text: 'https://hooks.slack.com/services/SECRET' })
+  await ui.press({ key: 'add:webhook' })
+  await new Promise(r => setTimeout(r, 30))
+  await ui.unmount()
+  expect(calls.find(c => c.argv[0] === 'alias')?.argv.slice(0, 3)).toEqual(['alias', 'pm', 'work'])
+  const hook = calls.find(c => c.argv[0] === 'webhook')
+  expect(hook?.argv.slice(0, 3)).toEqual(['webhook', 'set', 'telegram'])
+  expect(hook?.argv.join(' ')).not.toContain('SECRET')
+  expect(hook?.stdin).toBe('https://hooks.slack.com/services/SECRET')
 })

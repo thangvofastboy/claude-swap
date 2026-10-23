@@ -44,6 +44,8 @@ import {
   calculateForecast,
   weeklyPace,
   recoveredProfiles,
+  settingsList,
+  featureItems,
   projectUsageTotals,
 } from './swap.js'
 
@@ -199,6 +201,8 @@ export function getDashboardData(home = os.homedir()) {
     weekly: Object.fromEntries(profiles.map(n => [n, weeklyPace(home, n, cache, usageHistory)])),
     recovered: recoveredProfiles(home, cache, cur),
     projectUsage: projectUsageTotals(home, 7),
+    settingsList: settingsList(home),
+    featureItems: featureItems(home),
   }
 }
 
@@ -362,6 +366,13 @@ export function renderDashboardHtml() {
     .feat-group { margin-bottom: 26px; }
     .feat-group h3 { font-size: 1.05rem; color: #fff; margin-bottom: 12px; }
     .feat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+    .setting-row, .fi-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 8px 10px; border-radius: 8px; }
+    .setting-row:hover, .fi-row:hover { background: rgba(255,255,255,0.04); }
+    .setting-row .ft { font-weight: 600; color: #fff; font-family: monospace; }
+    .setting-row .fd, .fi-group .fd { font-size: 0.8rem; color: var(--text-muted); }
+    .setting-row .form-control { min-width: 160px; }
+    .fi-group { margin-bottom: 12px; }
+    .fi-group > .ft { font-weight: 600; color: var(--accent, #8be9fd); margin-bottom: 4px; }
     .feat-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 8px; }
     .feat-card .ft { font-weight: 600; color: #fff; font-size: 0.92rem; }
     .feat-card .fd { font-size: 0.78rem; color: var(--text-muted); }
@@ -498,6 +509,16 @@ export function renderDashboardHtml() {
     <!-- TAB 2: SETTINGS -->
     <section id="tab-settings" class="tab-content">
       <div class="settings-container">
+        <div class="settings-section">
+          <div class="section-title">🧰 Toàn Bộ Cài Đặt</div>
+          <div class="section-desc">Mọi cài đặt của /profile settings với giá trị hiện tại. Đổi một ô là lưu ngay, không cần bấm Lưu.</div>
+          <div id="all-settings"></div>
+        </div>
+        <div class="settings-section">
+          <div class="section-title">🧩 Cấu Hình Đang Có</div>
+          <div class="section-desc">Alias, tag, liên kết thư mục và nhánh, model, lịch, mượn tạm, ngân sách, webhook. Bấm ✕ để gỡ; thêm mới ở tab Tính năng.</div>
+          <div id="feature-items"></div>
+        </div>
         <!-- Auto switch config -->
         <div class="settings-section">
           <div class="section-title">🤖 Tự Động Chuyển Đổi (Auto-Switching)</div>
@@ -792,6 +813,7 @@ export function renderDashboardHtml() {
         appData = await res.json();
         renderDashboard();
         renderSettings();
+        renderAllSettings();
         renderStats();
         renderFeatures();
       } catch (err) {
@@ -1166,6 +1188,7 @@ export function renderDashboardHtml() {
       ]],
       ['🤖 Tự động & quota', [
         ['Thứ tự ưu tiên auto-switch', ['auto', 'order'], [['text', 'Danh sách, vd: work,personal']]],
+        ['Hạn mức mỗi lượt (xoay vòng account)', ['auto', 'step'], [['number', '% quota 5h mỗi lượt (0 = tắt)', '5']]],
         ['Kiểm tra quota và đổi nếu cần', ['auto', 'check'], []],
         ['Cân bằng tải: sang profile kế tiếp', ['balance', 'next'], []],
         ['Mượn tạm profile', ['temp'], [['profile', 'Profile'], ['text', 'Thời gian (vd: 30m, 1h)', '1h']]],
@@ -1229,6 +1252,7 @@ export function renderDashboardHtml() {
       'Cho đi làm lại': 'Hết phép rồi, quay lại vòng xoay auto-switch thôi.',
       'Nhập profile từ thư mục khác': 'Dọn nhà cho profile từ thư mục khác (hoặc máy cũ) về đây.',
       'Thứ tự ưu tiên auto-switch': 'Xếp hàng xem ai lên thay khi profile hiện tại hết quota. Có trước có sau.',
+      'Hạn mức mỗi lượt (xoay vòng account)': 'Mỗi account dùng N% quota 5h rồi nhường lượt cho account kế tiếp, xoay vòng mãi. Mỗi lần đổi đều có thông báo.',
       'Kiểm tra quota và đổi nếu cần': 'Khỏi chờ tới prompt kế tiếp: bấm là kiểm tra, chạm ngưỡng là đổi ngay.',
       'Cân bằng tải: sang profile kế tiếp': 'Chuyền bóng cho đồng đội theo thuật toán cân bằng. Không ai phải gánh team.',
       'Mượn tạm profile': 'Mượn có hẹn giờ trả. Hết giờ tự trả, khỏi sợ mang tiếng quên.',
@@ -1379,6 +1403,61 @@ export function renderDashboardHtml() {
       });
 
       document.getElementById('cfg-masking').checked = Boolean(appData.masking);
+    }
+
+    // "Toàn bộ cài đặt" and "Cấu hình đang có": redrawn only when the data changes, so the 5s poll keeps what is being typed
+    let allSettingsKey = '', featureItemsKey = '';
+    function renderAllSettings() {
+      const sKey = JSON.stringify(appData.settingsList), fKey = JSON.stringify(appData.featureItems);
+      if (sKey !== allSettingsKey) renderSettingRows(sKey);
+      if (fKey !== featureItemsKey) renderFeatureItems(fKey);
+    }
+
+    function renderSettingRows(key) {
+      allSettingsKey = key;
+      document.getElementById('all-settings').innerHTML = (appData.settingsList || []).map((r, i) => {
+        const attrs = ' data-i="' + i + '" onchange="setSettingEl(this)"';
+        let ctl;
+        if (r.type === 'bool') {
+          ctl = '<label class="form-switch"><input type="checkbox"' + attrs + (r.value ? ' checked' : '') + '><span class="switch-slider"></span><span>' + (r.value ? 'Bật' : 'Tắt') + '</span></label>';
+        } else if (r.type === 'choice') {
+          ctl = '<select class="form-control"' + attrs + '>' + (r.choices || []).map(c => '<option value="' + esc(c) + '"' + (String(r.value) === c ? ' selected' : '') + '>' + esc(c || '(không)') + '</option>').join('') + '</select>';
+        } else {
+          ctl = '<input class="form-control" type="' + (r.type === 'number' ? 'number' : 'text') + '" value="' + esc(r.value) + '" placeholder="—"' + attrs + '>';
+        }
+        return '<div class="setting-row"><div><div class="ft">' + esc(r.key) + '</div><div class="fd">' + esc(r.desc) + '</div></div><div>' + ctl + '</div></div>';
+      }).join('');
+    }
+
+    function renderFeatureItems(key) {
+      featureItemsKey = key;
+      document.getElementById('feature-items').innerHTML = (appData.featureItems || []).map(f =>
+        '<div class="fi-group"><div class="ft">' + esc(f.title) + (f.items.length ? ' (' + f.items.length + ')' : '') + '</div>' +
+        (f.items.length ? f.items.map(it => '<div class="fi-row"><span>' + esc(it.text) + '</span>' +
+          (it.remove ? '<button class="btn btn-sm btn-danger" data-args="' + esc(JSON.stringify(it.remove)) + '" onclick="removeItem(this)">✕ Gỡ</button>' : '') + '</div>').join('')
+          : '<div class="fd">chưa có</div>') + '</div>'
+      ).join('');
+    }
+
+    async function cliToast(args) {
+      try {
+        const res = await api('/api/action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'cli', args }) });
+        const data = await res.json();
+        showToast((data.ok ? '' : '⚠ ') + String(data.output || data.error || 'OK').split(String.fromCharCode(10))[0]);
+      } catch (err) {
+        showToast('Lỗi: ' + err.message);
+      }
+      allSettingsKey = featureItemsKey = '';
+      loadData();
+    }
+
+    function setSettingEl(el) {
+      const r = appData.settingsList[Number(el.dataset.i)];
+      cliToast(['settings', 'set', r.key, el.type === 'checkbox' ? (el.checked ? 'on' : 'off') : el.value.trim()]);
+    }
+
+    function removeItem(el) {
+      cliToast(JSON.parse(el.dataset.args));
     }
 
     async function doSwap(name) {

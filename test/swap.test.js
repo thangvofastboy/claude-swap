@@ -28,6 +28,7 @@ import {
   loadSwapHistory,
   formatCooldowns,
   autoCheckAndSwap,
+  loadStint,
   diagnoseProfiles,
   getStatusline,
   generatePromptSnippet,
@@ -109,6 +110,7 @@ import {
   sparkline,
   settingsList,
   overviewData,
+  panelData,
   formatOverview,
   setSetting,
   addScheduleRule,
@@ -1978,6 +1980,77 @@ else if (a[0] === '-i') { const m = fs.readFileSync(0, 'utf-8').match(/-s "([^"]
     assert.doesNotMatch(text, /\x1b/)
   })
 
+  test('auto step: each profile uses N% of its 5h window per stint, then the next one in order takes over, round and round', async () => {
+    for (const n of ['s1', 's2', 's3']) {
+      login(tmpHome, n, `tok-${n}`)
+      saveProfile(tmpHome, n)
+    }
+    swapProfile(tmpHome, 's1')
+    const cache = pct => Object.fromEntries(Object.entries(pct).map(([n, v]) => [`${n}|${n}@example.com`, { limits: [['5 giờ', v, '20:00'], ['7 ngày', 1, '20:00']] }]))
+    const config = { enabled: true, threshold: 95, safeguardThreshold: null, order: ['s1', 's3', 's2'], step: 5, autoReturn: true, primaryProfile: 's1' }
+    // first look starts the stint, no swap
+    let res = await autoCheckAndSwap(tmpHome, { config, cache: cache({ s1: 10, s2: 0, s3: 0 }) })
+    assert.equal(res.swapped, false)
+    assert.deepEqual([loadStint(tmpHome).profile, loadStint(tmpHome).start], ['s1', 10])
+    res = await autoCheckAndSwap(tmpHome, { config, cache: cache({ s1: 14, s2: 0, s3: 0 }) })
+    assert.equal(res.swapped, false)
+    // 15 - 10 = 5 → next in order is s3; its stint starts at its own %
+    res = await autoCheckAndSwap(tmpHome, { config, cache: cache({ s1: 15, s2: 0, s3: 2 }) })
+    assert.deepEqual([res.swapped, res.to, res.isStep], [true, 's3', true])
+    assert.deepEqual([loadStint(tmpHome).profile, loadStint(tmpHome).start], ['s3', 2])
+    // auto-return is held off while stepping, or s1 would come straight back
+    res = await autoCheckAndSwap(tmpHome, { config, cache: cache({ s1: 15, s2: 0, s3: 3 }) })
+    assert.equal(res.swapped, false)
+    res = await autoCheckAndSwap(tmpHome, { config, cache: cache({ s1: 15, s2: 0, s3: 7 }) })
+    assert.equal(res.to, 's2')
+    res = await autoCheckAndSwap(tmpHome, { config, cache: cache({ s1: 15, s2: 6, s3: 7 }) })
+    assert.equal(res.to, 's1') // wraps around
+    // a target with no cached % yet must not start at 0 and bounce straight back once its real 40% arrives
+    res = await autoCheckAndSwap(tmpHome, { config, cache: cache({ s1: 21, s2: 7 }) })
+    assert.equal(res.to, 's3')
+    assert.equal(loadStint(tmpHome).profile, 's1')
+    res = await autoCheckAndSwap(tmpHome, { config, cache: cache({ s1: 21, s2: 7, s3: 40 }) })
+    assert.equal(res.swapped, false)
+    assert.deepEqual([loadStint(tmpHome).profile, loadStint(tmpHome).start], ['s3', 40])
+    // a new 5h window (new reset time) starts a new stint even when the % has already climbed past the old start
+    const withReset = (v, at) => ({ 's3|s3@example.com': { limits: [['5 giờ', v, '20:00', at]] } })
+    await autoCheckAndSwap(tmpHome, { config, cache: withReset(40, '2026-10-23T10:00:00Z') })
+    res = await autoCheckAndSwap(tmpHome, { config, cache: withReset(46, '2026-10-23T15:00:00Z') })
+    assert.equal(res.swapped, false)
+    assert.equal(loadStint(tmpHome).start, 46)
+    // nobody to hand over to: a new stint starts here instead of a rescan on every prompt
+    res = await autoCheckAndSwap(tmpHome, { config, cache: { ...cache({ s1: 96, s2: 96 }), ...withReset(52, '2026-10-23T15:00:00Z') } })
+    assert.equal(res.swapped, false)
+    assert.equal(loadStint(tmpHome).start, 52)
+    // setting and CLI
+    assert.equal(setSetting(tmpHome, 'auto.step', '5'), 5)
+    assert.equal(loadAutoSwitchConfig(tmpHome).step, 5)
+    assert.equal(await runCli(['auto', 'step', 'off'], tmpHome), 0)
+    assert.equal(loadAutoSwitchConfig(tmpHome).step, null)
+  })
+
+  test('settings pane data: every profile with its cached quota, and each feature item with the argv that removes it', async () => {
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'pn-main')
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'pn-alt')
+    const cacheFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json')
+    writeFreshCache(cacheFile, { 'pn-main|a@example.com': { limits: [['5 giờ', 40, '20:00'], ['7 ngày', 10, '20:00']] } })
+    await runCli(['alias', 'pm', 'pn-main'], tmpHome)
+    await runCli(['schedule', '09:00-18:00', 'pn-main'], tmpHome)
+    await runCli(['webhook', 'set', 'slack', 'https://hooks.slack.com/services/SECRET'], tmpHome)
+    const d = panelData(tmpHome)
+    assert.equal(d.profile, 'pn-alt')
+    assert.deepEqual(d.profileList.find(p => p.name === 'pn-main').windows.map(w => w.pct), [40, 10])
+    const f = Object.fromEntries(d.features.map(x => [x.key, x.items]))
+    assert.deepEqual(f.alias, [{ text: 'pm → pn-main', remove: ['unalias', 'pm'] }])
+    assert.deepEqual(f.schedule[0].remove, ['unschedule', '09:00-18:00', 'pn-main'])
+    await runCli(f.schedule[0].remove, tmpHome)
+    assert.equal(loadSchedule(tmpHome).rules.length, 0)
+    assert.deepEqual(f.webhook[0].remove, ['webhook', 'unset', 'slack'])
+    assert.doesNotMatch(JSON.stringify(d), /SECRET/)
+  })
+
   test('forecast reads a burst after an idle stretch at its real pace, not averaged over the idle hours', () => {
     const now = Date.now()
     const idle = Array.from({ length: 72 }, (_, i) => ({ timestamp: now - (72 - i) * 3600000 - 600000, util5h: 0, util7d: 0 }))
@@ -2234,6 +2307,9 @@ else if (a[0] === '-i') { const m = fs.readFileSync(0, 'utf-8').match(/-s "([^"]
     assert.equal(dataRes.status, 200)
     const json = await dataRes.json()
     assert.equal(json.profiles.length, 2)
+    assert.ok(json.settingsList.some(r => r.key === 'auto.step'))
+    assert.ok(Array.isArray(json.featureItems) && json.featureItems.some(f => f.key === 'alias'))
+    assert.match(await (await fetch(dash.url)).text(), /function renderAllSettings/)
 
     // Verify POST /api/action swap
     const actRes = await fetch(`${dash.url}/api/action`, {

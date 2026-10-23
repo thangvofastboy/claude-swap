@@ -213,6 +213,7 @@ Phần này nghiêm túc hơn một chút, vì gõ sai lệnh thì không vui.
 | `/profile auto order <ds>` | Xếp hàng xem ai lên thay trước (vd: `work,personal,backup`) |
 | `/profile auto pool <tag\|all>`| Chỉ đổi qua lại trong nhóm có tag |
 | `/profile auto safeguard [on\|off\|<%>]` | Không nhảy vào tài khoản đã gần cạn quota tuần (mặc định `85%`) |
+| `/profile auto step [<%>\|off]` | Hạn mức mỗi lượt: mỗi tài khoản dùng tối đa N% quota 5h (tính từ lúc được chuyển sang), rồi tự chuyển sang tài khoản kế tiếp theo `auto order` (hoặc theo tên), xoay vòng liên tục. Mỗi lần chuyển đều có thông báo trong Claude (và desktop nếu bật `notify`). Ví dụ: `/profile auto step 5`. |
 | `/profile auto return [on\|off]` | Tự quay về profile chính khi nó hồi sức |
 | `/profile auto primary <tên>` | Chọn "nhà" để auto-return quay về |
 | `/profile auto check` | Khỏi chờ prompt kế tiếp: kiểm tra ngay, chạm ngưỡng là đổi. Mỗi prompt chỉ hỏi quota của profile đang dùng, chỉ hỏi cả đội khi cần chọn người thay |

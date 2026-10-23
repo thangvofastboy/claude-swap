@@ -661,6 +661,7 @@ export function renameProfile(home, oldName, newName) {
     ...(Array.isArray(c.order) ? { order: c.order.map(swap) } : {}),
     ...(c.primaryProfile ? { primaryProfile: swap(c.primaryProfile) } : {}),
   }))
+  for (const f of fs.readdirSync(dir).filter(f => /^\.stint(-[^.]+)?\.json$/.test(f))) editStateFile(state(f), t => ({ ...t, profile: swap(t.profile) }))
   editStateFile(state('.temp-profile.json'), t => ({ ...t, tempProfile: swap(t.tempProfile), originalProfile: swap(t.originalProfile) }))
   editStateFile(state('.swap-history.json'), h => (Array.isArray(h) ? h.map(e => ({ ...e, from: swap(e.from), to: swap(e.to) })) : h))
   editStateFile(state('.budget.json'), b => ({ ...b, ...(b.limits ? { limits: swapKeys(b.limits) } : {}) }))
@@ -1279,6 +1280,7 @@ export function loadAutoSwitchConfig(home) {
         pool: typeof parsed.pool === 'string' && parsed.pool !== 'all' ? parsed.pool : null,
         autoReturn: parsed.autoReturn === true,
         primaryProfile: typeof parsed.primaryProfile === 'string' ? parsed.primaryProfile : null,
+        step: typeof parsed.step === 'number' && parsed.step > 0 ? parsed.step : null,
         safeguardThreshold:
           typeof parsed.safeguardThreshold === 'number'
             ? parsed.safeguardThreshold
@@ -1295,8 +1297,34 @@ export function loadAutoSwitchConfig(home) {
     pool: null,
     autoReturn: false,
     primaryProfile: null,
+    step: null,
     safeguardThreshold: 85,
   }
+}
+
+// per-stint quota (`auto step`): the profile now in use, its 5h % when its stint began and that window's reset (minutes),
+// one file per config dir as `.current` is. Holds a profile name: renameProfile rewrites every `.stint*.json`.
+export function stintFile(home) {
+  return currentFileFor(home, claudeConfigDir(home)).replace(/\.current(-[^/\\]*)?$/, (_, h) => `.stint${h || ''}.json`)
+}
+
+export function loadStint(home) {
+  try {
+    const d = JSON.parse(fs.readFileSync(stintFile(home), 'utf-8'))
+    return d && typeof d.profile === 'string' && typeof d.start === 'number' ? d : null
+  } catch {
+    return null
+  }
+}
+
+function saveStint(home, profile, start, reset) {
+  atomicWrite(stintFile(home), JSON.stringify({ profile, start, reset, at: new Date().toISOString() }, null, 2))
+}
+
+// the 5h window's reset, to the minute: a new value means a new window, so a new stint
+function windowReset(hit) {
+  const t = parseResetTime(hit, findLimit(hit, LABEL_5H))
+  return Number.isFinite(t) && t > 0 ? Math.round(t / 60000) : null
 }
 
 export function saveAutoSwitchConfig(home, config) {
@@ -1931,6 +1959,14 @@ export function findNextProfile(home, options = {}) {
     return null
   }
 
+  // `rotate` (per-stint quota): the next eligible profile after the current one, around `order` when set, else by name
+  if (options.rotate) {
+    const ring = config.order?.length ? [...config.order, ...allProfiles.filter(n => !config.order.includes(n))] : allProfiles
+    const i = ring.indexOf(cur)
+    const pick = [...ring.slice(i + 1), ...ring.slice(0, Math.max(i, 0))].find(n => candidates.some(c => c.name === n))
+    if (pick) return pick
+  }
+
   // load balancing, when on, decides instead of `order`; least-used is the default sort below
   if (balance.enabled && balance.mode === 'round-robin') {
     // stateless rotation: the first eligible profile after the current one, in name order
@@ -1996,12 +2032,15 @@ export function addScheduleRule(home, range, name) {
   return sched.rules
 }
 
-export function removeScheduleRule(home, which) {
+// `which`: all, a position (n), or the rule itself (HH:MM-HH:MM [profile]), which stays right when the list moved since it was read
+export function removeScheduleRule(home, which, profile = null) {
   const sched = loadSchedule(home)
   if (which === 'all') sched.rules = []
   else {
-    const i = Number(which) - 1
-    if (!Number.isInteger(i) || i < 0 || i >= sched.rules.length) throw new SwapError(`Không có lịch số ${which}. Xem: /profile schedule`)
+    const i = /^\d+$/.test(String(which))
+      ? Number(which) - 1
+      : sched.rules.findIndex(r => `${r.from}-${r.to}` === which && (!profile || r.profile === profile))
+    if (!Number.isInteger(i) || i < 0 || i >= sched.rules.length) throw new SwapError(`Không có lịch ${which}. Xem: /profile schedule`)
     sched.rules.splice(i, 1)
     // `applied` is `day|index`: follow the shift, so a rule already applied (and maybe overridden by hand) stays applied
     const [day, idx] = String(sched.applied || '').split('|')
@@ -2137,6 +2176,7 @@ export async function autoCheckAndSwap(home, options = {}) {
   // Check auto-return to primary profile
   if (
     config.autoReturn &&
+    !config.step && // the per-stint rotation would be undone by it on the next prompt
     config.primaryProfile &&
     cur !== config.primaryProfile &&
     profileExists(home, config.primaryProfile)
@@ -2172,6 +2212,30 @@ export async function autoCheckAndSwap(home, options = {}) {
   const util7d = limitPct(hit, LABEL_7D)
   const isSafeguardTriggered = Boolean(config.safeguardThreshold && util7d >= config.safeguardThreshold)
 
+  // per-stint quota: each profile may use `step`% of its 5h window from when it became current, then the next one takes
+  // over, round and round. A swap by any other path starts a new stint here; a window reset (lower %) restarts it.
+  if (config.step && findLimit(hit, LABEL_5H) && util < config.threshold && !isSafeguardTriggered) {
+    const stint = loadStint(home)
+    const reset = windowReset(hit)
+    const newWindow = reset && stint?.reset && reset !== stint.reset
+    if (!stint || stint.profile !== cur || util < stint.start || newWindow) {
+      saveStint(home, cur, util, reset)
+    } else if (util - stint.start >= config.step) {
+      await refresh(listProfiles(home))
+      const next = findNextProfile(home, { config, cache, rotate: true })
+      // nobody to hand over to: start a new stint here instead of rescanning every profile on every prompt
+      if (!next || next === cur) saveStint(home, cur, util, reset)
+      else {
+        const reasonText = `đã dùng ${Math.round(util - stint.start)}% quota 5h trong lượt, hạn mức ${config.step}%/lượt`
+        swapProfile(home, next, { type: 'auto', reason: reasonText, cwd: process.cwd() })
+        // an unknown % (no cache yet, 429) would start the stint at 0 and rotate away at once: the next check starts it
+        const nextHit = cacheHit(home, cache, next)
+        if (findLimit(nextHit, LABEL_5H)) saveStint(home, next, limitPct(nextHit, LABEL_5H), windowReset(nextHit))
+        sendNotification(home, 'claude-swap', `Đã chuyển sang '${next}' (${reasonText})`)
+        return { swapped: true, from: cur, to: next, util, threshold: config.threshold, reason: reasonText, isStep: true }
+      }
+    }
+  }
   // retry_at is a 429 from the usage endpoint (polling limit), not the account's quota: judge by the last known numbers
   if (util >= config.threshold || isSafeguardTriggered) {
     await refresh(listProfiles(home)) // choosing a replacement needs everyone's numbers
@@ -4076,6 +4140,7 @@ function helpText(color, lang) {
       `  ${cmd('/profile auto safeguard <%>')} 7-day safeguard threshold (default: 85%)`,
       `  ${cmd('/profile auto return on|off')} Auto return to primary profile when quota resets`,
       `  ${cmd('/profile auto primary <name>')} Set primary profile to return to`,
+      `  ${cmd('/profile auto step <%|off>')}   Per-stint quota: use N% of the 5h window, then rotate to the next account`,
       `  ${cmd('/profile forecast')}          Burn rate & quota exhaustion forecast`,
       `  ${cmd('/profile cooldown')}          Quota reset countdown timers`,
       `  ${cmd('/profile doctor')}            Diagnostics for accounts, tokens and health`,
@@ -4162,6 +4227,7 @@ function helpText(color, lang) {
     `  ${cmd('/profile auto safeguard <%>')} Bảo vệ hạn mức 7 ngày (mặc định: 85%)`,
     `  ${cmd('/profile auto return on|off')} Tự động quay về profile chính khi hồi token`,
     `  ${cmd('/profile auto primary <tên>')} Đặt profile chính để quay về`,
+    `  ${cmd('/profile auto step <%|off>')}   Hạn mức mỗi lượt: dùng N% quota 5h rồi chuyển account kế tiếp`,
     `  ${cmd('/profile forecast')}          Dự báo tốc độ tiêu thụ & thời điểm cạn hạn mức`,
     `  ${cmd('/profile cooldown')}          Xem đồng hồ đếm ngược reset quota của các account`,
     `  ${cmd('/profile doctor')}            Quét chẩn đoán sức khỏe, token và lỗi các account`,
@@ -4245,6 +4311,8 @@ const SETTINGS = [
   ['auto.threshold', 'number', 'Ngưỡng % quota 5h để tự chuyển', h => loadAutoSwitchConfig(h).threshold, (h, v) => patchAuto(h, { threshold: pctSetting(v) })],
   ['auto.safeguard', 'number', 'Né profile có 7 ngày ≥ % này (0 = tắt)', h => loadAutoSwitchConfig(h).safeguardThreshold ?? 0,
     (h, v) => patchAuto(h, { safeguardThreshold: Number(v) === 0 || v === 'off' ? null : pctSetting(v) })],
+  ['auto.step', 'number', 'Hạn mức % quota 5h mỗi lượt: dùng hết thì chuyển account kế tiếp (0 = tắt)', h => loadAutoSwitchConfig(h).step ?? 0,
+    (h, v) => patchAuto(h, { step: Number(v) === 0 || v === 'off' || v === '' ? null : pctSetting(v) })],
   ['auto.return', 'bool', 'Tự quay về profile chính khi nó hồi quota', h => loadAutoSwitchConfig(h).autoReturn, (h, v) => patchAuto(h, { autoReturn: onOff(v) })],
   ['auto.primary', 'profile', 'Profile chính để quay về', h => loadAutoSwitchConfig(h).primaryProfile || '', (h, v) => patchAuto(h, { primaryProfile: profileSetting(h, v) })],
   ['auto.pool', 'text', 'Chỉ chuyển trong nhóm có tag này (trống = tất cả)', h => loadAutoSwitchConfig(h).pool || '',
@@ -4299,7 +4367,7 @@ export function formatSettings(home) {
 // Bare `/profile`: the live profile, its quota and every setting, above the command list.
 // Single-codepoint emoji only: a VS16 one (⚙️, ↩️, 🏷️) is drawn one cell wide by some terminals and breaks the columns.
 const SETTING_ICONS = {
-  'auto.enabled': '🤖', 'auto.threshold': '🎯', 'auto.safeguard': '🚧', 'auto.return': '🔁', 'auto.primary': '⭐',
+  'auto.enabled': '🤖', 'auto.threshold': '🎯', 'auto.safeguard': '🚧', 'auto.step': '🔂', 'auto.return': '🔁', 'auto.primary': '⭐',
   'auto.pool': '👥', 'auto.order': '🔢', balance: '🔄', statusline: '📊', notify: '🔔', mask: '🙈', 'repair.auto': '🔧', 'update.auto': '⬆', lang: '🌐',
 }
 
@@ -4315,6 +4383,49 @@ export function overviewData(home) {
     stale: cur ? staleNote(hit, loadLanguage(home)) : '',
     windows: cur ? quotaWindows(hit) : [],
     settings: settingsList(home).map(r => ({ ...r, icon: SETTING_ICONS[r.key] || '•' })),
+  }
+}
+
+// every feature's stored items, each with the argv that removes it, for the pane and the web dashboard to list.
+// Webhook URLs are secrets: only maskUrl() versions leave this function.
+export function featureItems(home) {
+  const hook = loadWebhookConfig(home)
+  const temp = loadTempProfile(home)
+  const budget = loadBudgetConfig(home)
+  const profiles = listProfiles(home)
+  return [
+    ['alias', '🔤 Alias', Object.entries(loadAliases(home)).map(([a, p]) => ({ text: `${a} → ${p}`, remove: ['unalias', a] }))],
+    ['tag', '🔖 Tag', profiles.flatMap(p => getProfileTags(home, p).map(t => ({ text: `${p} #${t}`, remove: ['untag', p, t] })))],
+    ['bind', '📁 Bind thư mục', Object.entries(loadProjectBindings(home)).map(([d, p]) => ({ text: `${d} → ${p}`, remove: ['unbind', d] }))],
+    ['bind-branch', '🌿 Bind nhánh', Object.entries(loadBranchBindings(home)).flatMap(([d, list]) =>
+      (Array.isArray(list) ? list : []).map(b => ({ text: `${d} · ${b.pattern} → ${b.profile}`, remove: ['unbind-branch', b.pattern, d] })))],
+    ['affinity', '🧠 Model', Object.entries(loadModelAffinity(home)).map(([m, p]) => ({ text: `${m} → ${p}`, remove: ['unaffinity', m] }))],
+    ['schedule', '📅 Lịch', loadSchedule(home).rules.map(r => ({ text: `${r.from}-${r.to} → ${r.profile}`, remove: ['unschedule', `${r.from}-${r.to}`, r.profile] }))],
+    ['temp', '⏳ Mượn tạm', temp ? [{ text: `${temp.tempProfile} (về ${temp.originalProfile || '—'})`, remove: ['untemp'] }] : []],
+    ['budget', '💰 Ngân sách', Object.entries(budget.limits).map(([p, v]) => ({ text: `${p}: ${v} ${budget.currency}`, remove: ['budget', 'unset', p] }))],
+    ['webhook', '🔔 Webhook', ['telegram', 'discord', 'slack', 'generic'].filter(k => hook[k]).map(k => ({ text: `${k}: ${maskUrl(hook[k])}`, remove: ['webhook', 'unset', k] }))],
+  ].map(([key, title, items]) => ({ key, title, items }))
+}
+
+// `/profile settings` pane: the overview plus every profile and every feature's stored state, from the cache only (no fetch).
+// The feature items (featureItems) carry the argv that removes each one, so the hook runs a known subcommand.
+export function panelData(home) {
+  const cache = loadUsageCache(home)
+  const disabled = loadDisabledProfiles(home)
+  const cur = currentProfile(home)
+  const mask = isMaskingEnabled(home)
+  const profiles = listProfiles(home)
+  return {
+    ...overviewData(home),
+    profileList: profiles.map(name => ({
+      name,
+      email: maskEmail(profileEmail(home, name), mask),
+      active: name === cur,
+      disabled: disabled.includes(name),
+      tags: getProfileTags(home, name),
+      windows: quotaWindows(cacheHit(home, cache, name)),
+    })),
+    features: featureItems(home),
   }
 }
 
@@ -4430,6 +4541,12 @@ async function runCliInner(argv, home) {
     console.log(argv.includes('--json') ? JSON.stringify(overviewData(home)) : formatOverview(home, color, lang))
     return 0
   }
+
+  if (cmd === 'panel') {
+    console.log(JSON.stringify(panelData(home)))
+    return 0
+  }
+
 
   if (cmd === 'version' || cmd === '--version' || cmd === '-v') {
     const { version } = JSON.parse(fs.readFileSync(path.join(path.dirname(SCRIPT_PATH), 'package.json'), 'utf-8'))
@@ -4620,7 +4737,7 @@ async function runCliInner(argv, home) {
         return 0
       }
       case 'unschedule': {
-        removeScheduleRule(home, filteredArgv[1] || 'all')
+        removeScheduleRule(home, filteredArgv[1] || 'all', filteredArgv[2] || null)
         console.log(formatSchedule(home, lang))
         return 0
       }
@@ -4740,6 +4857,16 @@ async function runCliInner(argv, home) {
           if (cfg.autoReturn) {
             console.log(`🔄 Tự động quay về profile chính: ${cfg.primaryProfile || '(chưa đặt)'}`)
           }
+          if (cfg.step) {
+            const st = loadStint(home)
+            console.log(`🔂 Hạn mức mỗi lượt: ${cfg.step}% quota 5h, dùng hết thì chuyển account kế tiếp${st ? ` (lượt của '${st.profile}' bắt đầu ở ${st.start}%)` : ''}`)
+          }
+          return 0
+        }
+
+        if (sub === 'step') {
+          const v = filteredArgv[2] === undefined ? cfg.step : setSetting(home, 'auto.step', filteredArgv[2])
+          console.log(v ? `🔂 Mỗi profile dùng tối đa ${v}% quota 5h mỗi lượt, rồi tự chuyển sang account kế tiếp.` : '🔂 Đã tắt hạn mức mỗi lượt.')
           return 0
         }
 
@@ -5388,7 +5515,8 @@ async function runCliInner(argv, home) {
         }
         if (sub === 'set') {
           const type = filteredArgv[2]
-          const url = filteredArgv[3]
+          // --url-stdin: the pane sends the URL on stdin, so a webhook secret never shows in `ps`
+          const url = filteredArgv.includes('--url-stdin') ? fs.readFileSync(0, 'utf-8').trim() : filteredArgv[3]
           if (!type || !url || !['telegram', 'discord', 'slack', 'generic'].includes(type.toLowerCase())) {
             throw new SwapError(lang === 'en' ? 'Usage: /profile webhook set <telegram|discord|slack|generic> <url>' : 'Cú pháp: /profile webhook set <telegram|discord|slack|generic> <url>')
           }
