@@ -3,6 +3,9 @@ import type { EngineInterface, Register } from 'claude-code'
 const SUBCOMMANDS = new Set([
   'help',
   'list',
+  'codex',
+  'agy',
+  'opencode',
   'dedupe',
   'note',
   'restore',

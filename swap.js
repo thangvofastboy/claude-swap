@@ -824,15 +824,16 @@ export function formatSwapStats(home) {
 // a deleted profile stays restorable for TRASH_DAYS
 export const TRASH_DAYS = 7
 
-function trashDir(home) {
-  const d = path.join(profilesDir(home), '.trash')
+// `base`: the folder whose `.trash` it is (other AI tools keep their own, so `restore` never brings one back as Claude's)
+function trashDir(home, base = profilesDir(home)) {
+  const d = path.join(base, '.trash')
   fs.mkdirSync(d, { recursive: true, mode: 0o700 })
   return d
 }
 
 // the trash holds live tokens: anything older than TRASH_DAYS is removed whenever it is touched
-function purgeTrash(home) {
-  const dir = trashDir(home)
+function purgeTrash(home, base) {
+  const dir = trashDir(home, base)
   const cutoff = Date.now() - TRASH_DAYS * 86400000
   for (const f of fs.readdirSync(dir)) {
     const at = Number(f.split('.').at(-2))
@@ -841,8 +842,8 @@ function purgeTrash(home) {
   return dir
 }
 
-function moveToTrash(home, name, file) {
-  fs.renameSync(file, path.join(purgeTrash(home), `${name}.${Date.now()}.json`))
+function moveToTrash(home, name, file, base) {
+  fs.renameSync(file, path.join(purgeTrash(home, base), `${name}.${Date.now()}.json`))
 }
 
 export function trashedProfiles(home) {
@@ -890,6 +891,212 @@ export function deleteProfile(home, name, { purge = false } = {}) {
       if (process.platform === 'darwin') deleteKeychain(sessionKeychainService(sDir))
     }
   } catch {}
+}
+
+// Other AI CLIs (`/profile codex|agy|opencode …`): each keeps its login in one file, saved raw per profile as `{ auth }`
+// under `<profiles dir>/.<tool>/`, with its own `.current` and `.trash`. Manual swaps only: there is no quota to read.
+// Env overrides (CODEX_HOME, XDG_DATA_HOME) are honoured only for the real home, as CLAUDE_CONFIG_DIR is, so tests
+// never reach the real login.
+const realEnv = (home, name) => (home === os.homedir() ? process.env[name] : undefined)
+
+function parseJsonOrNull(raw) {
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
+// an id_token's claims, read and not verified: who the login is, not whether it is valid
+function jwtClaims(token) {
+  return typeof token === 'string' ? parseJsonOrNull(Buffer.from(token.split('.')[1] || '', 'base64url').toString('utf-8')) : null
+}
+
+// Codex: a ChatGPT login (account and user ids, email, plan) or an API key (compared, never shown: `email` has its last 4)
+export function codexIdentity(raw) {
+  const a = parseJsonOrNull(raw)
+  const t = a?.tokens
+  const claims = jwtClaims(t?.id_token)
+  if (claims) {
+    const auth = claims['https://api.openai.com/auth'] || {}
+    const account = t.account_id || auth.chatgpt_account_id || ''
+    const user = auth.chatgpt_user_id || claims.sub || ''
+    // with neither id every such login would match every other: fall through to the API key, else unknown
+    if (account || user) return { key: `${account}|${user}`, email: String(claims.email || ''), plan: String(auth.chatgpt_plan_type || '') }
+  }
+  const apiKey = a?.OPENAI_API_KEY
+  if (typeof apiKey === 'string' && apiKey) return { key: `apikey|${apiKey}`, email: `API key …${apiKey.slice(-4)}`, plan: 'api' }
+  return null
+}
+
+// Antigravity (agy): a Google login, `sub` and email from its id_token
+export function agyIdentity(raw) {
+  const a = parseJsonOrNull(raw)
+  const claims = jwtClaims(a?.id_token)
+  return claims?.sub ? { key: String(claims.sub), email: String(claims.email || ''), plan: String(a.auth_method || '') } : null
+}
+
+// opencode: one entry per provider (DeepSeek, Qwen, … through it), an API key or an OAuth login. The key is the
+// provider names with each API key; an OAuth token rotates in place, so only its provider counts.
+// ponytail: two profiles holding OAuth logins of one provider look alike (the last one swapped to wins); add the
+// account id from the token if that ever matters.
+export function opencodeIdentity(raw) {
+  const a = parseJsonOrNull(raw)
+  if (!a || typeof a !== 'object' || Array.isArray(a)) return null
+  const providers = Object.keys(a).sort()
+  if (!providers.length) return null
+  const apiKey = p => (a[p]?.type === 'api' && typeof a[p].key === 'string' ? a[p].key : '')
+  return {
+    key: providers.map(p => `${p}:${apiKey(p) || a[p]?.type}`).join('|'),
+    email: providers.map(p => (apiKey(p) ? `${p} …${apiKey(p).slice(-4)}` : `${p} (${a[p]?.type || '?'})`)).join(', '),
+    plan: '',
+  }
+}
+
+export const AI_TOOLS = {
+  codex: {
+    label: 'Codex',
+    file: home => path.join(realEnv(home, 'CODEX_HOME') || path.join(home, '.codex'), 'auth.json'),
+    identity: codexIdentity,
+    login: 'codex login (đăng nhập lưu trong keyring, cli_auth_credentials_store = "keyring", chưa được hỗ trợ)',
+  },
+  agy: {
+    label: 'Antigravity',
+    file: home => path.join(home, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
+    identity: agyIdentity,
+    login: 'agy rồi đăng nhập Google',
+  },
+  opencode: {
+    label: 'opencode',
+    file: home => path.join(realEnv(home, 'XDG_DATA_HOME') || path.join(home, '.local', 'share'), 'opencode', 'auth.json'),
+    identity: opencodeIdentity,
+    login: 'opencode auth login',
+  },
+}
+
+function aiTool(tool) {
+  const t = AI_TOOLS[tool]
+  if (!t) throw new SwapError(`Không hỗ trợ '${tool}'. Dùng: ${Object.keys(AI_TOOLS).join(' | ')}`)
+  return t
+}
+
+export const toolProfilesDir = (home, tool) => path.join(profilesDir(home), `.${tool}`)
+const toolProfilePath = (home, tool, name) => path.join(toolProfilesDir(home, tool), `${checkName(name)}.json`)
+const toolCurrentFile = (home, tool) => path.join(toolProfilesDir(home, tool), '.current')
+
+function readToolAuth(home, tool) {
+  const file = aiTool(tool).file(home)
+  try {
+    return fs.readFileSync(file, 'utf-8')
+  } catch {
+    return null
+  }
+}
+
+export function listToolProfiles(home, tool) {
+  try {
+    return fs.readdirSync(toolProfilesDir(home, tool))
+      .filter(f => f.endsWith('.json') && !f.startsWith('.'))
+      .map(f => f.slice(0, -5))
+      .filter(name => NAME_RE.test(name))
+      .sort()
+  } catch {
+    return []
+  }
+}
+
+function loadToolProfile(home, tool, name) {
+  const { label } = aiTool(tool)
+  const file = toolProfilePath(home, tool, name)
+  if (!fs.existsSync(file)) throw new SwapError(`Không có profile ${label} '${name}'. Xem: /profile ${tool} list`)
+  try {
+    const data = JSON.parse(fs.readFileSync(file, 'utf-8'))
+    if (typeof data?.auth !== 'string') throw new Error('thiếu auth')
+    return data
+  } catch (err) {
+    throw new SwapError(`Profile ${label} '${name}' bị hỏng: ${safeError(err)}`)
+  }
+}
+
+const toolProfileId = (home, tool, name) => {
+  try {
+    return aiTool(tool).identity(loadToolProfile(home, tool, name).auth)
+  } catch {
+    return null
+  }
+}
+
+// the profile holding the live login, the last one swapped to first
+export function currentToolProfile(home, tool) {
+  const id = aiTool(tool).identity(readToolAuth(home, tool) || '')
+  if (!id) return null
+  let marked = ''
+  try {
+    marked = fs.readFileSync(toolCurrentFile(home, tool), 'utf-8').trim()
+  } catch {}
+  const names = listToolProfiles(home, tool)
+  return [marked, ...names].find(n => names.includes(n) && toolProfileId(home, tool, n)?.key === id.key) || null
+}
+
+export function saveToolProfile(home, tool, name, { force = false } = {}) {
+  const t = aiTool(tool)
+  const raw = readToolAuth(home, tool)
+  const id = raw && t.identity(raw)
+  if (!id) throw new SwapError(`Chưa đăng nhập ${t.label} hoặc không đọc được ${t.file(home)}. Chạy: ${t.login}.`)
+  const file = toolProfilePath(home, tool, name)
+  const old = fs.existsSync(file) ? toolProfileId(home, tool, name) : null
+  if (old && old.key !== id.key) {
+    if (!force) throw new SwapError(`Profile ${t.label} '${name}' đang giữ tài khoản khác (${old.email}). Thêm --force để ghi đè.`)
+    moveToTrash(home, name, file, toolProfilesDir(home, tool)) // the login it held stays recoverable for TRASH_DAYS
+  }
+  atomicWrite(file, JSON.stringify({ auth: raw }, null, 2))
+  atomicWrite(toolCurrentFile(home, tool), name)
+  return { name, email: id.email, plan: id.plan }
+}
+
+export function useToolProfile(home, tool, name, { force = false } = {}) {
+  const t = aiTool(tool)
+  loadToolProfile(home, tool, name) // a missing or broken target fails before anything is written
+  const live = readToolAuth(home, tool)
+  const liveId = live && t.identity(live)
+  // tokens the tool refreshed since the last save belong to the profile that holds this login: keep them first
+  const holder = liveId && currentToolProfile(home, tool)
+  if (holder) atomicWrite(toolProfilePath(home, tool, holder), JSON.stringify({ auth: live }, null, 2))
+  else if (live) {
+    if (!force) {
+      throw new SwapError(liveId
+        ? `Tài khoản ${t.label} đang đăng nhập (${liveId.email}) chưa lưu vào profile nào: /profile ${tool} save <tên> trước, hoặc thêm --force.`
+        : `Không nhận ra tài khoản trong ${t.file(home)}; thêm --force để vẫn ghi đè (bản hiện tại được giữ trong thùng rác).`)
+    }
+    // --force: a login no profile holds goes to the trash, not nowhere
+    atomicWrite(path.join(purgeTrash(home, toolProfilesDir(home, tool)), `_live.${Date.now()}.json`), JSON.stringify({ auth: live }, null, 2))
+  }
+  const target = loadToolProfile(home, tool, name) // read after the save above, so swapping to the live account keeps its fresh tokens
+  const id = t.identity(target.auth)
+  atomicWrite(t.file(home), target.auth)
+  atomicWrite(toolCurrentFile(home, tool), name)
+  return { name, email: id?.email || '', plan: id?.plan || '' }
+}
+
+export function deleteToolProfile(home, tool, name) {
+  const file = toolProfilePath(home, tool, name)
+  if (!fs.existsSync(file)) throw new SwapError(`Không có profile ${aiTool(tool).label} '${name}'.`)
+  moveToTrash(home, name, file, toolProfilesDir(home, tool))
+}
+
+export function formatToolList(home, tool) {
+  const t = aiTool(tool)
+  const names = listToolProfiles(home, tool)
+  if (!names.length) return `Chưa có profile ${t.label} nào. Đăng nhập (${t.login}), rồi lưu: /profile ${tool} save <tên>`
+  const cur = currentToolProfile(home, tool)
+  const w = Math.max(...names.map(n => n.length))
+  return [
+    `🤖 Profile ${t.label}:`,
+    ...names.map(n => {
+      const id = toolProfileId(home, tool, n)
+      return `  ${n === cur ? '●' : '○'} ${n.padEnd(w)}  ${id ? `${id.email}${id.plan ? ` (${id.plan})` : ''}` : '⚠ hỏng'}`
+    }),
+  ].join('\n')
 }
 
 // Runs `edit` over a state file's JSON and saves the result when it changed; a missing or corrupt file is left alone.
@@ -4523,6 +4730,12 @@ function helpText(color, lang) {
       `  ${cmd('/profile disabled')}           List profiles excluded from auto-switch`,
       `  ${cmd('/profile list --json')}        Output profiles list in JSON format`,
       '',
+      `🧩 ${bold('Other AI CLIs (codex, agy = Antigravity, opencode = DeepSeek/Qwen/… keys):')}`,
+      `  ${cmd('/profile codex [list]')}       A tool's profiles, ● = the login in use (same for agy, opencode)`,
+      `  ${cmd('/profile codex save <name>')}  Save the tool's current login as a profile`,
+      `  ${cmd('/profile codex <name>')}       Switch the tool to a profile (restart the tool afterwards)`,
+      `  ${cmd('/profile codex delete <name>')} Delete a profile (kept ${TRASH_DAYS} days in the tool's own trash)`,
+      '',
       `🤖 ${bold('Auto-Switching & Quota:')}`,
       `  ${cmd('/profile auto')}              View auto-switch status`,
       `  ${cmd('/profile auto on|off')}       Enable / disable auto-switch on limit`,
@@ -4617,6 +4830,12 @@ function helpText(color, lang) {
     `  ${cmd('/profile enable <tên>')}      Bật lại auto-switch cho profile`,
     `  ${cmd('/profile disabled')}           Xem danh sách profile đang bị tạm dừng auto`,
     `  ${cmd('/profile list --json')}        Xuất danh sách profile dưới dạng JSON`,
+    '',
+    `🧩 ${bold('Công cụ AI khác (codex, agy = Antigravity, opencode = key DeepSeek/Qwen/…):')}`,
+    `  ${cmd('/profile codex [list]')}       Danh sách profile của công cụ, ● = đang đăng nhập (agy, opencode tương tự)`,
+    `  ${cmd('/profile codex save <tên>')}   Lưu tài khoản đang đăng nhập của công cụ thành profile`,
+    `  ${cmd('/profile codex <tên>')}        Đổi công cụ sang profile (khởi động lại công cụ sau đó)`,
+    `  ${cmd('/profile codex delete <tên>')} Xoá profile (giữ ${TRASH_DAYS} ngày trong thùng rác riêng của công cụ)`,
     '',
     `🤖 ${bold('Tự động chuyển đổi & Quota:')}`,
     `  ${cmd('/profile auto')}              Xem trạng thái tự động chuyển profile`,
@@ -4724,7 +4943,7 @@ const SETTINGS = [
   ['auto.forecast', 'number', 'Chuyển khi dự báo chạm ngưỡng trong N phút (0 = tắt)', h => loadAutoSwitchConfig(h).forecast ?? 0,
     (h, v) => patchAuto(h, { forecast: Number(v) === 0 || v === 'off' || v === '' ? null : minutesSetting(v) })],
   ['auto.confirm', 'bool', 'Hỏi xác nhận trước mỗi lần tự đổi profile', h => loadAutoSwitchConfig(h).confirm, (h, v) => patchAuto(h, { confirm: onOff(v) })],
-  ['swap.guard', 'bool', 'Chặn đổi tay khi phiên khác đang dùng profile (tắt: đổi luôn)', h => loadAutoSwitchConfig(h).guard, (h, v) => patchAuto(h, { guard: onOff(v) })],
+  ['swap.guard', 'bool', 'Chặn đổi tay và cảnh báo khi phiên khác dùng cùng profile (tắt: đổi luôn, không cảnh báo)', h => loadAutoSwitchConfig(h).guard, (h, v) => patchAuto(h, { guard: onOff(v) })],
   ['auto.return', 'bool', 'Tự quay về profile chính khi nó hồi quota', h => loadAutoSwitchConfig(h).autoReturn, (h, v) => patchAuto(h, { autoReturn: onOff(v) })],
   ['auto.primary', 'profile', 'Profile chính để quay về', h => loadAutoSwitchConfig(h).primaryProfile || '', (h, v) => patchAuto(h, { primaryProfile: profileSetting(h, v) })],
   ['auto.pool', 'text', 'Chỉ chuyển trong nhóm có tag này (trống = tất cả)', h => loadAutoSwitchConfig(h).pool || '',
@@ -4878,6 +5097,7 @@ const PRETTY_CMDS = new Set([
   'auto', 'balance', 'disable', 'enable', 'disabled', 'alias', 'unalias', 'aliases', 'notify', 'mask', 'cleanup',
   'temp', 'untemp', 'budget', 'cost', 'upgrade', 'affinity', 'unaffinity', 'affinities', 'unbind', 'bind-branch',
   'unbind-branch', 'branch-bindings', 'lang', 'language', 'webhook', 'sync', 'import', 'add-token', 'run', 'repair', 'schedule', 'unschedule', 'settings',
+  'codex', 'agy', 'opencode',
 ])
 
 // Wraps `text` in an SGR code and re-opens it after every reset inside, so nested highlights do not cut it short.
@@ -5344,6 +5564,34 @@ async function runCliInner(argv, home) {
         console.log(`📥 Đã nhập: ${r.aliases} alias, ${r.tags} tag, ${r.notes} ghi chú, ${r.disabled} profile tắt${r.autoSwitch ? ', cấu hình auto-switch' : ''}. Bỏ qua ${r.skipped} alias không hợp lệ.`)
         return 0
       }
+      case 'codex':
+      case 'agy':
+      case 'opencode': {
+        const [tool, sub, arg] = filteredArgv.filter(a => a !== '--force')
+        const force = filteredArgv.includes('--force')
+        const { label } = AI_TOOLS[tool]
+        const shown = r => `${r.email}${r.plan ? ` (${r.plan})` : ''}`
+        if (!sub || sub === 'list') {
+          console.log(formatToolList(home, tool))
+        } else if (sub === 'current') {
+          console.log(currentToolProfile(home, tool) || '')
+        } else if (sub === 'save') {
+          if (!arg) throw new SwapError(`Dùng: /profile ${tool} save <tên>`)
+          const r = saveToolProfile(home, tool, arg, { force })
+          console.log(`💾 Đã lưu tài khoản ${label} ${shown(r)} vào profile '${r.name}'.`)
+        } else if (sub === 'delete') {
+          if (!arg) throw new SwapError(`Dùng: /profile ${tool} delete <tên>`)
+          deleteToolProfile(home, tool, arg)
+          console.log(`🗑 Đã xoá profile ${label} '${arg}' (giữ trong thùng rác ${TRASH_DAYS} ngày).`)
+        } else {
+          // `<tool> use <name>` or the short `<tool> <name>`
+          const name = sub === 'use' ? arg : sub
+          if (!name) throw new SwapError(`Dùng: /profile ${tool} use <tên>`)
+          const r = useToolProfile(home, tool, name, { force })
+          console.log(`🔀 ${label} đã chuyển sang '${r.name}' (${shown(r)}). Khởi động lại ${label} để phiên mới dùng tài khoản này.`)
+        }
+        return 0
+      }
       case 'restore': {
         const name = filteredArgv[1]
         if (!name) throw new SwapError('Thiếu tên profile.')
@@ -5462,7 +5710,7 @@ async function runCliInner(argv, home) {
           const cur = currentProfile(home)
           if (sessionArg && cur) {
             const others = recordPresence(home, cur, sessionArg)
-            if (others.length) console.log(`[presence] ⚠ ${others.length + 1} phiên cùng dùng '${cur}': token có thể bị làm mới chồng chéo, nên dùng một phiên cho mỗi profile.`)
+            if (others.length && cfg.guard) console.log(`[presence] ⚠ ${others.length + 1} phiên cùng dùng '${cur}': token có thể bị làm mới chồng chéo, nên dùng một phiên cho mỗi profile.`)
           }
           const hold = cur ? liveSessionsOn(home, cur, sessionArg).length > 0 : false
           // `--yes`: the person confirmed the swap the last check reported (`auto.confirm`)

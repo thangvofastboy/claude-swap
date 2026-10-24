@@ -156,6 +156,15 @@ import {
   maskUrl,
   spawnDetached,
   recordPresence,
+  AI_TOOLS,
+  codexIdentity,
+  agyIdentity,
+  opencodeIdentity,
+  saveToolProfile,
+  useToolProfile,
+  listToolProfiles,
+  currentToolProfile,
+  formatToolList,
   verifyProfiles,
   importConfig,
 } from '../swap.js'
@@ -1460,7 +1469,114 @@ describe('swap.js core functionality', () => {
     recordPresence(tmpHome, 'pa', 'other-session')
     assert.equal(await runCli(['swap', 'pb', '--session', 'mine'], tmpHome), 0)
     assert.equal(currentProfile(tmpHome), 'pb')
-    assert.equal(setSetting(tmpHome, 'swap.guard', 'on'), true)
+    // ... and `auto check` no longer warns about several sessions on one profile
+    recordPresence(tmpHome, 'pb', 'other-session')
+    const lines = []
+    const orig = console.log
+    console.log = (...a) => lines.push(a.join(' '))
+    try {
+      await runCli(['auto', 'check', '--session', 'mine'], tmpHome)
+      assert.ok(!lines.some(l => l.startsWith('[presence]')))
+      setSetting(tmpHome, 'swap.guard', 'on')
+      await runCli(['auto', 'check', '--session', 'third'], tmpHome) // a session warns once a minute: use a fresh one
+      assert.ok(lines.some(l => l.startsWith('[presence]')))
+    } finally {
+      console.log = orig
+    }
+  })
+
+  test('codex: save, switch and delete Codex logins; refreshed tokens are kept, an unsaved login is protected', async () => {
+    const jwt = (email, user) =>
+      ['h', Buffer.from(JSON.stringify({ email, 'https://api.openai.com/auth': { chatgpt_user_id: user, chatgpt_plan_type: 'plus' } })).toString('base64url'), 's'].join('.')
+    const codexLogin = (email, user, refresh) => {
+      fs.mkdirSync(path.dirname(AI_TOOLS.codex.file(tmpHome)), { recursive: true })
+      const tokens = { id_token: jwt(email, user), access_token: 'at', refresh_token: refresh, account_id: `acc-${user}` }
+      fs.writeFileSync(AI_TOOLS.codex.file(tmpHome), JSON.stringify({ auth_mode: 'chatgpt', OPENAI_API_KEY: null, tokens }))
+    }
+    const liveRefresh = () => JSON.parse(fs.readFileSync(AI_TOOLS.codex.file(tmpHome), 'utf-8')).tokens.refresh_token
+
+    assert.throws(() => saveToolProfile(tmpHome, 'codex', 'work'), /Chưa đăng nhập Codex/)
+    codexLogin('w@x.com', 'u1', 'r-w1')
+    assert.deepEqual(saveToolProfile(tmpHome, 'codex', 'work'), { name: 'work', email: 'w@x.com', plan: 'plus' })
+    codexLogin('p@x.com', 'u2', 'r-p1')
+    assert.throws(() => saveToolProfile(tmpHome, 'codex', 'work'), /tài khoản khác/)
+    saveToolProfile(tmpHome, 'codex', 'home')
+    assert.deepEqual(listToolProfiles(tmpHome, 'codex'), ['home', 'work'])
+    assert.equal(currentToolProfile(tmpHome, 'codex'), 'home')
+
+    // Codex refreshed home's token since the save: switching away keeps it in the profile
+    codexLogin('p@x.com', 'u2', 'r-p2')
+    useToolProfile(tmpHome, 'codex', 'work')
+    assert.equal(liveRefresh(), 'r-w1')
+    assert.equal(currentToolProfile(tmpHome, 'codex'), 'work')
+    useToolProfile(tmpHome, 'codex', 'home')
+    assert.equal(liveRefresh(), 'r-p2')
+
+    // a login no profile holds is not overwritten without --force
+    codexLogin('new@x.com', 'u3', 'r-n')
+    assert.throws(() => useToolProfile(tmpHome, 'codex', 'work'), /chưa lưu vào profile nào/)
+    assert.equal(liveRefresh(), 'r-n')
+    useToolProfile(tmpHome, 'codex', 'work', { force: true })
+    assert.equal(liveRefresh(), 'r-w1')
+    const codexTrash = path.join(tmpHome, '.config', 'claude-cli-profiles', '.codex', '.trash')
+    const backup = fs.readdirSync(codexTrash).find(f => f.startsWith('_live.'))
+    assert.match(fs.readFileSync(path.join(codexTrash, backup), 'utf-8'), /r-n/) // --force kept the unsaved login in the trash
+    // an auth.json no identity can be read from is not overwritten without --force either
+    fs.writeFileSync(AI_TOOLS.codex.file(tmpHome), '{"tokens":{}}')
+    assert.throws(() => useToolProfile(tmpHome, 'codex', 'home'), /Không nhận ra tài khoản/)
+    // --force before the name, as `codex --force work` / `codex save --force x` type it
+    assert.equal(await runCli(['codex', '--force', 'work'], tmpHome), 0)
+    assert.equal(liveRefresh(), 'r-w1')
+    // save --force over another account trashes the login it held
+    codexLogin('p@x.com', 'u2', 'r-p3')
+    assert.equal(await runCli(['codex', 'save', '--force', 'work'], tmpHome), 0)
+    assert.ok(fs.readdirSync(codexTrash).some(f => f.startsWith('work.')))
+    codexLogin('w@x.com', 'u1', 'r-w2')
+    saveToolProfile(tmpHome, 'codex', 'work', { force: true })
+
+    // an API-key login is told apart without showing the key
+    assert.equal(codexIdentity(JSON.stringify({ OPENAI_API_KEY: 'sk-secret-1234' })).email, 'API key …1234')
+
+    // CLI, and a trash of its own: `restore` never brings a Codex profile back as a Claude one
+    assert.match(formatToolList(tmpHome, 'codex'), /● work\s+w@x\.com \(plus\)/)
+    assert.equal(await runCli(['codex', 'delete', 'home'], tmpHome), 0)
+    assert.deepEqual(listToolProfiles(tmpHome, 'codex'), ['work'])
+    assert.equal(trashedProfiles(tmpHome).length, 0)
+    assert.equal(await runCli(['codex', 'nope'], tmpHome), 1)
+  })
+
+  test('agy and opencode: their logins swap the same way; opencode keys stay hidden', async () => {
+    const agyLogin = (sub, email, refresh) => {
+      const idToken = ['h', Buffer.from(JSON.stringify({ sub, email })).toString('base64url'), 's'].join('.')
+      fs.mkdirSync(path.dirname(AI_TOOLS.agy.file(tmpHome)), { recursive: true })
+      fs.writeFileSync(AI_TOOLS.agy.file(tmpHome), JSON.stringify({ token: { access_token: 'a', refresh_token: refresh }, auth_method: 'consumer', id_token: idToken }))
+    }
+    assert.deepEqual(agyIdentity(JSON.stringify({ id_token: 'x.e30.y' })), null) // no `sub`: unknown
+    agyLogin('g1', 'one@gmail.com', 'r1')
+    saveToolProfile(tmpHome, 'agy', 'one')
+    agyLogin('g2', 'two@gmail.com', 'r2')
+    saveToolProfile(tmpHome, 'agy', 'two')
+    agyLogin('g2', 'two@gmail.com', 'r2b') // agy refreshed in place
+    useToolProfile(tmpHome, 'agy', 'one')
+    assert.match(fs.readFileSync(AI_TOOLS.agy.file(tmpHome), 'utf-8'), /"r1"/)
+    useToolProfile(tmpHome, 'agy', 'two')
+    assert.match(fs.readFileSync(AI_TOOLS.agy.file(tmpHome), 'utf-8'), /"r2b"/)
+
+    const ocFile = AI_TOOLS.opencode.file(tmpHome)
+    assert.equal(ocFile, path.join(tmpHome, '.local', 'share', 'opencode', 'auth.json'))
+    fs.mkdirSync(path.dirname(ocFile), { recursive: true })
+    fs.writeFileSync(ocFile, JSON.stringify({ deepseek: { type: 'api', key: 'sk-deep-AAAA' } }))
+    assert.equal(opencodeIdentity(fs.readFileSync(ocFile, 'utf-8')).email, 'deepseek …AAAA')
+    saveToolProfile(tmpHome, 'opencode', 'ds-a')
+    // an OAuth token rotating in place keeps the same identity; a different API key is another account
+    fs.writeFileSync(ocFile, JSON.stringify({ deepseek: { type: 'api', key: 'sk-deep-BBBB' }, anthropic: { type: 'oauth', refresh: 'x' } }))
+    saveToolProfile(tmpHome, 'opencode', 'ds-b')
+    fs.writeFileSync(ocFile, JSON.stringify({ deepseek: { type: 'api', key: 'sk-deep-BBBB' }, anthropic: { type: 'oauth', refresh: 'y' } }))
+    assert.equal(currentToolProfile(tmpHome, 'opencode'), 'ds-b')
+    assert.equal(await runCli(['opencode', 'ds-a'], tmpHome), 0)
+    assert.match(fs.readFileSync(ocFile, 'utf-8'), /AAAA/)
+    assert.doesNotMatch(formatToolList(tmpHome, 'opencode'), /sk-deep/)
+    assert.equal(await runCli(['agy', 'list'], tmpHome), 0)
   })
 
   test('verify reports a revoked token and a good one; import-config applies only to existing profiles', async () => {
