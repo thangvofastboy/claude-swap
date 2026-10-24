@@ -1938,6 +1938,21 @@ describe('swap.js core functionality', () => {
     assert.equal(loadSchedule(tmpHome).rules.length, 0)
   })
 
+  test('schedule: a swap held for confirmation keeps the rule unapplied, so the confirmed rerun swaps', async () => {
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'sq-night')
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'sq-day') // current
+    const hm = ms => { const d = new Date(Date.now() + ms); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}` }
+    addScheduleRule(tmpHome, `${hm(-3600000)}-${hm(3600000)}`, 'sq-night')
+    const config = { enabled: false, threshold: 95, safeguardThreshold: null, order: [] }
+    let res = await autoCheckAndSwap(tmpHome, { config, ask: true })
+    assert.deepEqual([res.reason, res.to], ['confirm', 'sq-night'])
+    assert.equal(currentProfile(tmpHome), 'sq-day')
+    res = await autoCheckAndSwap(tmpHome, { config })
+    assert.deepEqual([res.swapped, res.to, res.isSchedule], [true, 'sq-night', true])
+  })
+
   test('status line names a model whose own 7-day limit runs out, with the profile that has most of it', () => {
     login(tmpHome, 'b', 'tok-b')
     saveProfile(tmpHome, 'md-two')
@@ -2275,6 +2290,83 @@ else if (a[0] === '-i') { const m = fs.readFileSync(0, 'utf-8').match(/-s "([^"]
     assert.equal(loadAutoSwitchConfig(tmpHome).step, 5)
     assert.equal(await runCli(['auto', 'step', 'off'], tmpHome), 0)
     assert.equal(loadAutoSwitchConfig(tmpHome).step, null)
+  })
+
+  test('auto forecast: switches when the burn rate reaches the threshold within N minutes, not on stale readings', async () => {
+    for (const n of ['f1', 'f2']) {
+      login(tmpHome, n, `tok-${n}`)
+      saveProfile(tmpHome, n)
+    }
+    swapProfile(tmpHome, 'f1')
+    const now = Date.now()
+    // 80% → 90% in 9 minutes: 60%/h, so 95% is about 5 minutes away from the last reading
+    const burning = last => ({ f1: [{ timestamp: last - 9 * 60000, util5h: 80 }, { timestamp: last, util5h: 90 }] })
+    fs.writeFileSync(usageHistoryFile(tmpHome), JSON.stringify(burning(now - 60000)))
+    const cache = { 'f1|f1@example.com': { limits: [['5 giờ', 90, '20:00']] }, 'f2|f2@example.com': { limits: [['5 giờ', 0, '20:00']] } }
+    const config = { enabled: true, threshold: 95, safeguardThreshold: null, order: [], step: null, autoReturn: false, primaryProfile: null, forecast: 30 }
+
+    let res = await autoCheckAndSwap(tmpHome, { config, cache })
+    assert.deepEqual([res.swapped, res.to], [true, 'f2'])
+    assert.match(res.reason, /Dự báo chạm ngưỡng 95%/)
+
+    // about 5 minutes away is not within 1 minute, and 0 (null) turns the check off
+    swapProfile(tmpHome, 'f1')
+    res = await autoCheckAndSwap(tmpHome, { config: { ...config, forecast: 1 }, cache })
+    assert.equal(res.swapped, false)
+    res = await autoCheckAndSwap(tmpHome, { config: { ...config, forecast: null }, cache })
+    assert.equal(res.swapped, false)
+
+    // a reading 30 minutes old is stale: the forecast is not trusted, so nothing moves
+    fs.writeFileSync(usageHistoryFile(tmpHome), JSON.stringify(burning(now - 30 * 60000)))
+    res = await autoCheckAndSwap(tmpHome, { config, cache })
+    assert.equal(res.swapped, false)
+
+    // setting and CLI
+    assert.equal(setSetting(tmpHome, 'auto.forecast', '30'), 30)
+    assert.equal(loadAutoSwitchConfig(tmpHome).forecast, 30)
+    assert.throws(() => setSetting(tmpHome, 'auto.forecast', '0.5'), /1 đến 1440/)
+    assert.equal(await runCli(['auto', 'forecast', 'off'], tmpHome), 0)
+    assert.equal(loadAutoSwitchConfig(tmpHome).forecast, null)
+  })
+
+  test('auto confirm: an automatic swap waits for a yes, `auto check --yes` carries it out', async () => {
+    for (const n of ['c1', 'c2']) {
+      login(tmpHome, n, `tok-${n}`)
+      saveProfile(tmpHome, n)
+    }
+    swapProfile(tmpHome, 'c1')
+    const cache = { 'c1|c1@example.com': { limits: [['5 giờ', 97, '20:00']] }, 'c2|c2@example.com': { limits: [['5 giờ', 0, '20:00']] } }
+    const config = { enabled: true, threshold: 95, safeguardThreshold: null, order: [], step: null, autoReturn: false, primaryProfile: null }
+
+    let res = await autoCheckAndSwap(tmpHome, { config, cache, ask: true })
+    assert.deepEqual([res.swapped, res.reason, res.from, res.to], [false, 'confirm', 'c1', 'c2'])
+    assert.match(res.why, /97%/)
+    assert.equal(currentProfile(tmpHome), 'c1') // nothing moved yet
+    // hold (another live session) still wins over asking
+    res = await autoCheckAndSwap(tmpHome, { config, cache, ask: true, hold: true })
+    assert.equal(res.reason, 'held')
+    res = await autoCheckAndSwap(tmpHome, { config, cache })
+    assert.deepEqual([res.swapped, res.to], [true, 'c2'])
+
+    // CLI: the pending swap is one machine-read line, and --yes skips the question
+    swapProfile(tmpHome, 'c1')
+    assert.equal(setSetting(tmpHome, 'auto.confirm', 'on'), true)
+    writeFreshCache(path.join(tmpHome, '.config', 'claude-cli-profiles', '.usage-cache.json'), cache)
+    const lines = []
+    const orig = console.log
+    console.log = (...a) => lines.push(a.join(' '))
+    try {
+      await runCli(['auto', 'check'], tmpHome)
+      assert.equal(currentProfile(tmpHome), 'c1')
+      await runCli(['auto', 'check', '--yes'], tmpHome)
+    } finally {
+      console.log = orig
+    }
+    const line = lines.find(l => l.startsWith('[auto-confirm] '))
+    assert.equal(JSON.parse(line.slice('[auto-confirm] '.length)).to, 'c2')
+    assert.equal(currentProfile(tmpHome), 'c2')
+    assert.equal(await runCli(['auto', 'confirm', 'off'], tmpHome), 0)
+    assert.equal(loadAutoSwitchConfig(tmpHome).confirm, false)
   })
 
   test('settings pane data: every profile with its cached quota, and each feature item with the argv that removes it', async () => {

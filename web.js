@@ -1215,7 +1215,7 @@ export function renderDashboardHtml() {
       ['🤖 Tự động & quota', [
         ['Thứ tự ưu tiên auto-switch', ['auto', 'order'], [['text', 'Danh sách, vd: work,personal']]],
         ['Hạn mức mỗi lượt (xoay vòng account)', ['auto', 'step'], [['number', '% quota 5h mỗi lượt (0 = tắt)', '5']]],
-        ['Kiểm tra quota và đổi nếu cần', ['auto', 'check'], []],
+        ['Kiểm tra quota và đổi nếu cần', ['auto', 'check', '--yes'], []], // the click is the confirmation auto.confirm asks for
         ['Cân bằng tải: sang profile kế tiếp', ['balance', 'next'], []],
         ['Mượn tạm profile', ['temp'], [['profile', 'Profile'], ['text', 'Thời gian (vd: 30m, 1h)', '1h']]],
         ['Trả profile đang mượn', ['untemp'], []],

@@ -437,7 +437,7 @@ export function saveProfile(home, name, force = false) {
 }
 
 export function swapProfile(home, name, options = {}) {
-  if (autoHold) throw new HeldSwap()
+  if (autoHold) throw new HeldSwap(name, options.reason)
   const session = isolatedSession(home)
   if (session) {
     throw new SwapError(
@@ -1602,6 +1602,8 @@ export function loadAutoSwitchConfig(home) {
         autoReturn: parsed.autoReturn === true,
         primaryProfile: typeof parsed.primaryProfile === 'string' ? parsed.primaryProfile : null,
         step: typeof parsed.step === 'number' && parsed.step > 0 ? parsed.step : null,
+        forecast: typeof parsed.forecast === 'number' && parsed.forecast > 0 ? parsed.forecast : null,
+        confirm: parsed.confirm === true,
         safeguardThreshold:
           typeof parsed.safeguardThreshold === 'number'
             ? parsed.safeguardThreshold
@@ -1619,6 +1621,8 @@ export function loadAutoSwitchConfig(home) {
     autoReturn: false,
     primaryProfile: null,
     step: null,
+    forecast: null,
+    confirm: false,
     safeguardThreshold: 85,
   }
 }
@@ -2409,9 +2413,14 @@ export function checkSchedule(home, config = loadAutoSwitchConfig(home), cache =
   const hit = cacheHit(home, cache, target)
   // a 429 on the target is a polling limit, not an exhausted quota: leave the rule unapplied so a later prompt retries
   if (target !== cur && profileExists(home, target) && isRateLimited(hit)) return null
-  atomicWrite(scheduleFile(home), JSON.stringify({ ...sched, applied: active.key }, null, 2))
-  if (target === cur || !profileExists(home, target) || isExhausted(hit, config)) return null
+  const markApplied = () => atomicWrite(scheduleFile(home), JSON.stringify({ ...sched, applied: active.key }, null, 2))
+  if (target === cur || !profileExists(home, target) || isExhausted(hit, config)) {
+    markApplied()
+    return null
+  }
+  // marked only once the swap went through: a held or not-yet-confirmed swap (HeldSwap) retries on the next prompt
   swapProfile(home, target, { type: 'auto', reason: `Lịch ${active.rule.from}-${active.rule.to}` })
+  markApplied()
   return { from: cur, to: target }
 }
 
@@ -2438,17 +2447,25 @@ export function formatSchedule(home, lang = 'vi') {
 
 // Raised by swapProfile while `autoCheckAndSwap({ hold: true })` runs: another live session is on the profile, so
 // nothing may move the account under it. A temp revert or schedule that hits it keeps its state and retries next prompt.
-class HeldSwap extends Error {}
+// `{ ask: true }` (`auto.confirm`) stops the swap the same way and reports it, for the person to confirm (`auto check --yes`).
+class HeldSwap extends Error {
+  constructor(to, why) {
+    super('held')
+    this.to = to
+    this.why = why
+  }
+}
 let autoHold = false
 
 export async function autoCheckAndSwap(home, options = {}) {
-  if (!options.hold) return autoCheckAndSwapNow(home, options)
+  if (!options.hold && !options.ask) return autoCheckAndSwapNow(home, options)
   autoHold = true
   try {
     return await autoCheckAndSwapNow(home, options)
   } catch (err) {
-    if (err instanceof HeldSwap) return { swapped: false, reason: 'held' }
-    throw err
+    if (!(err instanceof HeldSwap)) throw err
+    if (options.hold) return { swapped: false, reason: 'held' }
+    return { swapped: false, reason: 'confirm', from: currentProfile(home), to: err.to, why: err.why || '' }
   } finally {
     autoHold = false
   }
@@ -2535,7 +2552,7 @@ async function autoCheckAndSwapNow(home, options = {}) {
     if (!isRateLimited(priHit) && !isExhausted(priHit, config)) {
       swapProfile(home, config.primaryProfile, {
         type: 'auto',
-        reason: 'Auto return to primary profile',
+        reason: 'Quay về profile chính',
         cwd: process.cwd(),
       })
       sendNotification(
@@ -2583,14 +2600,22 @@ async function autoCheckAndSwapNow(home, options = {}) {
       }
     }
   }
+  // `forecast`: the burn rate says the threshold is reached within that many minutes. A reading older than the forecast's
+  // stale limit is not trusted. ponytail: no cooldown, so a profile whose own forecast is also due can be swapped back to.
+  const forecastDue = config.forecast && util < config.threshold && !isSafeguardTriggered
+    ? calculateForecast(home, cur, config.threshold)
+    : null
+  const dueSoon = forecastDue && forecastDue.hasData && !forecastDue.stale && forecastDue.minutesUntilThreshold <= config.forecast
   // retry_at is a 429 from the usage endpoint (polling limit), not the account's quota: judge by the last known numbers
-  if (util >= config.threshold || isSafeguardTriggered) {
+  if (util >= config.threshold || isSafeguardTriggered || dueSoon) {
     await refresh(listProfiles(home)) // choosing a replacement needs everyone's numbers
     const next = findNextProfile(home, { config, cache })
     if (next && next !== cur) {
       const reasonText = isSafeguardTriggered
         ? `Mức dùng 7 ngày ${util7d}% >= ngưỡng bảo vệ ${config.safeguardThreshold}%`
-        : `Mức dùng ${util}% >= ngưỡng ${config.threshold}%`
+        : dueSoon
+          ? `Dự báo chạm ngưỡng ${config.threshold}% trong ~${forecastDue.minutesUntilThreshold} phút (dưới ${config.forecast} phút)`
+          : `Mức dùng ${util}% >= ngưỡng ${config.threshold}%`
       swapProfile(home, next, {
         type: 'auto',
         reason: reasonText,
@@ -2613,6 +2638,7 @@ async function autoCheckAndSwapNow(home, options = {}) {
       current: cur,
       util,
       threshold: config.threshold,
+      forecast: Boolean(dueSoon) && util < config.threshold && !isSafeguardTriggered,
     }
   }
 
@@ -4505,6 +4531,8 @@ function helpText(color, lang) {
       `  ${cmd('/profile auto return on|off')} Auto return to primary profile when quota resets`,
       `  ${cmd('/profile auto primary <name>')} Set primary profile to return to`,
       `  ${cmd('/profile auto step <%|off>')}   Per-stint quota: use N% of the 5h window, then rotate to the next account`,
+      `  ${cmd('/profile auto forecast <phút|off>')} Switch when the burn rate reaches the threshold within N minutes`,
+      `  ${cmd('/profile auto confirm on|off')}  Ask before every automatic swap (off: swap at once, the default)`,
       `  ${cmd('/profile forecast')}          Burn rate & quota exhaustion forecast`,
       `  ${cmd('/profile cooldown')}          Quota reset countdown timers`,
       `  ${cmd('/profile doctor')}            Diagnostics for accounts, tokens and health`,
@@ -4598,6 +4626,8 @@ function helpText(color, lang) {
     `  ${cmd('/profile auto return on|off')} Tự động quay về profile chính khi hồi token`,
     `  ${cmd('/profile auto primary <tên>')} Đặt profile chính để quay về`,
     `  ${cmd('/profile auto step <%|off>')}   Hạn mức mỗi lượt: dùng N% quota 5h rồi chuyển account kế tiếp`,
+    `  ${cmd('/profile auto forecast <phút|off>')} Chuyển khi dự báo chạm ngưỡng trong N phút tới`,
+    `  ${cmd('/profile auto confirm on|off')}  Hỏi xác nhận trước mỗi lần tự đổi profile (tắt: đổi ngay, mặc định)`,
     `  ${cmd('/profile forecast')}          Dự báo tốc độ tiêu thụ & thời điểm cạn hạn mức`,
     `  ${cmd('/profile cooldown')}          Xem đồng hồ đếm ngược reset quota của các account`,
     `  ${cmd('/profile doctor')}            Quét chẩn đoán sức khỏe, token và lỗi các account`,
@@ -4658,6 +4688,12 @@ function onOff(v) {
   throw new SwapError(`Giá trị '${v}' không hợp lệ. Dùng: on | off`)
 }
 
+function minutesSetting(v) {
+  const n = Number(v)
+  if (!Number.isInteger(n) || n < 1 || n > 1440) throw new SwapError(`Giá trị '${v}' không hợp lệ. Dùng số phút từ 1 đến 1440.`)
+  return n
+}
+
 function pctSetting(v) {
   const n = Number(v)
   if (!Number.isFinite(n) || n < 1 || n > 100) throw new SwapError(`Giá trị '${v}' không hợp lệ. Dùng một số từ 1 đến 100.`)
@@ -4683,6 +4719,9 @@ const SETTINGS = [
     (h, v) => patchAuto(h, { safeguardThreshold: Number(v) === 0 || v === 'off' ? null : pctSetting(v) })],
   ['auto.step', 'number', 'Hạn mức % quota 5h mỗi lượt: dùng hết thì chuyển account kế tiếp (0 = tắt)', h => loadAutoSwitchConfig(h).step ?? 0,
     (h, v) => patchAuto(h, { step: Number(v) === 0 || v === 'off' || v === '' ? null : pctSetting(v) })],
+  ['auto.forecast', 'number', 'Chuyển khi dự báo chạm ngưỡng trong N phút (0 = tắt)', h => loadAutoSwitchConfig(h).forecast ?? 0,
+    (h, v) => patchAuto(h, { forecast: Number(v) === 0 || v === 'off' || v === '' ? null : minutesSetting(v) })],
+  ['auto.confirm', 'bool', 'Hỏi xác nhận trước mỗi lần tự đổi profile', h => loadAutoSwitchConfig(h).confirm, (h, v) => patchAuto(h, { confirm: onOff(v) })],
   ['auto.return', 'bool', 'Tự quay về profile chính khi nó hồi quota', h => loadAutoSwitchConfig(h).autoReturn, (h, v) => patchAuto(h, { autoReturn: onOff(v) })],
   ['auto.primary', 'profile', 'Profile chính để quay về', h => loadAutoSwitchConfig(h).primaryProfile || '', (h, v) => patchAuto(h, { primaryProfile: profileSetting(h, v) })],
   ['auto.pool', 'text', 'Chỉ chuyển trong nhóm có tag này (trống = tất cả)', h => loadAutoSwitchConfig(h).pool || '',
@@ -4735,9 +4774,11 @@ export function formatSettings(home) {
 }
 
 // Bare `/profile`: the live profile, its quota and every setting, above the command list.
+// Setting names and descriptions are Claude's orange (#D97757 → 256-colour 173), the same as SETTING_COLOR in the hook.
+const SETTING_SGR = '38;5;173'
 // Single-codepoint emoji only: a VS16 one (⚙️, ↩️, 🏷️) is drawn one cell wide by some terminals and breaks the columns.
 const SETTING_ICONS = {
-  'auto.enabled': '🤖', 'auto.threshold': '🎯', 'auto.safeguard': '🚧', 'auto.step': '🔂', 'auto.return': '🔁', 'auto.primary': '⭐',
+  'auto.enabled': '🤖', 'auto.threshold': '🎯', 'auto.safeguard': '🚧', 'auto.step': '🔂', 'auto.forecast': '🔮', 'auto.confirm': '🙋', 'auto.return': '🔁', 'auto.primary': '⭐',
   'auto.pool': '👥', 'auto.order': '🔢', balance: '🔄', statusline: '📊', notify: '🔔', mask: '🙈', 'repair.auto': '🔧', 'update.auto': '⬆', lang: '🌐',
 }
 
@@ -4821,7 +4862,7 @@ export function formatOverview(home, color = null, lang = 'vi') {
     out.push(`  ${c('1;33', en ? '⚠ No active profile. Create one: /profile new <name>' : '⚠ Chưa có profile nào active. Tạo bằng: /profile new <tên>')}`)
   }
   out.push('', `🧰 ${c('1;36', en ? 'Settings' : 'Cài đặt')} ${c('90', en ? '(edit: /profile settings)' : '(sửa: /profile settings)')}`)
-  for (const r of d.settings) out.push(`  ${r.icon} ${pad(r.key, w)}  ${pad(value(r.value), 14)}${c('90', r.desc)}`)
+  for (const r of d.settings) out.push(`  ${r.icon} ${c(`1;${SETTING_SGR}`, pad(r.key, w))}  ${pad(value(r.value), 14)}${c(SETTING_SGR, r.desc)}`)
   return out.join('\n')
 }
 
@@ -5342,6 +5383,24 @@ async function runCliInner(argv, home) {
             const st = loadStint(home)
             console.log(`🔂 Hạn mức mỗi lượt: ${cfg.step}% quota 5h, dùng hết thì chuyển account kế tiếp${st ? ` (lượt của '${st.profile}' bắt đầu ở ${st.start}%)` : ''}`)
           }
+          if (cfg.forecast) {
+            console.log(`🔮 Chuyển khi dự báo chạm ngưỡng trong ${cfg.forecast} phút tới`)
+          }
+          if (cfg.confirm) {
+            console.log('🙋 Hỏi xác nhận trước mỗi lần tự đổi profile')
+          }
+          return 0
+        }
+
+        if (sub === 'confirm') {
+          const v = filteredArgv[2] === undefined ? cfg.confirm : setSetting(home, 'auto.confirm', filteredArgv[2])
+          console.log(v ? '🙋 Mỗi lần tự đổi profile sẽ hỏi xác nhận trước.' : '🙋 Tự đổi profile không cần hỏi (mặc định).')
+          return 0
+        }
+
+        if (sub === 'forecast') {
+          const v = filteredArgv[2] === undefined ? cfg.forecast : setSetting(home, 'auto.forecast', filteredArgv[2])
+          console.log(v ? `🔮 Chuyển khi dự báo chạm ngưỡng trong ${v} phút tới.` : '🔮 Đã tắt chuyển theo dự báo.')
           return 0
         }
 
@@ -5403,8 +5462,12 @@ async function runCliInner(argv, home) {
             if (others.length) console.log(`[presence] ⚠ ${others.length + 1} phiên cùng dùng '${cur}': token có thể bị làm mới chồng chéo, nên dùng một phiên cho mỗi profile.`)
           }
           const hold = cur ? liveSessionsOn(home, cur, sessionArg).length > 0 : false
-          const res = await autoCheckAndSwap(home, { hold })
-          if (res.swapped) {
+          // `--yes`: the person confirmed the swap the last check reported (`auto.confirm`)
+          const res = await autoCheckAndSwap(home, { hold, ask: cfg.confirm && !filteredArgv.includes('--yes') })
+          if (res.reason === 'confirm') {
+            console.log(`[auto-confirm] ${JSON.stringify({ from: res.from, to: res.to, why: res.why })}`) // the hook asks, then reruns with --yes
+            console.log(`🙋 Chờ xác nhận đổi '${res.from}' sang '${res.to}': chạy auto check --yes để đổi.`)
+          } else if (res.swapped) {
             const why = res.isTempRevert
               ? 'hết hạn mượn tạm'
               : res.isSchedule
@@ -5416,7 +5479,9 @@ async function runCliInner(argv, home) {
               : res.reason
             console.log(`[auto-swap] 🔀 Đã tự động chuyển từ '${res.from}' sang '${res.to}' (${why}).`)
           } else if (res.reason === 'no_candidate') {
-            console.log(`[auto-swap] ⚠️ Profile '${res.current}' đạt mức ${res.util}% nhưng không có profile thay thế khả dụng.`)
+            console.log(res.forecast
+              ? `[auto-swap] ⚠️ Profile '${res.current}' dự báo sắp chạm ngưỡng ${res.threshold}% nhưng không có profile thay thế khả dụng.`
+              : `[auto-swap] ⚠️ Profile '${res.current}' đạt mức ${res.util}% nhưng không có profile thay thế khả dụng.`)
           } else if (res.reason === 'held') {
             console.log(`⏸ Tự động chuyển tạm hoãn: còn phiên khác đang dùng '${cur}' (xem /profile run để tách riêng).`)
           } else if (res.reason === 'disabled') {

@@ -137,6 +137,39 @@ test('prompt.submit automatically checks and switches profile if limit exceeded'
   await expectBand($, 'personal')
 })
 
+test('auto.confirm: a pending automatic swap asks first; yes reruns the check with --yes, no is not asked again', async ($, on) => {
+  const calls: string[][] = []
+  const asked: string[] = []
+  let answer = 'Đổi ngay'
+  const pending = `[auto-confirm] ${JSON.stringify({ from: 'work', to: 'personal', why: 'Mức dùng 96% >= ngưỡng 95%' })}\n[status] ${WORK}\n`
+  on('process.run', async (_$, { argv }) => {
+    calls.push(argv.slice(2))
+    return argv.includes('--yes') ? ok(`[auto-swap] 🔀 Đã tự động chuyển từ 'work' sang 'personal' (x).\n[status] ${PERSONAL}\n`) : ok(pending)
+  })
+  on('tool.call', { tool: 'AskUserQuestion' }, (_$, e: any) => {
+    const q = e.questions[0].question
+    asked.push(q)
+    return { result: { questions: e.questions, answers: { [q]: answer } } } as any
+  })
+  on('ui.invalidate', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+
+  await $.prompt.submit({ text: 'hi' })
+  expect(asked.length).toBe(1)
+  expect(asked[0]).toContain("'personal'")
+  expect(calls).toEqual([['auto', 'check'], ['auto', 'check', '--yes']])
+  await expectBand($, 'personal')
+
+  answer = 'Để sau'
+  calls.length = 0
+  await $.prompt.submit({ text: 'again' })
+  await $.prompt.submit({ text: 'and again' }) // declined: the same swap does not ask on every prompt
+  expect(asked.length).toBe(2)
+  expect(calls).toEqual([['auto', 'check'], ['auto', 'check']])
+})
+
 test('session.start automatically switches to bound profile if different from current', async ($, on) => {
   const calls: string[][] = []
   let redraws = 0

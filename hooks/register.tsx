@@ -248,6 +248,28 @@ async function refreshStatus($: EngineInterface) {
 const TICK_MS = 60_000
 let ticking = false
 
+// `auto.confirm`: asks before an automatic swap. A "no" (or a dismissed dialog) keeps that same swap from asking again
+// for CONFIRM_SNOOZE_MS, or the dialog would come back on every prompt.
+const CONFIRM_SNOOZE_MS = 15 * 60_000
+const declined = new Map<string, number>()
+const CONFIRM_YES = 'Đổi ngay'
+
+async function confirmSwap($: EngineInterface, raw: string): Promise<boolean> {
+  let p: { from?: string; to?: string; why?: string }
+  try {
+    p = JSON.parse(raw)
+  } catch {
+    return false
+  }
+  const key = `${p.from}>${p.to}`
+  if (Date.now() - (declined.get(key) ?? 0) < CONFIRM_SNOOZE_MS) return false
+  const question = `Tự động đổi profile '${p.from}' sang '${p.to}'${p.why ? ` (${p.why})` : ''}?`
+  const answer = await $.ui.ask(question, { header: 'claude-swap', options: [CONFIRM_YES, 'Để sau'] }).catch(() => '')
+  if (answer === CONFIRM_YES) return true
+  declined.set(key, Date.now())
+  return false
+}
+
 // the band's "switch" button: the same swap `/profile <name>` does, then the band redraws for the new profile
 async function swapTo($: EngineInterface, name: string) {
   const ran = await runSwap($, ['swap', name, '--no-color']) // a toast is plain text: `swap` output is coloured
@@ -404,6 +426,8 @@ const READ_ONLY = new Set([
 // Same palette as the `/profile list` table (pctCode in swap.js): green < 50, yellow < 80, orange < 95, red above.
 // Raw colours rather than theme keys, so the band and the table look alike on any theme.
 const loadColor = (pct: number) => (pct >= 95 ? 'red' : pct >= 80 ? '#ff8700' : pct >= 50 ? 'yellow' : 'green')
+// setting names and descriptions (overview and settings pane): Claude's orange; `SETTING_SGR` in swap.js is its 256-colour match
+const SETTING_COLOR = '#D97757'
 const BAR_WIDTH = 8
 const METER = 16 // cells in a pane's quota bar
 
@@ -487,8 +511,14 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e, next) => {
     try {
       const sid = await $.session.id().catch(() => '')
-      const ran = await runSwap($, sid ? ['auto', 'check', '--session', sid] : ['auto', 'check'])
-      const out = `${ran.stdout}${ran.stderr}`.trim()
+      const check = async (...extra: string[]) => {
+        const ran = await runSwap($, ['auto', 'check', ...extra, ...(sid ? ['--session', sid] : [])])
+        return `${ran.stdout}${ran.stderr}`.trim()
+      }
+      let out = await check()
+      // `auto.confirm` on: the check found a swap and waits. The prompt waits too, so it goes out on the account chosen.
+      const pending = out.match(/^\[auto-confirm\] (.*)$/m)
+      if (pending && (await confirmSwap($, pending[1]))) out = await check('--yes')
       // the auto-swap notice would otherwise show nowhere: the hook only reads the [status] line
       const swapped = out.match(/^\[auto-swap\] (🔀 .*)$/m)
       if (swapped) {
@@ -644,11 +674,11 @@ export const register: Register = on => {
               return (
                 <Box key={`ov:${r.key}`}>
                   <Text>{`  ${r.icon} `}</Text>
-                  <Text bold>{`${r.key.padEnd(width)}  `}</Text>
+                  <Text color={SETTING_COLOR} bold>{`${r.key.padEnd(width)}  `}</Text>
                   <Text color={v === true ? 'green' : off ? 'gray' : 'cyan'} bold={!off}>
                     {(v === true ? '● bật' : v === false ? '○ tắt' : v === '' ? '—' : String(v)).padEnd(14)}
                   </Text>
-                  <Text dimColor>{r.desc}</Text>
+                  <Text color={SETTING_COLOR}>{r.desc}</Text>
                 </Box>
               )
             })}
@@ -843,9 +873,9 @@ export const register: Register = on => {
               )
             return (
               <Box key={`row:${r.key}`} hover={{ scope: `st:${r.key}` }}>
-                <Text color={changed ? 'yellow' : 'white'} bold>{`${changed ? '* ' : '  '}${r.key.padEnd(width)}  `}</Text>
+                <Text color={changed ? 'yellow' : SETTING_COLOR} bold>{`${changed ? '* ' : '  '}${r.key.padEnd(width)}  `}</Text>
                 {control}
-                <Text dimColor>{`  ${r.desc}`}</Text>
+                <Text color={SETTING_COLOR}>{`  ${r.desc}`}</Text>
               </Box>
             )
           })}
