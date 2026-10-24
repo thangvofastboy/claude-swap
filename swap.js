@@ -4460,7 +4460,7 @@ export function formatHelpReport(color = null, lang = 'vi', keyword = '') {
 function helpText(color, lang) {
   const useColor = shouldColor(color)
   const bold = s => (useColor ? `\x1b[1;36m${s}\x1b[0m` : s)
-  const cmd = s => (useColor ? `\x1b[1;33m${s}\x1b[0m` : s)
+  const cmd = s => (useColor ? `\x1b[1;38;5;18m${s}\x1b[0m` : s)
 
   if (lang === 'en') {
     return [
