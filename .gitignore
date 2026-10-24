@@ -1,5 +1,21 @@
 node_modules/
 .DS_Store
+Thumbs.db
+
+# logs and editor swap files
+*.log
+npm-debug.log*
+*.swp
+.idea/
+.vscode/
+
+# secrets: profile tokens and Claude Code config must never be committed
+.env
+.env.*
+.credentials.json
+.claude.json
+*.pem
+*.key
 # local AI-tooling state (personal, not part of the app)
 .claude/
 .remember/
