@@ -1455,6 +1455,12 @@ describe('swap.js core functionality', () => {
     assert.equal(currentProfile(tmpHome), 'pa')
     assert.equal(await runCli(['swap', 'pb', '--session', 'other-session'], tmpHome), 0)
     assert.equal(await runCli(['swap', 'pa', '--force', '--session', 'mine'], tmpHome), 0)
+    // swap.guard off: the manual swap goes through with another session live; the setting is in the table
+    assert.equal(setSetting(tmpHome, 'swap.guard', 'off'), false)
+    recordPresence(tmpHome, 'pa', 'other-session')
+    assert.equal(await runCli(['swap', 'pb', '--session', 'mine'], tmpHome), 0)
+    assert.equal(currentProfile(tmpHome), 'pb')
+    assert.equal(setSetting(tmpHome, 'swap.guard', 'on'), true)
   })
 
   test('verify reports a revoked token and a good one; import-config applies only to existing profiles', async () => {

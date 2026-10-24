@@ -1604,6 +1604,7 @@ export function loadAutoSwitchConfig(home) {
         step: typeof parsed.step === 'number' && parsed.step > 0 ? parsed.step : null,
         forecast: typeof parsed.forecast === 'number' && parsed.forecast > 0 ? parsed.forecast : null,
         confirm: parsed.confirm === true,
+        guard: parsed.guard !== false,
         safeguardThreshold:
           typeof parsed.safeguardThreshold === 'number'
             ? parsed.safeguardThreshold
@@ -1623,6 +1624,7 @@ export function loadAutoSwitchConfig(home) {
     step: null,
     forecast: null,
     confirm: false,
+    guard: true,
     safeguardThreshold: 85,
   }
 }
@@ -4722,6 +4724,7 @@ const SETTINGS = [
   ['auto.forecast', 'number', 'Chuyển khi dự báo chạm ngưỡng trong N phút (0 = tắt)', h => loadAutoSwitchConfig(h).forecast ?? 0,
     (h, v) => patchAuto(h, { forecast: Number(v) === 0 || v === 'off' || v === '' ? null : minutesSetting(v) })],
   ['auto.confirm', 'bool', 'Hỏi xác nhận trước mỗi lần tự đổi profile', h => loadAutoSwitchConfig(h).confirm, (h, v) => patchAuto(h, { confirm: onOff(v) })],
+  ['swap.guard', 'bool', 'Chặn đổi tay khi phiên khác đang dùng profile (tắt: đổi luôn)', h => loadAutoSwitchConfig(h).guard, (h, v) => patchAuto(h, { guard: onOff(v) })],
   ['auto.return', 'bool', 'Tự quay về profile chính khi nó hồi quota', h => loadAutoSwitchConfig(h).autoReturn, (h, v) => patchAuto(h, { autoReturn: onOff(v) })],
   ['auto.primary', 'profile', 'Profile chính để quay về', h => loadAutoSwitchConfig(h).primaryProfile || '', (h, v) => patchAuto(h, { primaryProfile: profileSetting(h, v) })],
   ['auto.pool', 'text', 'Chỉ chuyển trong nhóm có tag này (trống = tất cả)', h => loadAutoSwitchConfig(h).pool || '',
@@ -4778,7 +4781,7 @@ export function formatSettings(home) {
 const SETTING_SGR = '38;5;173'
 // Single-codepoint emoji only: a VS16 one (⚙️, ↩️, 🏷️) is drawn one cell wide by some terminals and breaks the columns.
 const SETTING_ICONS = {
-  'auto.enabled': '🤖', 'auto.threshold': '🎯', 'auto.safeguard': '🚧', 'auto.step': '🔂', 'auto.forecast': '🔮', 'auto.confirm': '🙋', 'auto.return': '🔁', 'auto.primary': '⭐',
+  'auto.enabled': '🤖', 'auto.threshold': '🎯', 'auto.safeguard': '🚧', 'auto.step': '🔂', 'auto.forecast': '🔮', 'auto.confirm': '🙋', 'swap.guard': '🔒', 'auto.return': '🔁', 'auto.primary': '⭐',
   'auto.pool': '👥', 'auto.order': '🔢', balance: '🔄', statusline: '📊', notify: '🔔', mask: '🙈', 'repair.auto': '🔧', 'update.auto': '⬆', lang: '🌐',
 }
 
@@ -5255,7 +5258,7 @@ async function runCliInner(argv, home) {
         }
         const force = filteredArgv.includes('--force')
         const from = currentProfile(home)
-        const busy = from && from !== resolveProfileOrAlias(home, name) ? liveSessionsOn(home, from, sessionArg) : []
+        const busy = from && from !== resolveProfileOrAlias(home, name) && loadAutoSwitchConfig(home).guard ? liveSessionsOn(home, from, sessionArg) : []
         if (busy.length && !force) {
           throw new SwapError(`${busy.length} phiên khác đang dùng '${from}' trong ${PRESENCE_MIN} phút qua. Đổi tài khoản lúc này khiến các phiên đó dùng sai tài khoản. Chạy việc dài bằng /profile run, hoặc thêm --force để vẫn chuyển.`)
         }
