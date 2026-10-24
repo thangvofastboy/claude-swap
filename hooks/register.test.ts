@@ -549,11 +549,11 @@ test('the /profile help draws each command as a button that fills the prompt box
     '🔀 \x1b[1;36mclaude-swap\x1b[0m — help:',
     '',
     '📌 \x1b[1;36mProfiles:\x1b[0m',
-    '  \x1b[1;38;5;18m/profile list\x1b[0m              List profiles',
-    '  \x1b[1;38;5;18m/profile <tên|alias>\x1b[0m       Swap',
-    '  \x1b[1;38;5;18m/profile alias <tên> <p>\x1b[0m   Set an alias',
-    '  \x1b[1;38;5;18m/profile auto on|off\x1b[0m       Toggle auto',
-    '  \x1b[1;38;5;18m/profile run <tên> [-- cmd]\x1b[0m Run isolated',
+    '  \x1b[1;33m/profile list\x1b[0m              List profiles',
+    '  \x1b[1;33m/profile <tên|alias>\x1b[0m       Swap',
+    '  \x1b[1;33m/profile alias <tên> <p>\x1b[0m   Set an alias',
+    '  \x1b[1;33m/profile auto on|off\x1b[0m       Toggle auto',
+    '  \x1b[1;33m/profile run <tên> [-- cmd]\x1b[0m Run isolated',
   ].join('\n')
   const fills: string[] = []
   on('ui.render', ($, e) => $.ui.resolve(e).Box({})) // the engine's own row, drawn when the plugin passes
@@ -587,7 +587,7 @@ test('bare /profile draws the overview (profile, quota, settings) in colour abov
       { key: 'balance', type: 'choice', value: 'off', desc: 'balance', icon: '🔄' },
     ],
   }
-  const help = '🔀 claude-swap · Tổng quan\n  👤 work\n\n🔀 \x1b[1;36mclaude-swap\x1b[0m — help:\n  \x1b[1;38;5;18m/profile list\x1b[0m   List profiles'
+  const help = '🔀 claude-swap · Tổng quan\n  👤 work\n\n🔀 \x1b[1;36mclaude-swap\x1b[0m — help:\n  \x1b[1;33m/profile list\x1b[0m   List profiles'
   on('process.run', async (_$, { argv }) => ok(argv[2] === 'overview' ? JSON.stringify(data) : help))
   on('ui.render', ($, e) => $.ui.resolve(e).Box({}))
   await $.command.run({ command: 'profile', args: '' })
@@ -643,7 +643,7 @@ test('a narrow band drops the bars; /profile help <keyword> keeps its buttons', 
   expect(await narrow.find({ type: 'Text', text: '34%' })).toBeDefined()
   await narrow.unmount()
 
-  const help = '🔀 x:\n\n🤖 \x1b[1;36mAuto:\x1b[0m\n  \x1b[1;38;5;18m/profile auto on|off\x1b[0m       Toggle auto'
+  const help = '🔀 x:\n\n🤖 \x1b[1;36mAuto:\x1b[0m\n  \x1b[1;33m/profile auto on|off\x1b[0m       Toggle auto'
   const ui = await $.ui.mount({ plugin: 'profile-swap', surface: 'terminal', component: 'CommandOutput', props: { command: 'profile', args: 'help auto', text: help, isErrored: false } })
   expect(await ui.find({ type: 'Button' })).toBeDefined()
   await ui.unmount()
@@ -667,7 +667,7 @@ test('/profile settings opens an editor; Save writes only the changed rows throu
       ],
       features: [{ key: 'alias', title: 'Alias', items: [{ text: 'w → work', remove: ['unalias', 'w'] }] }],
     }
-    return ok(argv[2] === 'panel' ? JSON.stringify(panel) : argv[2] === 'help' ? '🔀 x:\n  \x1b[1;38;5;18m/profile list\x1b[0m   List' : '✅ ok')
+    return ok(argv[2] === 'panel' ? JSON.stringify(panel) : argv[2] === 'help' ? '🔀 x:\n  \x1b[1;33m/profile list\x1b[0m   List' : '✅ ok')
   })
   const opened: string[] = []
   const closed: string[] = []
@@ -705,7 +705,7 @@ test('/profile settings pane: profiles tab swaps and disables, features tab remo
   }
   on('process.run', async (_$, { argv }) => {
     calls.push(argv.slice(2))
-    return ok(argv[2] === 'panel' ? JSON.stringify(panel) : argv[2] === 'help' ? '🔀 x:\n  \x1b[1;38;5;18m/profile list\x1b[0m   List' : '✅ ok')
+    return ok(argv[2] === 'panel' ? JSON.stringify(panel) : argv[2] === 'help' ? '🔀 x:\n  \x1b[1;33m/profile list\x1b[0m   List' : '✅ ok')
   })
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.status', () => ({ value: undefined }))

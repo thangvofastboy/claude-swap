@@ -407,7 +407,7 @@ const loadColor = (pct: number) => (pct >= 95 ? 'red' : pct >= 80 ? '#ff8700' : 
 const BAR_WIDTH = 8
 const METER = 16 // cells in a pane's quota bar
 
-// `/profile` help, row by row: a command (navy in swap.js's formatHelpReport) with its description, or a title
+// `/profile` help, row by row: a command (yellow in swap.js's formatHelpReport) with its description, or a title
 const SGR = /\x1b\[[0-9;]*m/g
 const HELP_ARGS = new Set(['', 'help', '--help', '-h'])
 type HelpRow = { cmd?: string; desc?: string; title?: string }
@@ -428,7 +428,7 @@ let overview: Overview | null = null
 
 function helpRows(text: string): HelpRow[] {
   return text.split('\n').map(line => {
-    const m = line.match(/^\s*\x1b\[1;38;5;18m(\/profile[^\x1b]*)\x1b\[0m\s*(.*)$/)
+    const m = line.match(/^\s*\x1b\[1;33m(\/profile[^\x1b]*)\x1b\[0m\s*(.*)$/)
     return m ? { cmd: m[1].trim(), desc: m[2].replace(SGR, '') } : { title: line.replace(SGR, '') }
   })
 }
@@ -660,7 +660,7 @@ export const register: Register = on => {
             <Box key={`row${i}`}>
               <Text>  </Text>
               <Button key={`help:${r.cmd}`} plain onPress={() => void $.prompt.fill({ text: helpDraft(r.cmd!) }).catch(() => undefined)}>
-                <Text color="#000087" bold>{r.cmd.padEnd(28)}</Text>
+                <Text color="yellow" bold>{r.cmd.padEnd(28)}</Text>
               </Button>
               <Text> {r.desc}</Text>
             </Box>
