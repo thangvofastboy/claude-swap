@@ -157,6 +157,7 @@ import {
   spawnDetached,
   recordPresence,
   AI_TOOLS,
+  autoProfileName,
   codexIdentity,
   agyIdentity,
   opencodeIdentity,
@@ -1485,6 +1486,38 @@ describe('swap.js core functionality', () => {
     }
   })
 
+  test('review fixes: auto swaps keep an unsaved login, temp borrows survive auto-return, strict durations, safe names', async () => {
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'rf-two')
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'rf-one') // current
+    const cache = { 'rf-one|a@example.com': { limits: [['5 giờ', 97, '20:00']] }, 'rf-two|b@example.com': { limits: [['5 giờ', 0, '20:00']] } }
+    const config = { enabled: true, threshold: 95, safeguardThreshold: null, order: [], step: null, autoReturn: false, primaryProfile: null }
+
+    // a /login no profile holds, then an auto-switch: the login is saved under a name from its email, not lost
+    login(tmpHome, 'c', 'tok-c')
+    const res = await autoCheckAndSwap(tmpHome, { config, cache })
+    assert.deepEqual([res.swapped, res.to], [true, 'rf-two'])
+    assert.ok(listProfiles(tmpHome).includes('c'))
+
+    // auto-return does not end a temp borrow on the next prompt
+    swapProfile(tmpHome, 'rf-one')
+    tempSwap(tmpHome, 'rf-two', '1h')
+    const back = await autoCheckAndSwap(tmpHome, {
+      config: { ...config, autoReturn: true, primaryProfile: 'rf-one' },
+      cache: { 'rf-one|a@example.com': { limits: [['5 giờ', 0, '20:00']] }, 'rf-two|b@example.com': { limits: [['5 giờ', 0, '20:00']] } },
+    })
+    assert.equal(back.swapped, false)
+    assert.equal(currentProfile(tmpHome), 'rf-two')
+
+    // durations: "1.5h" is refused, not read as 5h
+    assert.throws(() => parseDuration('1.5h'), /không hợp lệ/)
+    assert.equal(parseDuration('2h 30m'), 9000000)
+    // an email starting with "_" or "." still gives a valid profile name
+    assert.equal(autoProfileName(tmpHome, '_x@y.com'), 'x')
+    assert.equal(autoProfileName(tmpHome, '..@y.com'), 'account')
+  })
+
   test('codex: save, switch and delete Codex logins; refreshed tokens are kept, an unsaved login is protected', async () => {
     const jwt = (email, user) =>
       ['h', Buffer.from(JSON.stringify({ email, 'https://api.openai.com/auth': { chatgpt_user_id: user, chatgpt_plan_type: 'plus' } })).toString('base64url'), 's'].join('.')
@@ -1538,7 +1571,7 @@ describe('swap.js core functionality', () => {
     assert.equal(codexIdentity(JSON.stringify({ OPENAI_API_KEY: 'sk-secret-1234' })).email, 'API key …1234')
 
     // CLI, and a trash of its own: `restore` never brings a Codex profile back as a Claude one
-    assert.match(formatToolList(tmpHome, 'codex'), /● work\s+w@x\.com \(plus\)/)
+    assert.match(formatToolList(tmpHome, 'codex'), /● 🟢 work\s+w@x\.com \(plus\)/)
     assert.equal(await runCli(['codex', 'delete', 'home'], tmpHome), 0)
     assert.deepEqual(listToolProfiles(tmpHome, 'codex'), ['work'])
     assert.equal(trashedProfiles(tmpHome).length, 0)
@@ -2848,6 +2881,16 @@ else if (a[0] === '-i') { const m = fs.readFileSync(0, 'utf-8').match(/-s "([^"]
     assert.equal(saved.safeguardThreshold, 70)
     assert.equal(saved.primaryProfile, 'web_a')
     assert.equal(saved.pool, null)
+    // an empty number field is refused (it used to be stored as a null threshold), and no other key can be written
+    const bad = await fetch(`${dash.url}/api/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...auth },
+      body: JSON.stringify({ action: 'save_config', auto: { enabled: true, threshold: null, safeguard: 70, evil: 1 } }),
+    })
+    assert.equal(bad.status, 500)
+    const after = JSON.parse(fs.readFileSync(cfgFile, 'utf-8'))
+    assert.equal(after.threshold, 90)
+    assert.ok(!('evil' in after))
     } finally {
       dash.close() // a failed assertion must not leave the server holding the test process open
     }

@@ -318,13 +318,14 @@ let formFields: Record<string, string> = {}
 let busy = false // one pane action at a time: a double press must not add a schedule twice or run two repairs
 
 
-async function loadSettings($: EngineInterface) {
+// `keepDraft`: a refresh while the pane is open leaves the edits in progress alone, including ones typed during the await
+async function loadSettings($: EngineInterface, keepDraft = false) {
   const [{ stdout }, help] = await Promise.all([runSwap($, ['panel']), commands.length ? null : runSwap($, ['help', '/profile']).catch(() => null)]) // a keyword on every command line: all of them, without the overview
   const data = JSON.parse(stdout.trim())
   settings = data.settings
   panel = data
   if (help) commands = helpRows(help.stdout)
-  draft = {}
+  if (!keepDraft) draft = {}
 }
 
 // a button, or an add form, on the pane: run that subcommand, say how it went, redraw from fresh data. Resolves true when it succeeded.
@@ -349,9 +350,7 @@ async function panelAction($: EngineInterface, argv: string[], stdin?: string): 
 // fresh pane data once the profile or a setting may have changed (an auto-swap, a /profile command); edits in progress stay
 async function reloadPanel($: EngineInterface) {
   if (!panel) return
-  const kept = draft
-  await loadSettings($).catch(() => undefined)
-  draft = kept
+  await loadSettings($, true).catch(() => undefined)
   $.ui.invalidate('ui.render')
 }
 
@@ -398,26 +397,36 @@ function edit($: EngineInterface, key: string, value: Setting['value']) {
 
 // every changed row goes through `settings set`, which validates it; a refused one stays in the draft with its error
 async function saveSettings($: EngineInterface) {
-  const errors: string[] = []
-  const changed = Object.entries(draft)
-  for (const [key, value] of changed) {
-    const text = value === true ? 'on' : value === false ? 'off' : String(value)
-    const ran = await runSwap($, ['settings', 'set', key, text, '--no-color'])
-    if (ran.exitCode !== 0) errors.push(`${key}: ${`${ran.stderr}${ran.stdout}`.trim().replace(/^❌ Lỗi: /, '')}`)
-  }
-  const failed = new Set(errors.map(e => e.split(':')[0]))
-  const kept = Object.fromEntries(Object.entries(draft).filter(([k]) => failed.has(k)))
-  await loadSettings($)
-  draft = kept
-  await refreshStatus($)
-  const saved = changed.length - errors.length
-  if (!errors.length) {
-    $.ui.toast(saved ? `✅ Đã lưu ${saved} cài đặt` : 'Không có gì thay đổi')
-    $.ui.invalidate('ui.render') // the pane stays open: the other tabs are still in use
+  if (busy) {
+    $.ui.toast('⏳ Đang chạy lệnh trước, đợi chút…')
     return
   }
-  settingsNote = `⚠ Đã lưu ${saved}/${changed.length}. ${errors.join(' · ')}`
-  $.ui.invalidate('ui.render')
+  busy = true
+  try {
+    const errors: string[] = []
+    const changed = Object.entries(draft)
+    for (const [key, value] of changed) {
+      const text = value === true ? 'on' : value === false ? 'off' : String(value)
+      const ran = await runSwap($, ['settings', 'set', key, text, '--no-color'])
+      if (ran.exitCode !== 0) errors.push(`${key}: ${`${ran.stderr}${ran.stdout}`.trim().replace(/^❌ Lỗi: /, '')}`)
+    }
+    const failed = new Set(errors.map(e => e.split(':')[0]))
+    // a refresh failing after the sets went through must not read as a failed save
+    await loadSettings($, true).catch(() => undefined)
+    // saved rows leave the draft; refused ones, and edits made while saving, stay
+    draft = Object.fromEntries(Object.entries(draft).filter(([k, v]) => failed.has(k) || !changed.some(([ck, cv]) => ck === k && cv === v)))
+    await refreshStatus($).catch(() => undefined)
+    const saved = changed.length - errors.length
+    if (!errors.length) {
+      $.ui.toast(saved ? `✅ Đã lưu ${saved} cài đặt` : 'Không có gì thay đổi')
+      $.ui.invalidate('ui.render') // the pane stays open: the other tabs are still in use
+      return
+    }
+    settingsNote = `⚠ Đã lưu ${saved}/${changed.length}. ${errors.join(' · ')}`
+    $.ui.invalidate('ui.render')
+  } finally {
+    busy = false
+  }
 }
 
 // commands that only read: they cannot change what the band shows (not `list`/`usage`: they refresh the quota cache), so they skip the extra `statusline json` process

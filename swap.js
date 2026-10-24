@@ -117,6 +117,15 @@ function safeError(err) {
   return err instanceof SyntaxError ? 'JSON không hợp lệ' : err.message
 }
 
+// a profile file's JSON; a corrupt one fails as a SwapError whose text never quotes the file (it holds tokens)
+function readProfileFile(file, name) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf-8'))
+  } catch (err) {
+    throw new SwapError(`File profile '${name}' bị hỏng: ${safeError(err)}`)
+  }
+}
+
 export function profilePath(home, name) {
   return path.join(profilesDir(home), `${checkName(name)}.json`)
 }
@@ -267,6 +276,9 @@ export function writeCredentials(home, data) {
     } catch (err) {
       // too long or a locked Keychain: the file is what Claude Code falls back to
       if (!fileNeeded && !/quá dài/.test(err.message)) throw err
+      // Claude Code reads the Keychain first: an item still holding the old account would win over the new file
+      deleteKeychain(keychainService(home))
+      if (readKeychain(keychainService(home))) throw err
       fileNeeded = true
     }
   }
@@ -444,6 +456,12 @@ export function swapProfile(home, name, options = {}) {
       `Đang ở trong session cô lập của profile '${session}' (/profile run). Thoát session đó để đổi tài khoản.`
     )
   }
+  // an automatic swap (auto-switch, schedule, branch binding, temp revert) must not drop a login no profile holds:
+  // save it under a name from its email first, as the manual `swap` command does
+  if (options.type === 'auto' || options.saveUnsaved) {
+    const unsaved = unsavedLogin(home)
+    if (unsaved) saveProfile(home, autoProfileName(home, unsaved))
+  }
   const resolved = resolveProfileOrAlias(home, name)
   const src = profilePath(home, resolved)
   if (!fs.existsSync(src)) {
@@ -485,15 +503,21 @@ export function swapProfile(home, name, options = {}) {
     }
   }
 
+  // credentials first: if they cannot be written, `.claude.json` still names the account they belong to
   const liveCredentials = readCredentials(home)
-  backup(cj)
-  atomicWrite(cj, JSON.stringify(data, null, 2))
-
   if (profile.credentials) {
     writeCredentials(home, liveCredentials ? keepLiveMcpOAuth(liveCredentials, profile.credentials) : profile.credentials)
   } else {
-    clearCredentials(home)
+    // a profile without a token (API key) still keeps the machine's MCP logins
+    let mcpOAuth = null
+    try {
+      mcpOAuth = JSON.parse(liveCredentials || 'null')?.mcpOAuth || null
+    } catch {}
+    if (mcpOAuth) writeCredentials(home, JSON.stringify({ mcpOAuth }, null, 2))
+    else clearCredentials(home)
   }
+  backup(cj)
+  atomicWrite(cj, JSON.stringify(data, null, 2))
   setCurrent(home, resolved)
 
   recordSwapHistory(home, {
@@ -726,7 +750,7 @@ export function stripControl(text) {
 export function setProfileNote(home, name, text) {
   const f = profilePath(home, name)
   if (!fs.existsSync(f)) throw new SwapError(`Profile '${name}' không tồn tại.`)
-  const data = JSON.parse(fs.readFileSync(f, 'utf-8'))
+  const data = readProfileFile(f, name)
   const clean = stripControl(text)
   if (clean) data.note = clean
   else delete data.note
@@ -735,7 +759,8 @@ export function setProfileNote(home, name, text) {
 
 // a profile name for a login that has none, from its email (sanitised, numbered when taken)
 export function autoProfileName(home, email) {
-  const base = (String(email).split('@')[0] || 'account').replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 50) || 'account'
+  // NAME_RE wants a letter or digit first: "_x@…" or ".x@…" would make every later profileExists throw
+  const base = String(email).split('@')[0].replace(/[^A-Za-z0-9_.-]/g, '-').replace(/^[^A-Za-z0-9]+/, '').slice(0, 50) || 'account'
   let name = base
   for (let i = 2; profileExists(home, name) || loadAliases(home)[name]; i++) name = `${base}-${i}`
   return name
@@ -953,21 +978,25 @@ export function opencodeIdentity(raw) {
   }
 }
 
+// `icon`: which tool a profile belongs to, in its lists and the help (single-codepoint emoji: VS16 ones break columns)
 export const AI_TOOLS = {
   codex: {
     label: 'Codex',
+    icon: '🟢',
     file: home => path.join(realEnv(home, 'CODEX_HOME') || path.join(home, '.codex'), 'auth.json'),
     identity: codexIdentity,
     login: 'codex login (đăng nhập lưu trong keyring, cli_auth_credentials_store = "keyring", chưa được hỗ trợ)',
   },
   agy: {
     label: 'Antigravity',
+    icon: '🔵',
     file: home => path.join(home, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
     identity: agyIdentity,
     login: 'agy rồi đăng nhập Google',
   },
   opencode: {
     label: 'opencode',
+    icon: '🟣',
     file: home => path.join(realEnv(home, 'XDG_DATA_HOME') || path.join(home, '.local', 'share'), 'opencode', 'auth.json'),
     identity: opencodeIdentity,
     login: 'opencode auth login',
@@ -1091,10 +1120,10 @@ export function formatToolList(home, tool) {
   const cur = currentToolProfile(home, tool)
   const w = Math.max(...names.map(n => n.length))
   return [
-    `🤖 Profile ${t.label}:`,
+    `${t.icon} Profile ${t.label}:`,
     ...names.map(n => {
       const id = toolProfileId(home, tool, n)
-      return `  ${n === cur ? '●' : '○'} ${n.padEnd(w)}  ${id ? `${id.email}${id.plan ? ` (${id.plan})` : ''}` : '⚠ hỏng'}`
+      return `  ${n === cur ? '●' : '○'} ${t.icon} ${n.padEnd(w)}  ${id ? `${id.email}${id.plan ? ` (${id.plan})` : ''}` : '⚠ hỏng'}`
     }),
   ].join('\n')
 }
@@ -1115,7 +1144,13 @@ function editStateFile(file, edit) {
 function remapProfileState(home, from, to) {
   const dir = profilesDir(home)
   const swap = v => (v === from ? to : v)
-  const swapKeys = obj => Object.fromEntries(Object.entries(obj).map(([k, v]) => [k === from ? to : k, v]))
+  // a key moved onto one `to` already has (dedupe folds a profile into an existing one) leaves `to`'s entry as it is
+  const remapKeys = (obj, mapKey) =>
+    Object.fromEntries(Object.entries(obj).flatMap(([k, v]) => {
+      const nk = mapKey(k)
+      return nk !== k && nk in obj ? [] : [[nk, v]]
+    }))
+  const swapKeys = obj => remapKeys(obj, k => (k === from ? to : k))
   // pointers to the active profile (the default one and one per CLAUDE_CONFIG_DIR)
   for (const f of fs.readdirSync(dir).filter(f => f === '.current' || f.startsWith('.current-'))) {
     try {
@@ -1123,7 +1158,7 @@ function remapProfileState(home, from, to) {
     } catch {}
   }
   const state = f => path.join(dir, f)
-  editStateFile(state('.presence.json'), p => Object.fromEntries(Object.entries(p).map(([k, v]) => [swap(k), v])))
+  editStateFile(state('.presence.json'), swapKeys)
   editStateFile(state('.aliases.json'), a => Object.fromEntries(Object.entries(a).map(([k, v]) => [k, swap(v)])))
   editStateFile(state('.model-affinity.json'), a => Object.fromEntries(Object.entries(a).map(([k, v]) => [k, swap(v)])))
   editStateFile(state('.project-bindings.json'), b => Object.fromEntries(Object.entries(b).map(([k, v]) => [k, swap(v)])))
@@ -1142,9 +1177,7 @@ function remapProfileState(home, from, to) {
   editStateFile(state('.swap-history.json'), h => (Array.isArray(h) ? h.map(e => ({ ...e, from: swap(e.from), to: swap(e.to) })) : h))
   editStateFile(state('.budget.json'), b => ({ ...b, ...(b.limits ? { limits: swapKeys(b.limits) } : {}) }))
   editStateFile(state('.usage-history.json'), swapKeys)
-  editStateFile(state('.usage-cache.json'), c =>
-    Object.fromEntries(Object.entries(c).map(([k, v]) => [k.startsWith(`${from}|`) ? `${to}|${k.slice(from.length + 1)}` : k, v]))
-  )
+  editStateFile(state('.usage-cache.json'), c => remapKeys(c, k => (k.startsWith(`${from}|`) ? `${to}|${k.slice(from.length + 1)}` : k)))
   // the `.claude-profile` marker a project bind leaves in the project folder
   for (const [projectDir, bound] of Object.entries(loadProjectBindings(home))) {
     const marker = path.join(projectDir, '.claude-profile')
@@ -1212,7 +1245,7 @@ export function addProfileTag(home, name, tag) {
   if (!tag) throw new SwapError('Thiếu tên tag.')
   const f = profilePath(home, name)
   if (!fs.existsSync(f)) throw new SwapError(`Profile '${name}' không tồn tại.`)
-  const data = JSON.parse(fs.readFileSync(f, 'utf-8'))
+  const data = readProfileFile(f, name)
   const tags = new Set(Array.isArray(data.tags) ? data.tags : [])
   tags.add(tag.trim())
   data.tags = Array.from(tags)
@@ -1223,7 +1256,7 @@ export function addProfileTag(home, name, tag) {
 export function removeProfileTag(home, name, tag) {
   const f = profilePath(home, name)
   if (!fs.existsSync(f)) throw new SwapError(`Profile '${name}' không tồn tại.`)
-  const data = JSON.parse(fs.readFileSync(f, 'utf-8'))
+  const data = readProfileFile(f, name)
   data.tags = (Array.isArray(data.tags) ? data.tags : []).filter(t => t !== tag.trim())
   atomicWrite(f, JSON.stringify(data, null, 2))
   return data.tags
@@ -1473,10 +1506,20 @@ export async function profileUsage(
   const early = active && fromCache()
   if (early) return early
 
+  // the live credentials hold Claude Code's freshest token, but only while the live login is still this profile's
+  // account: after a /login to another one, its quota would be filed under this profile
+  let live = active
+  if (live) {
+    try {
+      live = accountId(loadClaudeJson(home).oauthAccount) === accountId(profile.claude_json?.oauthAccount)
+    } catch {
+      live = false
+    }
+  }
   let token = null
   let expires = null
   try {
-    const oauth = JSON.parse((active ? readCredentials(home) : profile.credentials) || '{}').claudeAiOauth || {}
+    const oauth = JSON.parse((live ? readCredentials(home) : profile.credentials) || '{}').claudeAiOauth || {}
     token = oauth.accessToken
     expires = oauth.expiresAt
   } catch {
@@ -1484,14 +1527,16 @@ export async function profileUsage(
   }
   if (!token) {
     const note = 'không có token OAuth (API key không có quota gói)'
-    cache[key] = { ...hit, note } // replaces an older note, which `list` would otherwise keep showing
+    // replaces an older note, which `list` would otherwise keep showing; `at` lets the TTL skip the credentials read
+    // (a `security` spawn on macOS) on the next prompts
+    cache[key] = { ...hit, note, at: now }
     return { ...row, note }
   }
 
   if (typeof expires === 'number' && expires < Date.now()) {
     // the live profile: Claude Code renews its own token on the next request, so show the cached numbers and let
     // the TTL stamp stop every prompt from re-reading the credentials until then
-    if (active) {
+    if (live) {
       cache[key] = { ...hit, at: now }
       return { ...row, limits: cached }
     }
@@ -2006,13 +2051,14 @@ export function diagnoseProfiles(home) {
           const expMs = oauth.expiresAt > 1e11 ? oauth.expiresAt : oauth.expiresAt * 1000
           report.tokenExpiresAt = expMs
           const now = Date.now()
-          if (expMs <= now) {
+          // the access token is short-lived and Claude Code renews it from the refresh token: only a missing refresh
+          // token needs a new /login
+          if (expMs <= now && !oauth.refreshToken) {
             report.status = 'error'
-            report.issues.push('OAuth token đã hết hạn. Hãy /login để lấy lại token mới.')
-          } else if (expMs - now < 24 * 3600 * 1000) {
+            report.issues.push('OAuth token đã hết hạn và không có refresh token. Hãy /login để lấy lại token mới.')
+          } else if (expMs <= now) {
             if (report.status === 'ok') report.status = 'warn'
-            const hours = Math.round((expMs - now) / 3600000)
-            report.warnings.push(`OAuth token sắp hết hạn trong khoảng ${hours} giờ.`)
+            report.warnings.push('Access token đã hết hạn; Claude Code tự làm mới khi dùng profile này (/profile repair để làm mới ngay).')
           }
         }
         const mcp = Object.values(creds.mcpOAuth || {})
@@ -2357,7 +2403,8 @@ export function parseDuration(str) {
     else if (unit === 'h' || unit === 'giờ') totalMs += num * 3600 * 1000
     else if (unit === 'd' || unit === 'ngày') totalMs += num * 24 * 3600 * 1000
   }
-  if (!matchedAny || totalMs <= 0) {
+  // anything left besides the matched parts ("1.5h" leaves "1.") is a mistake, not a part to ignore
+  if (!matchedAny || totalMs <= 0 || trimmed.replace(re, '').trim()) {
     throw new SwapError(`Thời gian không hợp lệ: '${str}'. Ví dụ: 30m, 1h, 2h30m`)
   }
   return totalMs
@@ -2736,6 +2783,7 @@ async function autoCheckAndSwapNow(home, options = {}) {
       type: 'project',
       reason: `Branch binding (${branchBound.branch})`,
       cwd: process.cwd(),
+      saveUnsaved: true,
     })
     sendNotification(home, 'claude-swap', `Đã chuyển sang profile '${branchBound.profile}' theo nhánh '${branchBound.branch}'.`)
     return {
@@ -2746,10 +2794,14 @@ async function autoCheckAndSwapNow(home, options = {}) {
     }
   }
 
-  // Check auto-return to primary profile
+  // Check auto-return to primary profile. Held off while a temp borrow runs (it would end the borrow at once) and while
+  // a usable branch binding applies (the two would swap back and forth every prompt).
+  const boundUsable = branchBound && !isRateLimited(boundHit) && !isExhausted(boundHit, config)
   if (
     config.autoReturn &&
     !config.step && // the per-stint rotation would be undone by it on the next prompt
+    !tempRes.state &&
+    !boundUsable &&
     config.primaryProfile &&
     cur !== config.primaryProfile &&
     profileExists(home, config.primaryProfile)
@@ -2790,7 +2842,8 @@ async function autoCheckAndSwapNow(home, options = {}) {
   if (config.step && findLimit(hit, LABEL_5H) && util < config.threshold && !isSafeguardTriggered) {
     const stint = loadStint(home)
     const reset = windowReset(hit)
-    const newWindow = reset && stint?.reset && reset !== stint.reset
+    // a reset time that wobbles by a few seconds across a minute boundary is the same window, not a new one
+    const newWindow = reset && stint?.reset && Math.abs(reset - stint.reset) > 5
     if (!stint || stint.profile !== cur || util < stint.start || newWindow) {
       saveStint(home, cur, util, reset)
     } else if (util - stint.start >= config.step) {
@@ -3249,24 +3302,24 @@ export function unbindBranch(home, repoDir, pattern = null) {
 }
 
 export function getBoundBranchProfile(home, startDir = process.cwd(), currentBranch = null) {
-  let cur = path.resolve(startDir)
   const bindings = loadBranchBindings(home)
   if (Object.keys(bindings).length === 0) return null
-  const branch = currentBranch || getCurrentGitBranch(cur)
+  // the folders from here up that carry bindings: without one, no `git` process (this runs on every prompt)
+  const dirs = []
+  for (let cur = path.resolve(startDir); ; cur = path.dirname(cur)) {
+    if (Array.isArray(bindings[cur])) dirs.push(cur)
+    if (path.dirname(cur) === cur) break
+  }
+  if (!dirs.length) return null
+  const branch = currentBranch || getCurrentGitBranch(path.resolve(startDir))
   if (!branch) return null
 
-  while (true) {
-    const repoBindings = bindings[cur]
-    if (Array.isArray(repoBindings)) {
-      for (const b of repoBindings) {
-        if (matchBranchPattern(b.pattern, branch) && profileExists(home, b.profile)) {
-          return { profile: b.profile, branch, pattern: b.pattern, dir: cur }
-        }
+  for (const dir of dirs) {
+    for (const b of bindings[dir]) {
+      if (matchBranchPattern(b.pattern, branch) && profileExists(home, b.profile)) {
+        return { profile: b.profile, branch, pattern: b.pattern, dir }
       }
     }
-    const parent = path.dirname(cur)
-    if (parent === cur) break
-    cur = parent
   }
   return null
 }
@@ -4730,7 +4783,7 @@ function helpText(color, lang) {
       `  ${cmd('/profile disabled')}           List profiles excluded from auto-switch`,
       `  ${cmd('/profile list --json')}        Output profiles list in JSON format`,
       '',
-      `🧩 ${bold('Other AI CLIs (codex, agy = Antigravity, opencode = DeepSeek/Qwen/… keys):')}`,
+      `🧩 ${bold('Other AI CLIs (🟢 codex, 🔵 agy = Antigravity, 🟣 opencode = DeepSeek/Qwen/… keys):')}`,
       `  ${cmd('/profile codex [list]')}       A tool's profiles, ● = the login in use (same for agy, opencode)`,
       `  ${cmd('/profile codex save <name>')}  Save the tool's current login as a profile`,
       `  ${cmd('/profile codex <name>')}       Switch the tool to a profile (restart the tool afterwards)`,
@@ -4831,7 +4884,7 @@ function helpText(color, lang) {
     `  ${cmd('/profile disabled')}           Xem danh sách profile đang bị tạm dừng auto`,
     `  ${cmd('/profile list --json')}        Xuất danh sách profile dưới dạng JSON`,
     '',
-    `🧩 ${bold('Công cụ AI khác (codex, agy = Antigravity, opencode = key DeepSeek/Qwen/…):')}`,
+    `🧩 ${bold('Công cụ AI khác (🟢 codex, 🔵 agy = Antigravity, 🟣 opencode = key DeepSeek/Qwen/…):')}`,
     `  ${cmd('/profile codex [list]')}       Danh sách profile của công cụ, ● = đang đăng nhập (agy, opencode tương tự)`,
     `  ${cmd('/profile codex save <tên>')}   Lưu tài khoản đang đăng nhập của công cụ thành profile`,
     `  ${cmd('/profile codex <tên>')}        Đổi công cụ sang profile (khởi động lại công cụ sau đó)`,
@@ -5676,14 +5729,9 @@ async function runCliInner(argv, home) {
         }
 
         if (sub === 'threshold') {
-          const val = parseFloat(filteredArgv[2])
-          if (isNaN(val) || val < 1 || val > 100) {
-            console.error('❌ Ngưỡng không hợp lệ. Vui lòng nhập số từ 1 đến 100.')
-            return 1
-          }
-          cfg.threshold = Math.round(val)
-          saveAutoSwitchConfig(home, cfg)
-          console.log(`⚙️ Đã đặt ngưỡng tự động chuyển sang profile khác: ${cfg.threshold}%.`)
+          // the same validation as `settings set auto.threshold` ("90abc" is refused, not read as 90)
+          const v = setSetting(home, 'auto.threshold', filteredArgv[2])
+          console.log(`⚙️ Đã đặt ngưỡng tự động chuyển sang profile khác: ${v}%.`)
           return 0
         }
 
@@ -5714,8 +5762,18 @@ async function runCliInner(argv, home) {
           }
           const hold = cur ? liveSessionsOn(home, cur, sessionArg).length > 0 : false
           // `--yes`: the person confirmed the swap the last check reported (`auto.confirm`)
-          const res = await autoCheckAndSwap(home, { hold, ask: cfg.confirm && !filteredArgv.includes('--yes') })
-          if (res.reason === 'confirm') {
+          let res
+          try {
+            res = await autoCheckAndSwap(home, { hold, ask: cfg.confirm && !filteredArgv.includes('--yes') })
+          } catch (err) {
+            // a corrupt target profile must not take the status line and the alerts down with it on every prompt
+            if (!(err instanceof SwapError)) throw err
+            console.log(`[auto-swap] ⚠️ ${err.message}`)
+            res = { swapped: false, reason: 'error' }
+          }
+          if (res.reason === 'error') {
+            // reported above
+          } else if (res.reason === 'confirm') {
             console.log(`[auto-confirm] ${JSON.stringify({ from: res.from, to: res.to, why: res.why })}`) // the hook asks, then reruns with --yes
             console.log(`🙋 Chờ xác nhận đổi '${res.from}' sang '${res.to}': chạy auto check --yes để đổi.`)
           } else if (res.swapped) {

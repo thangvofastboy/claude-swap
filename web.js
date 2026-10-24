@@ -8,13 +8,11 @@ import { fileURLToPath } from 'node:url'
 import {
   listProfiles,
   currentProfile,
-  swapProfile,
   profileEmail,
   getProfileTags,
   loadDisabledProfiles,
   disableProfile,
   enableProfile,
-  deleteProfile,
   saveProfile,
   addTokenProfile,
   loadAliases,
@@ -23,7 +21,6 @@ import {
   loadLanguage,
   setLanguage,
   loadAutoSwitchConfig,
-  saveAutoSwitchConfig,
   loadUsageCache,
   profilesDir,
   atomicWrite,
@@ -45,6 +42,7 @@ import {
   weeklyPace,
   recoveredProfiles,
   settingsList,
+  setSetting,
   featureItems,
   projectUsageTotals,
 } from './swap.js'
@@ -123,11 +121,14 @@ export function runningDashboard(home = os.homedir()) {
   try {
     const raw = fs.readFileSync(pf, 'utf-8').trim()
     const state = raw.startsWith('{') ? JSON.parse(raw) : { pid: Number(raw), port: null }
+    // pid 0 or a negative one would signal a whole process group in stopWebDashboard
+    if (!Number.isInteger(state.pid) || state.pid <= 0) throw new Error('stale')
     // a pid reused by some other process (after a reboot): Linux names the command, elsewhere compare with boot time
     // (Linux skips the uptime test: WSL/VM uptime stops while paused, which would make a live dashboard look stale)
     if (process.platform === 'linux') {
-      const cmd = fs.readFileSync(`/proc/${state.pid}/cmdline`, 'utf-8')
-      if (!cmd.includes('web')) throw new Error('stale')
+      // our own `swap.js web --server` child, not any process whose command line happens to contain "web"
+      const cmd = fs.readFileSync(`/proc/${state.pid}/cmdline`, 'utf-8').split('\0')
+      if (!cmd.includes('--server') || !cmd.some(a => a.endsWith('swap.js'))) throw new Error('stale')
     } else if (state.started && state.started < Date.now() - os.uptime() * 1000) throw new Error('stale')
     process.kill(state.pid, 0) // throws if no such process
     return state
@@ -811,6 +812,14 @@ export function renderDashboardHtml() {
       opts.headers = Object.assign({}, opts.headers, { 'X-Dashboard-Token': TOKEN });
       const res = await fetch(url, opts);
       if (res.status === 401) throw new Error('phiên đã hết hạn, hãy mở lại bằng /profile web');
+      // a refused action must not be reported as done: every caller's catch shows this message instead
+      if (!res.ok) {
+        let msg = 'lỗi ' + res.status;
+        try {
+          msg = (await res.clone().json()).error || msg;
+        } catch (e) {}
+        throw new Error(msg);
+      }
       return res;
     }
 
@@ -1857,10 +1866,13 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
           const action = body.action
 
           switch (action) {
-            case 'swap': {
-              swapProfile(home, body.profile, { type: 'manual', reason: 'Web Dashboard Switch' })
-              res.writeHead(200, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({ ok: true }))
+            // swap and delete go through the CLI, so the dashboard gets the same checks: another live session, a full
+            // quota window, a login no profile holds (saved first), the only profile holding an account
+            case 'swap':
+            case 'delete': {
+              const ran = await runSwapCli(home, [action, String(body.profile ?? '')])
+              res.writeHead(ran.code === 0 ? 200 : 400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify(ran.code === 0 ? { ok: true, output: ran.output } : { error: ran.output.replace(/^❌ Lỗi:\s*/, '').trim() }))
               return
             }
             case 'disable': {
@@ -1871,12 +1883,6 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
             }
             case 'enable': {
               enableProfile(home, body.profile)
-              res.writeHead(200, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({ ok: true }))
-              return
-            }
-            case 'delete': {
-              deleteProfile(home, body.profile)
               res.writeHead(200, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ ok: true }))
               return
@@ -1892,18 +1898,24 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
               return
             }
             case 'save_config': {
+              // each field goes through the setting it edits, with that setting's validation: no other key can be
+              // written, and an empty number field is refused instead of stored as null (which turned auto-switch off).
+              // Numbers first, so a bad one fails before anything is saved.
               if (body.auto) {
-                // the form uses short field names; keep keys it does not edit (order, ...)
-                const { safeguard, primary, pool, ...rest } = body.auto
-                saveAutoSwitchConfig(home, {
-                  ...loadAutoSwitchConfig(home),
-                  ...rest,
-                  safeguardThreshold: safeguard || null,
-                  primaryProfile: primary || null,
-                  pool: pool && pool !== 'all' ? pool : null,
-                })
+                const a = body.auto
+                setSetting(home, 'auto.threshold', String(a.threshold))
+                setSetting(home, 'auto.safeguard', String(a.safeguard || 0))
+                setSetting(home, 'auto.enabled', a.enabled === true ? 'on' : 'off')
+                setSetting(home, 'auto.return', a.autoReturn === true ? 'on' : 'off')
+                setSetting(home, 'auto.primary', typeof a.primary === 'string' ? a.primary : '')
+                setSetting(home, 'auto.pool', typeof a.pool === 'string' ? a.pool : '')
               }
-              if (body.balance) saveBalanceConfig(home, body.balance)
+              if (body.balance) {
+                const b = body.balance
+                setSetting(home, 'balance', b.enabled === true ? String(b.mode) : 'off')
+                const pool = typeof b.pool === 'string' && b.pool.trim() ? b.pool.trim() : 'all'
+                saveBalanceConfig(home, { ...loadBalanceConfig(home), pool })
+              }
               if (body.webhook) {
                 // only typed-in URLs are sent; an empty field keeps the stored (never displayed) value
                 const urls = Object.entries(body.webhook).filter(([k, v]) => WEBHOOK_TYPES.includes(k) && typeof v === 'string' && /^https?:\/\//.test(v))
