@@ -13,7 +13,6 @@ import {
   loadDisabledProfiles,
   disableProfile,
   enableProfile,
-  saveProfile,
   addTokenProfile,
   loadAliases,
   loadBranchBindings,
@@ -1891,7 +1890,13 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
               if (body.token) {
                 addTokenProfile(home, body.token, body.name)
               } else {
-                saveProfile(home, body.name, true)
+                // through the CLI: an existing name is refused instead of silently overwritten
+                const ran = await runSwapCli(home, ['new', String(body.name ?? '')])
+                if (ran.code !== 0) {
+                  res.writeHead(400, { 'Content-Type': 'application/json' })
+                  res.end(JSON.stringify({ error: ran.output.replace(/^❌ Lỗi:\s*/, '').trim() }))
+                  return
+                }
               }
               res.writeHead(200, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ ok: true }))

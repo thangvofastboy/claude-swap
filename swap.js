@@ -478,29 +478,29 @@ export function swapProfile(home, name, options = {}) {
   }
 
   const cj = claudeJson(home)
-  const data = fs.existsSync(cj) ? loadClaudeJson(home) : {}
   const cur = currentProfile(home)
-  if (cur) {
-    let curId = null
-    try {
-      const curProfile = JSON.parse(fs.readFileSync(profilePath(home, cur), 'utf-8'))
-      curId = accountId(curProfile.claude_json?.oauthAccount)
-    } catch {}
-    if (curId && curId === accountId(data.oauthAccount)) {
-      saveProfile(home, cur, true)
-      if (cur === resolved) {
-        return
-      }
-    }
+  // re-save the profile holding the live account: Claude Code may have refreshed its tokens since the last swap.
+  // Usually `.current`; after a `delete` or a /login into another saved account it is whichever profile holds it
+  const liveId = fs.existsSync(cj) ? accountId(loadClaudeJson(home).oauthAccount) : null
+  const holder = liveId
+    ? cur && profileIdentity(home, cur).id === liveId
+      ? cur
+      : listProfiles(home).find(n => profileIdentity(home, n).id === liveId)
+    : null
+  if (holder) {
+    saveProfile(home, holder, true)
+    if (holder === cur && cur === resolved) return
+    // the target itself was just refreshed: write its fresh tokens, not the copy parsed above
+    if (holder === resolved) profile = JSON.parse(fs.readFileSync(src, 'utf-8'))
   }
 
-  for (const k of AUTH_KEYS) {
-    delete data[k]
-  }
-  for (const k of AUTH_KEYS) {
-    if (k in profile.claude_json) {
-      data[k] = profile.claude_json[k]
-    }
+  // read again right before the write: the re-save and the credentials write above take time, and a running
+  // Claude Code writes its own keys into this file (project state, counters) meanwhile
+  const authKeys = () => {
+    const data = fs.existsSync(cj) ? loadClaudeJson(home) : {}
+    for (const k of AUTH_KEYS) delete data[k]
+    for (const k of AUTH_KEYS) if (k in profile.claude_json) data[k] = profile.claude_json[k]
+    return data
   }
 
   // credentials first: if they cannot be written, `.claude.json` still names the account they belong to
@@ -517,7 +517,7 @@ export function swapProfile(home, name, options = {}) {
     else clearCredentials(home)
   }
   backup(cj)
-  atomicWrite(cj, JSON.stringify(data, null, 2))
+  atomicWrite(cj, JSON.stringify(authKeys(), null, 2))
   setCurrent(home, resolved)
 
   recordSwapHistory(home, {
@@ -617,6 +617,7 @@ export function applyDedupe(home, plan) {
     for (const d of drop) {
       for (const t of getProfileTags(home, d)) addProfileTag(home, keep, t)
       if (!profileNote(home, keep) && profileNote(home, d)) setProfileNote(home, keep, profileNote(home, d))
+      enableProfile(home, d) // the remap would otherwise carry a dropped profile's "disabled" over to the kept one
       remapProfileState(home, d, keep)
       deleteProfile(home, d)
     }
@@ -1500,7 +1501,9 @@ export async function profileUsage(
   const fromCache = () => {
     if (hit.retry_at && hit.retry_at > now) return { ...row, limits: cached, note: rateLimitedNote(hit, cached.length > 0) }
     // failures are cached too, so an offline machine does not refetch on every prompt
-    if (!force && now - (hit.at || 0) < USAGE_TTL) return { ...row, limits: cached, note: cached.length ? '' : hit.note || '' }
+    // `checked`: last look without a fetch (no token, expired live token); `at` stays the time of the numbers, so
+    // the status line's stale note keeps counting from the real fetch
+    if (!force && now - Math.max(hit.at || 0, hit.checked || 0) < USAGE_TTL) return { ...row, limits: cached, note: cached.length ? '' : hit.note || '' }
     return null
   }
   const early = active && fromCache()
@@ -1527,9 +1530,9 @@ export async function profileUsage(
   }
   if (!token) {
     const note = 'không có token OAuth (API key không có quota gói)'
-    // replaces an older note, which `list` would otherwise keep showing; `at` lets the TTL skip the credentials read
-    // (a `security` spawn on macOS) on the next prompts
-    cache[key] = { ...hit, note, at: now }
+    // replaces an older note, which `list` would otherwise keep showing; `checked` lets the TTL skip the credentials
+    // read (a `security` spawn on macOS) on the next prompts
+    cache[key] = { ...hit, note, checked: now }
     return { ...row, note }
   }
 
@@ -1537,7 +1540,7 @@ export async function profileUsage(
     // the live profile: Claude Code renews its own token on the next request, so show the cached numbers and let
     // the TTL stamp stop every prompt from re-reading the credentials until then
     if (live) {
-      cache[key] = { ...hit, at: now }
+      cache[key] = { ...hit, checked: now }
       return { ...row, limits: cached }
     }
     const note = `token đã hết hạn — chuyển sang profile này (swap ${name}) để CLI làm mới`
@@ -3080,7 +3083,10 @@ export function exportEncryptedProfiles(home, targetPath, password) {
     data: encrypted.toString('hex'),
   }
 
-  const resolved = path.resolve(targetPath)
+  let resolved = path.resolve(targetPath)
+  if (fs.statSync(resolved, { throwIfNoEntry: false })?.isDirectory()) {
+    resolved = path.join(resolved, `claude-swap-${localDay()}-${Date.now()}.enc`)
+  }
   atomicWrite(resolved, JSON.stringify(container, null, 2))
   return { path: resolved, count: Object.keys(profiles).length }
 }
@@ -3122,9 +3128,12 @@ export function importEncryptedProfiles(home, sourcePath, password, overwrite = 
   for (const [name, data] of Object.entries(profiles)) {
     if (!NAME_RE.test(name) || !data || typeof data !== 'object' || !data.claude_json || typeof data.claude_json !== 'object') continue
     const target = profilePath(home, name)
-    if (fs.existsSync(target) && !overwrite) {
-      result.exists.push(name)
-      continue
+    if (fs.existsSync(target)) {
+      if (!overwrite) {
+        result.exists.push(name)
+        continue
+      }
+      moveToTrash(home, name, target) // the local copy may hold a newer token than the backup
     }
     atomicWrite(target, JSON.stringify(data, null, 2))
     result.added.push(name)
@@ -3692,6 +3701,10 @@ export function positionalArgs(argv, from) {
   return argv.slice(from).filter((a, idx) => !a.startsWith('--') && idx + from !== skip)
 }
 
+// a directory as sync target means one fixed file in it, so every machine pushes and pulls the same file
+// (`export` to a directory gets a timestamped name instead)
+const syncFile = p => (fs.statSync(p, { throwIfNoEntry: false })?.isDirectory() ? path.join(p, 'claude-swap.enc') : p)
+
 export function syncPush(home, targetPath, password) {
   const config = loadSyncConfig(home)
   const dest = targetPath || config.targetPath
@@ -3703,7 +3716,7 @@ export function syncPush(home, targetPath, password) {
     throw new SwapError(`Vui lòng cung cấp mật khẩu mã hóa qua ${PASSWORD_HINT}.`)
   }
 
-  const res = exportEncryptedProfiles(home, dest, pass)
+  const res = exportEncryptedProfiles(home, syncFile(dest), pass)
   config.targetPath = dest
   config.lastPush = Date.now()
   saveSyncConfig(home, config)
@@ -3721,7 +3734,7 @@ export function syncPull(home, sourcePath, password, force = false) {
     throw new SwapError(`Vui lòng cung cấp mật khẩu giải mã qua ${PASSWORD_HINT}.`)
   }
 
-  const res = importEncryptedProfiles(home, src, pass, force)
+  const res = importEncryptedProfiles(home, syncFile(src), pass, force)
   config.targetPath = src
   config.lastPull = Date.now()
   saveSyncConfig(home, config)
@@ -4200,7 +4213,8 @@ const AUTO_REPAIR_MS = 6 * 3600000
 export function maybeAutoRepair(home, spawn = spawnDetached) {
   const cfg = loadRepairConfig(home)
   if (!cfg.auto || Date.now() - cfg.lastRun < AUTO_REPAIR_MS || isolatedSession(home)) return false
-  if (!brokenProfiles(home).some(n => loginState(home, n) === 'expired')) return false
+  const cur = currentProfile(home)
+  if (!listProfiles(home).some(n => n !== cur && loginState(home, n) === 'expired')) return false
   atomicWrite(repairConfigFile(home), JSON.stringify({ ...cfg, lastRun: Date.now() }))
   spawn(process.execPath, [SCRIPT_PATH, 'repair'])
   return true
@@ -4449,8 +4463,9 @@ export function sendQuotaAlerts(home, cache = loadUsageCache(home)) {
   } catch {}
   const fresh = alerts.filter(a => !sent[a.key])
   if (!fresh.length) return
+  // keys with a reset time expire with the window; a login key has none and goes out once per email
   const weekAgo = Date.now() - 8 * 86400000
-  sent = Object.fromEntries(Object.entries(sent).filter(([, t]) => t > weekAgo))
+  sent = Object.fromEntries(Object.entries(sent).filter(([k, t]) => t > weekAgo || k.includes('|login|')))
   for (const a of fresh) {
     sent[a.key] = Date.now()
     const text = typeof a.text === 'function' ? a.text() : a.text // the report is built only when it goes out

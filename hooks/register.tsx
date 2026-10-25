@@ -158,7 +158,8 @@ async function runSwap($: EngineInterface, argv: string[], stdin?: string) {
       launcher = 0
       return ran
     } catch (error) {
-      if (timedOut()) throw error
+      // a launcher that has worked once stays: rerunning a swap or add-token elsewhere would repeat its work
+      if (launcher >= 0 || timedOut()) throw error
     }
   }
   const all = await nodeCandidates($, script, argv)
@@ -170,7 +171,7 @@ async function runSwap($: EngineInterface, argv: string[], stdin?: string) {
       launcher = i
       return ran
     } catch (error) {
-      if (timedOut()) throw error
+      if (launcher >= 0 || timedOut()) throw error
       failure = error
     }
   }

@@ -60,6 +60,7 @@ import {
   formatForecastReport,
   interactivePickProfile,
   syncPush,
+  exportEncryptedProfiles,
   syncPull,
   saveSyncConfig,
   loadSyncConfig,
@@ -568,6 +569,10 @@ describe('swap.js core functionality', () => {
       // Export with password
       assert.equal(await runCli(['export', exportFile, '--password', 'secret123'], tmpHome), 0)
       assert.ok(fs.existsSync(exportFile))
+      // a directory target gets a file inside it instead of EISDIR
+      const intoDir = exportEncryptedProfiles(tmpHome, newHome, 'secret123')
+      assert.equal(path.dirname(intoDir.path), newHome)
+      fs.rmSync(intoDir.path)
 
       // Import with wrong password should fail
       assert.equal(await runCli(['import-enc', exportFile, '--password', 'wrong_pass'], newHome), 1)
@@ -578,6 +583,9 @@ describe('swap.js core functionality', () => {
       // the settings and bindings travel with the profiles
       assert.equal(loadAutoSwitchConfig(newHome).threshold, 80)
       assert.equal(loadProjectBindings(newHome)[dir], 'work')
+      // --force keeps a trash copy of the overwritten profile: it may hold a newer token than the backup
+      assert.equal(await runCli(['import-enc', exportFile, '--password', 'secret123', '--force'], newHome), 0)
+      assert.deepEqual(trashedProfiles(newHome).map(t => t.name).sort(), ['personal', 'work'])
     } finally {
       try { fs.unlinkSync(exportFile) } catch {}
       try { fs.rmSync(newHome, { recursive: true, force: true }) } catch {}
@@ -889,6 +897,11 @@ describe('swap.js core functionality', () => {
     const newHome = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-synchome-'))
     const pullRes = syncPull(newHome, syncFile, 'mypassword')
     assert.ok(pullRes.added.includes('sync_profile'))
+
+    // a directory target is one fixed file inside it, so push and pull on two machines meet at the same file
+    const syncDir = path.dirname(syncFile)
+    assert.equal(syncPush(tmpHome, syncDir, 'mypassword').path, path.join(syncDir, 'claude-swap.enc'))
+    assert.ok(syncPull(fs.mkdtempSync(path.join(os.tmpdir(), 'claude-synchome-')), syncDir, 'mypassword', true).added.includes('sync_profile'))
 
     // CLI sync commands
     assert.equal(await runCli(['sync', 'setup', syncFile, '--password', 'mypassword'], tmpHome), 0)
@@ -1398,6 +1411,7 @@ describe('swap.js core functionality', () => {
     addProfileTag(tmpHome, 'old', 'team')
     setProfileNote(tmpHome, 'old', 'project X')
     setAlias(tmpHome, 'o', 'old')
+    disableProfile(tmpHome, 'old')
     assert.equal(await runCli(['new', 'fresh'], tmpHome), 0)
     const dir = path.join(tmpHome, '.config', 'claude-cli-profiles')
     const f = JSON.parse(fs.readFileSync(path.join(dir, 'fresh.json'), 'utf-8'))
@@ -1411,6 +1425,26 @@ describe('swap.js core functionality', () => {
     assert.deepEqual(getProfileTags(tmpHome, 'fresh'), ['team'])
     assert.equal(profileNote(tmpHome, 'fresh'), 'project X')
     assert.equal(loadAliases(tmpHome).o, 'fresh')
+    assert.equal(isProfileDisabled(tmpHome, 'fresh'), false) // the dropped profile's flag does not follow the remap
+  })
+
+  test('swap re-saves whichever profile holds the live account, not only .current', async () => {
+    login(tmpHome, 'hd_a', 'tok-a')
+    saveProfile(tmpHome, 'hold')
+    login(tmpHome, 'hd_b', 'tok-b1')
+    saveProfile(tmpHome, 'other')
+    setCurrent(tmpHome, 'other')
+    fs.rmSync(path.join(tmpHome, '.config', 'claude-cli-profiles', '.current')) // as after `delete` of the current profile
+    login(tmpHome, 'hd_b', 'tok-b2') // Claude Code refreshed the token meanwhile
+    swapProfile(tmpHome, 'hold')
+    const profileFile = n => path.join(tmpHome, '.config', 'claude-cli-profiles', `${n}.json`)
+    assert.match(JSON.parse(fs.readFileSync(profileFile('other'), 'utf-8')).credentials, /tok-b2/)
+
+    // swapping to the profile that holds the live account writes its refreshed token, not the copy read before the re-save
+    login(tmpHome, 'hd_b', 'tok-b3')
+    swapProfile(tmpHome, 'other')
+    assert.match(JSON.parse(fs.readFileSync(profileFile('other'), 'utf-8')).credentials, /tok-b3/)
+    assert.match(fs.readFileSync(path.join(tmpHome, '.claude', '.credentials.json'), 'utf-8'), /tok-b3/)
   })
 
   test('note is kept by a re-save and shown in list', async () => {
@@ -2852,6 +2886,17 @@ else if (a[0] === '-i') { const m = fs.readFileSync(0, 'utf-8').match(/-s "([^"]
     })
     assert.equal(csrf.status, 415)
     assert.ok(listProfiles(tmpHome).includes('web_a'))
+
+    // "Thêm Profile" without a token must refuse an existing name instead of overwriting its tokens
+    const before = fs.readFileSync(path.join(tmpHome, '.config', 'claude-cli-profiles', 'web_a.json'), 'utf-8')
+    const dup = await fetch(`${dash.url}/api/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...auth },
+      body: JSON.stringify({ action: 'add_profile', name: 'web_a' }),
+    })
+    assert.equal(dup.status, 400)
+    assert.match((await dup.json()).error, /đã tồn tại/)
+    assert.equal(fs.readFileSync(path.join(tmpHome, '.config', 'claude-cli-profiles', 'web_a.json'), 'utf-8'), before)
 
     // saving the form keeps auto-switch keys it does not show (order) and maps its short names
     const cfgFile = path.join(tmpHome, '.config', 'claude-cli-profiles', '.auto-switch.json')
