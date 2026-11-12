@@ -92,6 +92,44 @@ export function runSwapCli(home, args, password = '') {
   })
 }
 
+// The OS file/folder dialog on the machine the dashboard runs on (the browser cannot hand back a real path).
+// Fixed argv only: nothing from the request reaches the command. Resolves '' on cancel.
+const PICKERS = {
+  linux: {
+    dir: [['zenity', ['--file-selection', '--directory']], ['kdialog', ['--getexistingdirectory', os.homedir()]]],
+    file: [['zenity', ['--file-selection']], ['kdialog', ['--getopenfilename', os.homedir()]]],
+    save: [['zenity', ['--file-selection', '--save', '--confirm-overwrite']], ['kdialog', ['--getsavefilename', os.homedir()]]],
+  },
+  darwin: {
+    dir: [['osascript', ['-e', 'POSIX path of (choose folder)']]],
+    file: [['osascript', ['-e', 'POSIX path of (choose file)']]],
+    save: [['osascript', ['-e', 'POSIX path of (choose file name)']]],
+  },
+  win32: Object.fromEntries(Object.entries({
+    dir: '$d = New-Object System.Windows.Forms.FolderBrowserDialog; if ($d.ShowDialog() -eq "OK") { $d.SelectedPath }',
+    file: '$d = New-Object System.Windows.Forms.OpenFileDialog; if ($d.ShowDialog() -eq "OK") { $d.FileName }',
+    save: '$d = New-Object System.Windows.Forms.SaveFileDialog; if ($d.ShowDialog() -eq "OK") { $d.FileName }',
+  }).map(([k, ps]) => [k, [['powershell', ['-NoProfile', '-STA', '-Command', 'Add-Type -AssemblyName System.Windows.Forms; ' + ps]]]])),
+}
+
+export function pickPath(mode, platform = process.platform) {
+  const tries = PICKERS[platform]?.[mode] ?? PICKERS.linux[mode]
+  if (!tries) return Promise.reject(new Error(`Kiểu chọn không hợp lệ: ${mode}`))
+  return new Promise((resolve, reject) => {
+    const next = i => {
+      if (i >= tries.length) return reject(new Error('Không mở được hộp thoại chọn file (cần zenity hoặc kdialog trên Linux). Hãy gõ đường dẫn.'))
+      execFile(tries[i][0], tries[i][1], { timeout: 10 * 60000, windowsHide: false }, (err, stdout, stderr) => {
+        if (err?.code === 'ENOENT') return next(i + 1)
+        // cancel exits non-zero and silent; a dialog that could not open (no display) says why on stderr
+        const why = String(stderr).trim().split('\n').filter(l => !/Gtk-WARNING|^\s*$/.test(l))[0]
+        if (err && why && !err.killed) return reject(new Error(`Không mở được hộp thoại chọn: ${why}`))
+        resolve(err ? '' : String(stdout).trim())
+      })
+    }
+    next(0)
+  })
+}
+
 export function webPidFile(home = os.homedir()) {
   return path.join(profilesDir(home), '.web.pid')
 }
@@ -213,218 +251,361 @@ export function renderDashboardHtml() {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='cs-g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%233b82f6'/%3E%3Cstop offset='1' stop-color='%230b2a6b'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='15' fill='url(%23cs-g)'/%3E%3Cpath d='M14 24h32M39 17l7 7-7 7M50 40H18M25 33l-7 7 7 7' fill='none' stroke='%23fff' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='52' cy='11' r='5' fill='%23D97757'/%3E%3C/svg%3E">
+  <meta name="theme-color" content="#02050d">
   <title>claude-swap Dashboard — Quản lý Đa Tài Khoản Claude Code</title>
   <style>
     :root {
       color-scheme: dark;
       --ease: cubic-bezier(0.22, 1, 0.36, 1);
-      --bg: #0a0e17;
-      --card-bg: #111827;
-      --card-border: #1f2b42;
-      --surface-2: #162033;
-      --accent: #3f6fe0;
-      --accent-hover: #335fcb;
-      --accent-2: #7048e8;
-      --accent-soft: #6b95f5;
+      --bg: #02050d;
+      --sidebar: #040914;
+      --card-bg: #071022;
+      --card-border: #11213f;
+      --surface-2: #0b1a35;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --accent-2: #3b82f6;
+      --accent-soft: #6ea8ff;
       --success: #10b981;
       --warning: #f59e0b;
       --danger: #ef4444;
-      --text: #e8edf5;
-      --text-muted: #93a1b8;
-      --border: #2d3b55;
-      --code-bg: #162033;
-      --radius: 14px;
-      --focus: 0 0 0 3px rgba(107, 149, 245, 0.45);
+      --text: #e6ebf4;
+      --text-muted: #8fa3c4;
+      --text-dim: #5a7099;
+      --border: #1d3560;
+      --code-bg: #132a50;
+      --radius: 12px;
+      --focus: 0 0 0 3px rgba(110, 168, 255, 0.45);
       --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+      --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767; --grid: #142542;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    html { -webkit-text-size-adjust: 100%; }
-    body { font-family: var(--font); line-height: 1.5; -webkit-font-smoothing: antialiased; background: radial-gradient(900px 420px at 50% -160px, #1a2a55 0%, rgba(10, 14, 23, 0) 70%), var(--bg); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; }
+    html { -webkit-text-size-adjust: 100%; font-size: 17px; }
+    body { font-family: var(--font); font-size: 15px; line-height: 1.5; -webkit-font-smoothing: antialiased; background: var(--bg); color: var(--text); height: 100vh; overflow: hidden; display: grid; grid-template-columns: 232px minmax(0, 1fr); }
     button, input, select, textarea { font: inherit; color: inherit; }
     button { cursor: pointer; }
     :focus-visible { outline: none; box-shadow: var(--focus); }
-    ::selection { background: rgba(107, 149, 245, 0.35); }
-    ::-webkit-scrollbar { width: 10px; height: 10px; }
-    ::-webkit-scrollbar-thumb { background: #26344f; border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
-    ::-webkit-scrollbar-thumb:hover { background: #34466a; background-clip: padding-box; border: 2px solid transparent; }
+    ::selection { background: rgba(110, 168, 255, 0.35); }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-thumb { background: #213a66; border-radius: 999px; }
+    ::-webkit-scrollbar-thumb:hover { background: #2c4c85; }
+    .ic { width: 1.1em; height: 1.1em; vertical-align: -0.2em; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
-    header { background: rgba(10, 14, 23, 0.72); -webkit-backdrop-filter: blur(14px) saturate(140%); backdrop-filter: blur(14px) saturate(140%); border-bottom: 1px solid var(--card-border); padding: 12px 28px; display: flex; justify-content: space-between; align-items: center; gap: 16px; position: sticky; top: 0; z-index: 100; }
-    .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.15rem; letter-spacing: -0.01em; color: #fff; }
-    .brand-badge { background: rgba(107, 149, 245, 0.12); color: var(--accent-soft); font-size: 0.72rem; font-weight: 600; padding: 2px 9px; border-radius: 999px; border: 1px solid rgba(107, 149, 245, 0.3); }
-    nav { display: flex; gap: 4px; padding: 4px; background: rgba(255, 255, 255, 0.04); border: 1px solid var(--card-border); border-radius: 12px; overflow-x: auto; max-width: 100%; scrollbar-width: none; }
-    nav::-webkit-scrollbar { display: none; }
-    .tab-btn { background: transparent; border: none; color: var(--text-muted); padding: 7px 14px; white-space: nowrap; border-radius: 9px; font-size: 0.9rem; font-weight: 500; transition: color 0.2s var(--ease), background-color 0.2s var(--ease), box-shadow 0.2s var(--ease); display: flex; align-items: center; gap: 6px; }
-    .tab-btn:hover { color: #fff; background: rgba(255, 255, 255, 0.07); }
-    .tab-btn.active { color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-2)); box-shadow: 0 4px 14px rgba(63, 111, 224, 0.4); }
-    .header-actions { display: flex; gap: 10px; align-items: center; }
-    .btn { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; border: 1px solid transparent; padding: 8px 14px; border-radius: 9px; font-size: 0.88rem; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; transition: filter 0.2s var(--ease), transform 0.1s var(--ease), background-color 0.2s var(--ease), border-color 0.2s var(--ease); }
+    /* Sidebar */
+    .sidebar { background: var(--sidebar); border-right: 1px solid var(--card-border); display: flex; flex-direction: column; gap: 6px; padding: 16px 12px; overflow-y: auto; min-height: 0; }
+    .brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 14px; font-weight: 700; font-size: 1.02rem; letter-spacing: -0.01em; color: #fff; }
+    .brand-logo { width: 34px; height: 34px; flex: none; border-radius: 9px; box-shadow: 0 6px 18px rgba(37, 99, 235, 0.35); }
+    .brand-text { display: flex; flex-direction: column; line-height: 1.15; }
+    .brand-badge { color: var(--text-dim); font-size: 0.7rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+    .nav-label { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-dim); font-weight: 700; padding: 10px 10px 4px; }
+    nav { display: flex; flex-direction: column; gap: 2px; }
+    .tab-btn { background: transparent; border: none; color: var(--text-muted); padding: 9px 12px; white-space: nowrap; border-radius: 9px; font-size: 0.9rem; font-weight: 500; transition: color 0.2s var(--ease), background-color 0.2s var(--ease); display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; }
+    .tab-btn .ic { width: 1.15em; height: 1.15em; }
+    .tab-btn:hover { color: #fff; background: rgba(255, 255, 255, 0.05); }
+    .tab-btn.active { color: #fff; background: rgba(37, 99, 235, 0.16); box-shadow: inset 3px 0 0 var(--accent-soft); }
+    .tab-btn.active .ic { color: var(--accent-soft); }
+    .side-foot { margin-top: auto; display: flex; flex-direction: column; gap: 10px; padding-top: 12px; }
+    .side-current { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 11px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; }
+    .side-current .lbl { font-size: 0.68rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 700; }
+    .side-current .val { display: flex; align-items: center; gap: 8px; font-weight: 700; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .side-meta { font-size: 0.72rem; color: var(--text-dim); padding: 0 6px; }
+
+    /* App shell */
+    .app { display: flex; flex-direction: column; min-width: 0; height: 100vh; }
+    .topbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px 24px; border-bottom: 1px solid var(--card-border); background: rgba(3, 8, 18, 0.8); }
+    .page-title { font-size: 1.12rem; font-weight: 700; color: #fff; letter-spacing: -0.01em; display: flex; align-items: center; gap: 8px; }
+    .page-sub { font-size: 0.8rem; color: var(--text-muted); }
+    .header-actions { display: flex; gap: 8px; align-items: center; }
+    main { flex: 1; min-height: 0; padding: 18px 24px; overflow: hidden; }
+    .tab-content { display: none; height: 100%; min-height: 0; }
+    .tab-content.active { display: flex; flex-direction: column; gap: 16px; animation: fadeIn 0.25s var(--ease); }
+    .scroll-y { overflow-y: auto; min-height: 0; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+    /* Buttons */
+    .btn { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; border: 1px solid transparent; padding: 7px 14px; border-radius: 9px; font-size: 0.86rem; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; white-space: nowrap; transition: filter 0.2s var(--ease), transform 0.1s var(--ease), background-color 0.2s var(--ease), border-color 0.2s var(--ease); }
     .btn:active { transform: scale(0.97); }
     .btn:hover { filter: brightness(1.12); }
     .btn:disabled { opacity: 0.5; cursor: not-allowed; filter: none; }
     .btn-secondary { background: var(--surface-2); color: var(--text); border-color: var(--border); }
-    .btn-secondary:hover { background: #1d2a42; border-color: #3a4b6b; filter: none; }
+    .btn-secondary:hover { background: #1a3463; border-color: #34548a; filter: none; }
     .btn-sm { padding: 4px 10px; font-size: 0.8rem; min-height: 30px; }
-    .btn-danger { background: rgba(239, 68, 68, 0.14); color: #fca5a5; border-color: rgba(239, 68, 68, 0.4); }
+    .btn-icon { padding: 0; width: 30px; min-height: 30px; }
+    .btn-danger { background: rgba(239, 68, 68, 0.12); color: #fca5a5; border-color: rgba(239, 68, 68, 0.35); }
     .btn-danger:hover { background: var(--danger); color: #fff; filter: none; }
     .btn-success { background: rgba(16, 185, 129, 0.14); color: #6ee7b7; border-color: rgba(16, 185, 129, 0.4); }
     .btn-success:hover { background: var(--success); color: #04261b; filter: none; }
 
-    main { flex: 1; max-width: 1280px; width: 100%; margin: 0 auto; padding: 28px 24px 40px; }
-    .tab-content { display: none; }
-    .tab-content.active { display: block; animation: fadeIn 0.25s var(--ease); }
-    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
-
-    /* Overview stats */
-    .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 26px; }
-    .stat-card { background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0) 60%), var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 18px; display: flex; flex-direction: column; gap: 6px; }
-    .stat-label { font-size: 0.74rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
-    .stat-value { font-size: 1.5rem; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
-    .pulse-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.18), 0 0 12px var(--success); animation: pulse 2s infinite; }
+    /* KPI tiles */
+    .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; flex: none; }
+    .stat-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 14px 16px; display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .stat-ic { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; flex: none; font-size: 1.1rem; }
+    .stat-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .stat-label { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
+    .stat-value { font-size: 1.2rem; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .c-blue { background: rgba(57, 135, 229, 0.15); color: #7cb4f5; }
+    .c-violet { background: rgba(139, 92, 246, 0.16); color: #b9a1fb; }
+    .c-green { background: rgba(16, 185, 129, 0.15); color: #6ee7b7; }
+    .c-amber { background: rgba(245, 158, 11, 0.15); color: #fcd34d; }
+    .c-pink { background: rgba(213, 81, 129, 0.15); color: #f49ac0; }
+    .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.18), 0 0 10px var(--success); animation: pulse 2s infinite; flex: none; }
     @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.45; } 100% { opacity: 1; } }
 
-    /* Profile cards grid */
-    .profiles-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 18px; margin-bottom: 32px; }
-    .profile-card { background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0) 55%), var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 20px; display: flex; flex-direction: column; gap: 14px; position: relative; transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease), transform 0.2s var(--ease); animation: cardIn 0.3s var(--ease) both; }
-    .profile-card:hover { border-color: rgba(107, 149, 245, 0.45); transform: translateY(-2px); box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4); }
+    /* Profile cards */
+    .section-bar { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex: none; }
+    .section-bar h2 { font-size: 0.95rem; color: #fff; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+    .profiles-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; align-content: start; flex: 1; overflow-y: auto; min-height: 0; padding: 2px; }
+    .profile-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 14px; display: flex; flex-direction: column; gap: 10px; position: relative; transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease); animation: cardIn 0.3s var(--ease) both; }
+    .profile-card:hover { border-color: rgba(110, 168, 255, 0.45); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35); }
     @keyframes cardIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
-    .profile-card.is-active { border-color: rgba(107, 149, 245, 0.7); background: linear-gradient(180deg, rgba(63, 111, 224, 0.16) 0%, rgba(17, 24, 39, 0) 60%), var(--card-bg); box-shadow: 0 0 0 1px rgba(107, 149, 245, 0.25), 0 10px 32px rgba(63, 111, 224, 0.18); }
-    .profile-header { display: flex; justify-content: space-between; align-items: flex-start; }
-    .profile-title { display: flex; align-items: center; gap: 10px; }
-    .profile-name { font-size: 1.12rem; font-weight: 700; color: #fff; letter-spacing: -0.01em; }
-    .active-badge { background: rgba(16, 185, 129, 0.14); color: #6ee7b7; border: 1px solid rgba(16, 185, 129, 0.35); font-size: 0.7rem; padding: 2px 9px; border-radius: 999px; font-weight: 600; display: flex; align-items: center; gap: 4px; }
-    .profile-email { font-size: 0.84rem; color: var(--text-muted); display: flex; align-items: center; gap: 5px; overflow-wrap: anywhere; }
-    .tag-pill { background: rgba(167, 139, 250, 0.1); color: #c4b5fd; font-size: 0.72rem; padding: 2px 8px; border-radius: 999px; border: 1px solid rgba(167, 139, 250, 0.3); }
-
-    /* Progress bars */
-    .quota-box { background: rgba(5, 9, 18, 0.55); border: 1px solid #18233a; border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; }
-    .quota-item { display: flex; flex-direction: column; gap: 5px; }
-    .quota-meta { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--text-muted); }
-    .quota-val { font-weight: 600; color: #fff; font-variant-numeric: tabular-nums; }
-    .progress-bar-bg { background: #1a2740; height: 7px; border-radius: 999px; overflow: hidden; width: 100%; }
+    .profile-card.is-active { border-color: rgba(110, 168, 255, 0.7); background: linear-gradient(180deg, rgba(37, 99, 235, 0.13) 0%, rgba(7, 16, 34, 0) 70%), var(--card-bg); box-shadow: 0 0 0 1px rgba(110, 168, 255, 0.2); }
+    .profile-card.is-disabled { opacity: 0.72; }
+    .pc-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .avatar { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; font-weight: 700; color: #fff; flex: none; text-transform: uppercase; }
+    .pc-id { min-width: 0; flex: 1; }
+    .profile-name { font-size: 0.98rem; font-weight: 700; color: #fff; letter-spacing: -0.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .profile-name .alias { color: var(--text-dim); font-size: 0.76rem; font-weight: 500; }
+    .profile-email { font-size: 0.78rem; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .badge { font-size: 0.68rem; padding: 2px 8px; border-radius: 999px; font-weight: 600; display: inline-flex; align-items: center; gap: 5px; flex: none; border: 1px solid; }
+    .badge-green { background: rgba(16, 185, 129, 0.12); color: #6ee7b7; border-color: rgba(16, 185, 129, 0.35); }
+    .badge-muted { background: rgba(148, 163, 184, 0.08); color: var(--text-muted); border-color: var(--border); }
+    .tags { display: flex; gap: 5px; flex-wrap: wrap; }
+    .tag-pill { background: rgba(139, 92, 246, 0.1); color: #c4b5fd; font-size: 0.7rem; padding: 1px 8px; border-radius: 999px; border: 1px solid rgba(139, 92, 246, 0.28); display: inline-flex; align-items: center; gap: 4px; }
+    .quota-box { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; background: rgba(0, 0, 0, 0.35); border: 1px solid #142542; border-radius: 10px; padding: 10px 12px; }
+    .quota-item { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+    .quota-empty { grid-column: 1 / -1; color: var(--text-dim); font-size: 0.8rem; }
+    .quota-meta { display: flex; justify-content: space-between; font-size: 0.74rem; color: var(--text-muted); }
+    .quota-val { font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
+    .progress-bar-bg { background: #132648; height: 6px; border-radius: 999px; overflow: hidden; width: 100%; }
     .progress-bar-fill { height: 100%; border-radius: 999px; transition: width 0.6s var(--ease), background-color 0.4s var(--ease); }
     .fill-green { background: linear-gradient(90deg, #059669, #34d399); }
     .fill-yellow { background: linear-gradient(90deg, #d97706, #fbbf24); }
     .fill-orange { background: linear-gradient(90deg, #ea580c, #fb923c); }
     .fill-red { background: linear-gradient(90deg, #dc2626, #f87171); }
+    .cooldown-text { grid-column: 1 / -1; font-size: 0.76rem; color: var(--accent-soft); display: flex; align-items: center; gap: 5px; }
+    .profile-actions { display: flex; gap: 6px; align-items: center; margin-top: auto; }
+    .profile-actions .spacer { flex: 1; }
+    .in-use { font-size: 0.8rem; color: #34d399; font-weight: 600; display: inline-flex; align-items: center; gap: 5px; }
 
-    .cooldown-text { font-size: 0.8rem; color: var(--accent-soft); display: flex; align-items: center; gap: 4px; }
-    .profile-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: auto; padding-top: 12px; border-top: 1px solid #1a2438; }
-
-    /* Settings section */
-    .settings-container { display: flex; flex-direction: column; gap: 24px; }
-    .settings-section { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 24px; }
-    .section-title { font-size: 1.12rem; font-weight: 700; color: #fff; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; letter-spacing: -0.01em; }
-    .section-desc { font-size: 0.86rem; color: var(--text-muted); margin-bottom: 18px; }
-    .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
-    .form-group { display: flex; flex-direction: column; gap: 6px; }
-    .form-label { font-size: 0.86rem; font-weight: 600; color: #dbe3f0; display: flex; align-items: center; gap: 6px; }
-    .form-hint { font-size: 0.78rem; color: var(--text-muted); }
-    .form-control { background: #0b1220; border: 1px solid var(--border); color: #fff; padding: 10px 12px; border-radius: 9px; font-size: 0.9rem; min-height: 40px; transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease); }
-    .form-control:hover { border-color: #3a4b6b; }
+    /* Cards (settings, stats, features) */
+    .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; }
+    .card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+    .card-title { font-size: 0.95rem; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 8px; letter-spacing: -0.01em; }
+    .card-title .stat-ic { width: 28px; height: 28px; border-radius: 8px; font-size: 0.9rem; }
+    .card-desc { font-size: 0.78rem; color: var(--text-muted); }
+    .card-body { overflow-y: auto; min-height: 0; }
+    .settings-layout { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; align-content: start; }
+    .settings-layout .span-2 { grid-column: span 2; }
+    .settings-layout .tall .card-body { max-height: 420px; }
+    .form-stack { display: flex; flex-direction: column; gap: 12px; }
+    .form-group { display: flex; flex-direction: column; gap: 5px; }
+    .form-label { font-size: 0.8rem; font-weight: 600; color: #cfd8e6; display: flex; align-items: center; gap: 6px; }
+    .form-hint { font-size: 0.74rem; color: var(--text-dim); }
+    .form-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .form-control { background: #050c1b; border: 1px solid var(--border); color: #fff; padding: 7px 10px; border-radius: 8px; font-size: 0.86rem; min-height: 34px; width: 100%; transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease); }
+    .form-control:hover { border-color: #34548a; }
     .form-control:focus { outline: none; border-color: var(--accent-soft); box-shadow: var(--focus); }
-    .form-switch { display: flex; align-items: center; gap: 12px; cursor: pointer; }
+    .form-switch { display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 0.86rem; }
     .form-switch input { display: none; }
-    .switch-slider { width: 44px; height: 24px; background: #2b3952; border-radius: 12px; position: relative; flex: none; transition: background-color 0.2s var(--ease); }
-    .switch-slider::after { content: ''; position: absolute; width: 18px; height: 18px; border-radius: 50%; background: #fff; top: 3px; left: 3px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4); transition: transform 0.25s var(--ease); }
+    .switch-slider { width: 38px; height: 22px; background: #233d6b; border-radius: 11px; position: relative; flex: none; transition: background-color 0.2s var(--ease); }
+    .switch-slider::after { content: ''; position: absolute; width: 16px; height: 16px; border-radius: 50%; background: #fff; top: 3px; left: 3px; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4); transition: transform 0.25s var(--ease); }
     input:checked + .switch-slider { background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
-    input:checked + .switch-slider::after { transform: translateX(20px); }
+    input:checked + .switch-slider::after { transform: translateX(16px); }
+    .setting-row, .fi-row { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 7px 8px; border-radius: 8px; transition: background-color 0.2s var(--ease); }
+    .setting-row + .setting-row { border-top: 1px solid #142542; }
+    .setting-row:hover, .fi-row:hover { background: rgba(255, 255, 255, 0.03); }
+    .setting-row .ft { font-weight: 600; color: #fff; font-family: var(--mono); font-size: 0.82rem; }
+    .setting-row .fd, .fi-group .fd { font-size: 0.74rem; color: var(--text-muted); }
+    .setting-row .form-control { min-width: 150px; }
+    .all-settings-grid { display: grid; grid-template-columns: 1fr 1fr; column-gap: 18px; }
+    .all-settings-grid .setting-row + .setting-row { border-top: none; }
+    .all-settings-grid .setting-row { border-bottom: 1px solid #142542; border-radius: 0; }
+    .fi-group { margin-bottom: 10px; }
+    .fi-group > .ft { font-weight: 600; color: var(--accent-soft); font-size: 0.82rem; margin-bottom: 2px; }
+    .fi-row { font-size: 0.82rem; }
 
-    /* Docs section */
-    .docs-search { margin-bottom: 20px; }
-    .docs-search input { width: 100%; max-width: 600px; padding: 12px 16px; border-radius: 12px; background: #0b1220; border: 1px solid var(--border); color: #fff; font-size: 0.95rem; transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease); }
+    /* Docs */
+    .docs-search input { width: 100%; max-width: 520px; padding: 9px 14px; border-radius: 10px; background: #050c1b; border: 1px solid var(--border); color: #fff; font-size: 0.9rem; }
     .docs-search input:focus { outline: none; border-color: var(--accent-soft); box-shadow: var(--focus); }
-    .docs-grid { display: grid; grid-template-columns: 240px 1fr; gap: 24px; }
-    .docs-nav { position: sticky; top: 84px; height: fit-content; display: flex; flex-direction: column; gap: 2px; }
-    .docs-nav-link { color: var(--text-muted); padding: 8px 12px; border-radius: 9px; text-decoration: none; font-size: 0.9rem; border-left: 2px solid transparent; transition: color 0.2s var(--ease), background-color 0.2s var(--ease), border-color 0.2s var(--ease); }
-    .docs-nav-link:hover, .docs-nav-link.active { color: #fff; background: rgba(107, 149, 245, 0.1); border-left-color: var(--accent-soft); }
-    .docs-body { display: flex; flex-direction: column; gap: 28px; }
-    .docs-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 26px; }
-    .docs-card h2 { color: var(--accent-soft); margin-bottom: 12px; font-size: 1.25rem; display: flex; align-items: center; gap: 8px; letter-spacing: -0.01em; }
-    .docs-card p { font-size: 0.92rem; line-height: 1.65; color: #cbd5e1; margin-bottom: 14px; }
-    .cmd-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.88rem; }
-    .cmd-table th, .cmd-table td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #1a2438; }
-    .cmd-table th { background: #0d1524; color: var(--text-muted); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; }
+    .docs-grid { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 18px; flex: 1; min-height: 0; }
+    .docs-nav { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
+    .docs-nav-link { color: var(--text-muted); padding: 7px 12px; border-radius: 8px; text-decoration: none; font-size: 0.86rem; border-left: 2px solid transparent; transition: color 0.2s var(--ease), background-color 0.2s var(--ease), border-color 0.2s var(--ease); }
+    .docs-nav-link:hover, .docs-nav-link.active { color: #fff; background: rgba(110, 168, 255, 0.1); border-left-color: var(--accent-soft); }
+    .docs-body { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; overflow-y: auto; min-height: 0; align-content: start; }
+    .docs-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 18px; }
+    .docs-card.wide { grid-column: 1 / -1; }
+    .docs-card h2 { color: var(--accent-soft); margin-bottom: 10px; font-size: 1rem; display: flex; align-items: center; gap: 8px; }
+    .docs-card p { font-size: 0.86rem; line-height: 1.6; color: #cbd5e1; margin-bottom: 10px; }
+    .cmd-table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+    .cmd-table th, .cmd-table td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #142542; }
+    .cmd-table th { background: #071228; color: var(--text-muted); font-weight: 600; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; position: sticky; top: 0; z-index: 1; }
     .cmd-table tr:hover td { background: rgba(255, 255, 255, 0.025); }
-    .cmd-code { background: rgba(56, 189, 248, 0.1); color: #7dd3fc; padding: 3px 7px; border-radius: 6px; font-family: var(--mono); font-size: 0.82rem; }
+    .cmd-code { background: rgba(56, 189, 248, 0.1); color: #7dd3fc; padding: 2px 6px; border-radius: 6px; font-family: var(--mono); font-size: 0.8rem; }
 
     /* Modal */
     .modal-backdrop { position: fixed; inset: 0; background: rgba(3, 6, 14, 0.72); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); display: none; justify-content: center; align-items: center; z-index: 200; }
     .modal-backdrop.show { display: flex; }
-    .modal-box { background: var(--card-bg); border: 1px solid var(--border); border-radius: 18px; width: 90%; max-width: 480px; padding: 24px; display: flex; flex-direction: column; gap: 16px; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6); }
+    .modal-box { background: var(--card-bg); border: 1px solid var(--border); border-radius: 16px; width: 90%; max-width: 460px; padding: 22px; display: flex; flex-direction: column; gap: 14px; box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6); }
     .modal-header { display: flex; justify-content: space-between; align-items: center; }
-    .modal-title { font-size: 1.12rem; font-weight: 700; color: #fff; }
-    .modal-close { background: none; border: none; color: var(--text-muted); font-size: 1.4rem; width: 36px; height: 36px; border-radius: 9px; transition: background-color 0.2s var(--ease), color 0.2s var(--ease); }
+    .modal-title { font-size: 1.05rem; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 8px; }
+    .modal-close { background: none; border: none; color: var(--text-muted); font-size: 1.4rem; width: 34px; height: 34px; border-radius: 8px; }
     .modal-close:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
 
-    /* Toast */
-    #toast { position: fixed; bottom: 24px; right: 24px; background: var(--surface-2); color: #fff; border: 1px solid var(--border); border-left: 3px solid var(--accent-soft); padding: 12px 20px; border-radius: 12px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55); z-index: 999; opacity: 0; visibility: hidden; transform: translateY(16px); transition: opacity 0.25s var(--ease), transform 0.25s var(--ease), visibility 0s linear 0.25s; }
-    #toast.show { opacity: 1; visibility: visible; transform: none; transition: opacity 0.25s var(--ease), transform 0.25s var(--ease), visibility 0s; }
+    .info-btn { background: none; border: none; color: var(--text-dim); width: 18px; height: 18px; padding: 0; border-radius: 50%; display: inline-grid; place-items: center; vertical-align: middle; flex: none; font-size: 0.8rem; transition: color 0.15s var(--ease), background-color 0.15s var(--ease); }
+    .info-btn:hover, .info-btn[aria-expanded="true"] { color: var(--accent-soft); background: rgba(110, 168, 255, 0.14); }
+    .help-pop { position: fixed; z-index: 300; max-width: 320px; background: #08132a; border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; font-size: 0.82rem; line-height: 1.55; color: #cbd5e1; box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55); display: none; }
+    .help-pop.show { display: block; animation: fadeIn 0.15s var(--ease); }
+    .help-pop b { display: block; color: #fff; font-family: var(--mono); font-size: 0.8rem; margin-bottom: 4px; }
+    .path-row { display: flex; gap: 6px; }
+    .path-row .form-control { flex: 1; min-width: 0; }
 
+    /* Toast */
+    #toast { position: fixed; bottom: 20px; right: 20px; background: var(--surface-2); color: #fff; border: 1px solid var(--border); border-left: 3px solid var(--accent-soft); padding: 11px 18px; border-radius: 10px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55); z-index: 999; opacity: 0; visibility: hidden; transform: translateY(16px); transition: opacity 0.25s var(--ease), transform 0.25s var(--ease), visibility 0s linear 0.25s; }
+    #toast.show { opacity: 1; visibility: visible; transform: none; transition: opacity 0.25s var(--ease), transform 0.25s var(--ease), visibility 0s; }
 
     /* Stats & charts (categorical slots validated against #111827) */
     @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; } }
-    :root { --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767; --grid: #1f2937; }
-    .chart-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 20px; margin-bottom: 20px; }
-    .chart-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
-    .chart-title { font-size: 1.02rem; font-weight: 700; color: #fff; letter-spacing: -0.01em; }
-    .chart-sub { font-size: 0.8rem; color: var(--text-muted); }
+    .stats-layout { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; align-content: start; }
+    .stats-layout .span-2 { grid-column: span 2; }
+    .stats-layout .span-3 { grid-column: 1 / -1; }
+    .chart-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: var(--radius); padding: 16px; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+    .chart-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .chart-head .form-control { width: auto; }
+    .chart-title { font-size: 0.95rem; font-weight: 700; color: #fff; letter-spacing: -0.01em; display: flex; align-items: center; gap: 8px; }
+    .chart-sub { font-size: 0.76rem; color: var(--text-muted); }
     .chart-wrap { position: relative; width: 100%; }
     .chart-wrap svg { width: 100%; height: auto; display: block; }
-    .chart-wrap text { fill: var(--text-muted); font-size: 11px; }
-    .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.82rem; color: #cbd5e1; }
+    .chart-wrap text { fill: var(--text-muted); font-size: 13px; }
+    #forecast-table td, #history-table td:nth-child(-n+4), #cmd-tbody td:first-child { white-space: nowrap; }
+    .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 0.78rem; color: #cbd5e1; }
     .legend span { display: inline-flex; align-items: center; gap: 6px; }
     .legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
-    .viz-tip { position: absolute; pointer-events: none; background: #0b1220; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; font-size: 0.8rem; color: #fff; display: none; white-space: nowrap; z-index: 5; box-shadow: 0 8px 22px rgba(0, 0, 0, 0.55); }
+    .viz-tip { position: absolute; pointer-events: none; background: #050c1b; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; font-size: 0.8rem; color: #fff; display: none; white-space: nowrap; z-index: 5; box-shadow: 0 8px 22px rgba(0, 0, 0, 0.55); }
     .viz-tip i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; margin-right: 6px; }
-    .empty-state { color: #7a8aa3; font-size: 0.9rem; padding: 28px 0; text-align: center; }
-    .chart-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 20px; }
-    .chart-grid2 .chart-card { margin-bottom: 0; }
-    .tbl-wrap { overflow-x: auto; }
+    .draw { stroke-dasharray: 1; stroke-dashoffset: 1; animation: draw 1.1s var(--ease) forwards; }
+    @keyframes draw { to { stroke-dashoffset: 0; } }
+    .fade-in { animation: fadeOnly 1.1s var(--ease) both; }
+    @keyframes fadeOnly { from { opacity: 0; } }
+    .grow { transform-box: fill-box; transform-origin: 50% 100%; animation: growY 0.6s var(--ease) both; }
+    @keyframes growY { from { transform: scaleY(0); } }
+    @keyframes growX { from { width: 0; } }
+    .hover-dot { transition: cx 0.12s var(--ease), cy 0.12s var(--ease); }
+    .hbar-row { display: grid; grid-template-columns: 20px minmax(0, 110px) 1fr 34px; gap: 10px; align-items: center; font-size: 0.84rem; padding: 6px 4px; border-radius: 8px; transition: background-color 0.15s var(--ease); }
+    .hbar-row:hover { background: rgba(255, 255, 255, 0.03); }
+    .hbar-rank { color: var(--text-dim); font-variant-numeric: tabular-nums; font-size: 0.76rem; }
+    .hbar-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #e5e7eb; display: flex; align-items: center; gap: 7px; }
+    .hbar-name i, .sw { width: 8px; height: 8px; border-radius: 3px; flex: none; display: inline-block; }
+    .hbar-track, .mini-bar { height: 8px; background: #132648; border-radius: 999px; overflow: hidden; }
+    .hbar-track i, .mini-bar i { display: block; height: 100%; border-radius: 999px; animation: growX 0.8s var(--ease) both; }
+    .hbar-val { text-align: right; color: #fff; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .mini { display: flex; align-items: center; gap: 8px; min-width: 120px; }
+    .mini .mini-bar { flex: 1; min-width: 56px; height: 6px; }
+    .mini b { font-weight: 600; color: #fff; min-width: 34px; text-align: right; font-variant-numeric: tabular-nums; }
+    .pill { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 999px; font-size: 0.74rem; font-weight: 600; border: 1px solid; white-space: nowrap; }
+    .pill-red { color: #fca5a5; background: rgba(239, 68, 68, 0.12); border-color: rgba(239, 68, 68, 0.35); }
+    .pill-orange { color: #fdba74; background: rgba(249, 115, 22, 0.12); border-color: rgba(249, 115, 22, 0.35); }
+    .pill-yellow { color: #fcd34d; background: rgba(245, 158, 11, 0.12); border-color: rgba(245, 158, 11, 0.35); }
+    .pill-green { color: #6ee7b7; background: rgba(16, 185, 129, 0.12); border-color: rgba(16, 185, 129, 0.35); }
+    .pill-blue { color: #93c5fd; background: rgba(57, 135, 229, 0.12); border-color: rgba(57, 135, 229, 0.35); }
+    .pill-violet { color: #c4b5fd; background: rgba(139, 92, 246, 0.12); border-color: rgba(139, 92, 246, 0.35); }
+    .muted { color: var(--text-muted); }
+    .cmd-table td { font-variant-numeric: tabular-nums; }
+    .cmd-table tbody tr { transition: background-color 0.15s var(--ease); }
+    .empty-state { color: var(--text-dim); font-size: 0.86rem; padding: 22px 0; text-align: center; }
+    .tbl-wrap { overflow: auto; max-height: 280px; }
 
     /* All features */
-    .feat-intro { font-size: 0.88rem; color: var(--text-muted); margin-bottom: 16px; }
-    .feat-out { background: #050912; border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 20px; font-family: var(--mono); font-size: 0.82rem; color: #e5e7eb; white-space: pre-wrap; max-height: 320px; overflow: auto; position: sticky; top: 76px; z-index: 4; }
+    .feat-layout { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; flex: 1; min-height: 0; }
+    .feat-main { overflow-y: auto; min-height: 0; padding-right: 4px; }
+    .feat-side { display: flex; flex-direction: column; min-height: 0; }
+    .feat-side .card { flex: 1; }
+    .feat-intro { font-size: 0.8rem; color: var(--text-muted); }
+    .feat-out { background: #020611; border: 1px solid var(--border); border-radius: 10px; padding: 12px; font-family: var(--mono); font-size: 0.78rem; color: #e5e7eb; white-space: pre-wrap; flex: 1; min-height: 120px; overflow: auto; }
     .feat-out.err { border-color: var(--danger); }
-    .quick-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 22px; }
-    .feat-group { margin-bottom: 26px; }
-    .feat-group h3 { font-size: 1.02rem; color: #fff; margin-bottom: 12px; letter-spacing: -0.01em; }
-    .feat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
-    .setting-row, .fi-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 8px 10px; border-radius: 10px; transition: background-color 0.2s var(--ease); }
-    .setting-row:hover, .fi-row:hover { background: rgba(255, 255, 255, 0.04); }
-    .setting-row .ft { font-weight: 600; color: #fff; font-family: var(--mono); }
-    .setting-row .fd, .fi-group .fd { font-size: 0.8rem; color: var(--text-muted); }
-    .setting-row .form-control { min-width: 160px; }
-    .fi-group { margin-bottom: 12px; }
-    .fi-group > .ft { font-weight: 600; color: var(--accent-soft); margin-bottom: 4px; }
-    .feat-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 8px; transition: border-color 0.2s var(--ease); }
-    .feat-card:hover { border-color: rgba(107, 149, 245, 0.4); }
-    .feat-card .ft { font-weight: 600; color: #fff; font-size: 0.92rem; }
-    .feat-card .fd { font-size: 0.78rem; color: var(--text-muted); }
-    .feat-card .fc { font-family: var(--mono); font-size: 0.75rem; color: #7dd3fc; }
-    .feat-card .form-control { padding: 7px 10px; font-size: 0.85rem; min-height: 34px; }
-    .feat-card label.flag { font-size: 0.82rem; color: #cbd5e1; display: flex; gap: 6px; align-items: center; }
-    @media (max-width: 720px) { .chart-grid2 { grid-template-columns: 1fr; } header { flex-wrap: wrap; gap: 10px; padding: 12px 16px; } main { padding: 20px 16px 32px; } .docs-grid { grid-template-columns: 1fr; } .docs-nav { position: static; flex-direction: row; flex-wrap: wrap; } .profiles-grid { grid-template-columns: 1fr; } }
+    .quick-row { display: flex; flex-wrap: wrap; gap: 6px; }
+    .feat-group { margin-bottom: 18px; }
+    .feat-group h3 { font-size: 0.9rem; color: #fff; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+    .feat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
+    .feat-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 11px; padding: 12px; display: flex; flex-direction: column; gap: 7px; transition: border-color 0.2s var(--ease); }
+    .feat-card:hover { border-color: rgba(110, 168, 255, 0.4); }
+    .feat-card .ft { font-weight: 600; color: #fff; font-size: 0.86rem; }
+    .feat-card .fd { font-size: 0.74rem; color: var(--text-muted); }
+    .feat-card .fc { font-family: var(--mono); font-size: 0.72rem; color: #7dd3fc; }
+    .feat-card .form-control { padding: 6px 9px; font-size: 0.82rem; min-height: 32px; }
+    .feat-card label.flag { font-size: 0.8rem; color: #cbd5e1; display: flex; gap: 6px; align-items: center; }
 
-    .ic { width: 1.1em; height: 1.1em; vertical-align: -0.2em; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-    footer { background: rgba(10, 14, 23, 0.6); border-top: 1px solid var(--card-border); padding: 16px; text-align: center; font-size: 0.82rem; color: var(--text-muted); }
+    @media (max-width: 1280px) {
+      .settings-layout { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .all-settings-grid { grid-template-columns: 1fr; }
+      .docs-body { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 1100px) {
+      body { grid-template-columns: 64px minmax(0, 1fr); }
+      .sidebar { padding: 14px 8px; align-items: center; }
+      .brand-text, .nav-label, .tab-btn .lbl, .side-foot { display: none; }
+      .brand { padding: 4px 0 12px; }
+      .tab-btn { justify-content: center; padding: 10px; }
+      .feat-layout { grid-template-columns: minmax(0, 1fr) 300px; }
+      .stats-layout { grid-template-columns: 1fr 1fr; }
+      .stats-layout .span-2, .stats-layout .span-3 { grid-column: 1 / -1; }
+    }
+    @media (max-width: 760px) {
+      body { display: block; height: auto; overflow: auto; }
+      .sidebar { flex-direction: row; position: sticky; top: 0; z-index: 50; padding: 8px 12px; overflow-x: auto; }
+      .sidebar nav { flex-direction: row; }
+      .brand { padding: 0 8px 0 0; }
+      .app, main { height: auto; overflow: visible; }
+      main { padding: 16px; }
+      .topbar { padding: 12px 16px; flex-wrap: wrap; }
+      .tab-content.active { height: auto; }
+      .profiles-grid, .feat-main, .docs-body, .settings-layout, .stats-layout { overflow: visible; }
+      .settings-layout, .stats-layout, .feat-layout, .docs-grid, .docs-body, .form-row2 { grid-template-columns: 1fr; }
+      .settings-layout .span-2 { grid-column: auto; }
+      .docs-nav { flex-direction: row; flex-wrap: wrap; }
+      .feat-out { max-height: 260px; }
+      .stats-row { grid-template-columns: 1fr 1fr; }
+      .stat-card { padding: 12px; }
+      .stat-ic { display: none; }
+    }
   </style>
 </head>
 <body>
 
-  <header>
+  <aside class="sidebar">
     <div class="brand">
-      <span>🔀 claude-swap</span>
-      <span class="brand-badge">Web UI</span>
+      <svg class="brand-logo" viewBox="0 0 64 64" aria-hidden="true"><defs><linearGradient id="cs-g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3b82f6"/><stop offset="1" stop-color="#0b2a6b"/></linearGradient></defs><rect width="64" height="64" rx="15" fill="url(#cs-g)"/><path d="M14 24h32M39 17l7 7-7 7M50 40H18M25 33l-7 7 7 7" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="52" cy="11" r="5" fill="#D97757"/></svg>
+      <span class="brand-text"><span>claude-swap</span><span class="brand-badge">Web UI</span></span>
     </div>
+    <div class="nav-label">Tổng quan</div>
     <nav>
-      <button class="tab-btn active" onclick="switchTab('dashboard')">📊 Profiles</button>
-      <button class="tab-btn" onclick="switchTab('stats')">📈 Thống kê</button>
-      <button class="tab-btn" onclick="switchTab('features')">🧰 Tính năng</button>
-      <button class="tab-btn" onclick="switchTab('settings')">⚙️ Cấu hình</button>
-      <button class="tab-btn" onclick="switchTab('docs')">📖 Hướng dẫn</button>
+      <button class="tab-btn active" data-tab="dashboard" title="Profiles" onclick="switchTab('dashboard')">👥<span class="lbl">Profiles</span></button>
+      <button class="tab-btn" data-tab="stats" title="Thống kê" onclick="switchTab('stats')">📈<span class="lbl">Thống kê</span></button>
     </nav>
+    <div class="nav-label">Quản lý</div>
+    <nav>
+      <button class="tab-btn" data-tab="features" title="Tính năng" onclick="switchTab('features')">🧰<span class="lbl">Tính năng</span></button>
+      <button class="tab-btn" data-tab="settings" title="Cấu hình" onclick="switchTab('settings')">⚙️<span class="lbl">Cấu hình</span></button>
+      <button class="tab-btn" data-tab="docs" title="Hướng dẫn" onclick="switchTab('docs')">📖<span class="lbl">Hướng dẫn</span></button>
+    </nav>
+    <div class="side-foot">
+      <div class="side-current">
+        <span class="lbl">Đang dùng</span>
+        <span class="val"><span class="pulse-dot"></span><span id="side-current">-</span></span>
+      </div>
+      <div class="side-meta">MIT • Node.js zero-deps</div>
+    </div>
+  </aside>
+
+  <div class="app">
+  <header class="topbar">
+    <div>
+      <div class="page-title" id="page-title">Profiles</div>
+      <div class="page-sub" id="page-sub">Tài khoản đã lưu, quota 5 giờ / 7 ngày và chuyển nhanh</div>
+    </div>
     <div class="header-actions">
+      <button class="btn btn-secondary btn-sm btn-icon" title="Làm mới" onclick="loadData()">🔄</button>
       <button class="btn btn-secondary btn-sm" onclick="toggleLanguage()" id="langBtn">🌐 Tiếng Việt</button>
       <button class="btn btn-sm" onclick="showAddModal()">➕ Thêm Profile</button>
     </div>
@@ -435,23 +616,32 @@ export function renderDashboardHtml() {
     <section id="tab-dashboard" class="tab-content active">
       <div class="stats-row">
         <div class="stat-card">
-          <span class="stat-label">Profile Đang Kích Hoạt</span>
-          <div class="stat-value">
-            <span class="pulse-dot"></span>
-            <span id="stat-current">-</span>
+          <span class="stat-ic c-green">👤</span>
+          <div class="stat-body">
+            <span class="stat-label">Profile đang dùng</span>
+            <div class="stat-value"><span class="pulse-dot"></span><span id="stat-current">-</span></div>
           </div>
         </div>
         <div class="stat-card">
-          <span class="stat-label">Tổng Số Tài Khoản</span>
-          <div class="stat-value" id="stat-total">0</div>
+          <span class="stat-ic c-blue">👥</span>
+          <div class="stat-body">
+            <span class="stat-label">Tổng số tài khoản</span>
+            <div class="stat-value" id="stat-total">0</div>
+          </div>
         </div>
         <div class="stat-card">
-          <span class="stat-label">Tự Động Switch</span>
-          <div class="stat-value" id="stat-auto">Tắt</div>
+          <span class="stat-ic c-violet">🤖</span>
+          <div class="stat-body">
+            <span class="stat-label">Tự động switch</span>
+            <div class="stat-value" id="stat-auto">Tắt</div>
+          </div>
         </div>
         <div class="stat-card">
-          <span class="stat-label">Cân Bằng Tải</span>
-          <div class="stat-value" id="stat-balance">Tắt</div>
+          <span class="stat-ic c-amber">⚖️</span>
+          <div class="stat-body">
+            <span class="stat-label">Cân bằng tải</span>
+            <div class="stat-value" id="stat-balance">Tắt</div>
+          </div>
         </div>
       </div>
 
@@ -460,210 +650,209 @@ export function renderDashboardHtml() {
       </div>
     </section>
 
-
     <!-- TAB: STATS -->
-    <section id="tab-stats" class="tab-content">
+    <section id="tab-stats" class="tab-content scroll-y">
       <div class="stats-row" id="stats-tiles"></div>
 
-      <div class="chart-card">
-        <div class="chart-head">
-          <div>
-            <div class="chart-title" id="usage-title">Mức dùng quota theo thời gian</div>
-            <div class="chart-sub">Mỗi điểm là một lần đo quota: đủ mọi lần trong 6 giờ gần nhất, cũ hơn thì mỗi giờ một điểm, giữ 7 ngày</div>
+      <div class="stats-layout">
+        <div class="chart-card span-2">
+          <div class="chart-head">
+            <div>
+              <div class="chart-title" id="usage-title">📈 Mức dùng quota theo thời gian</div>
+              <div class="chart-sub">Đủ mọi lần đo trong 6 giờ gần nhất, cũ hơn mỗi giờ một điểm, giữ 7 ngày</div>
+            </div>
+            <select id="usage-window" class="form-control" onchange="statsKey=''; renderStats()">
+              <option value="util5h">Hạn mức 5 giờ</option>
+              <option value="util7d">Hạn mức 7 ngày</option>
+            </select>
           </div>
-          <select id="usage-window" class="form-control" style="width:auto;" onchange="statsKey=''; renderStats()">
-            <option value="util5h">Hạn mức 5 giờ</option>
-            <option value="util7d">Hạn mức 7 ngày</option>
-          </select>
+          <div class="legend" id="usage-legend"></div>
+          <div class="chart-wrap" id="usage-chart"></div>
         </div>
-        <div class="legend" id="usage-legend"></div>
-        <div class="chart-wrap" id="usage-chart"></div>
-      </div>
-
-      <div class="chart-grid2">
         <div class="chart-card">
           <div class="chart-head">
             <div>
-              <div class="chart-title">Số lần chuyển profile mỗi ngày</div>
+              <div class="chart-title">🎯 Profile được chuyển đến nhiều nhất</div>
+              <div class="chart-sub">Trong lịch sử đã lưu (tối đa 100 lần gần nhất)</div>
+            </div>
+          </div>
+          <div class="chart-wrap" id="dest-chart"></div>
+        </div>
+
+        <div class="chart-card">
+          <div class="chart-head">
+            <div>
+              <div class="chart-title">📊 Số lần chuyển mỗi ngày</div>
               <div class="chart-sub">14 ngày gần nhất, theo kiểu chuyển</div>
             </div>
           </div>
           <div class="legend" id="daily-legend"></div>
           <div class="chart-wrap" id="daily-chart"></div>
         </div>
-        <div class="chart-card">
-          <div class="chart-head">
-            <div>
-              <div class="chart-title">Profile được chuyển đến nhiều nhất</div>
-              <div class="chart-sub">Trong lịch sử đã lưu (tối đa 100 lần gần nhất)</div>
-            </div>
-          </div>
-          <div class="chart-wrap" id="dest-chart"></div>
+        <div class="chart-card span-2">
+          <div class="chart-head"><div class="chart-title">⏳ Dự báo cạn quota 5 giờ & ngân sách 7 ngày</div></div>
+          <div class="tbl-wrap"><table class="cmd-table" id="forecast-table"></table></div>
         </div>
-      </div>
 
-      <div class="chart-card" style="margin-top:20px;">
-        <div class="chart-head"><div class="chart-title">📈 Dự báo cạn quota 5 giờ & ngân sách 7 ngày</div></div>
-        <div class="tbl-wrap"><table class="cmd-table" id="forecast-table"></table></div>
-      </div>
-
-      <div class="chart-card">
-        <div class="chart-head"><div>
-          <div class="chart-title">📁 Usage theo dự án</div>
-          <div class="chart-sub">7 ngày qua, ước tính từ % quota 5h tăng thêm khi đang làm ở thư mục đó</div>
-        </div></div>
-        <div class="tbl-wrap"><table class="cmd-table" id="project-table"></table></div>
-      </div>
-
-      <div class="chart-card">
-        <div class="chart-head"><div class="chart-title">📜 Lịch sử chuyển profile gần nhất</div></div>
-        <div class="tbl-wrap"><table class="cmd-table" id="history-table"></table></div>
+        <div class="chart-card">
+          <div class="chart-head"><div>
+            <div class="chart-title">📁 Usage theo dự án</div>
+            <div class="chart-sub">7 ngày qua, ước tính từ % quota 5h tăng thêm ở thư mục đó</div>
+          </div></div>
+          <div class="tbl-wrap"><table class="cmd-table" id="project-table"></table></div>
+        </div>
+        <div class="chart-card span-2">
+          <div class="chart-head"><div class="chart-title">📜 Lịch sử chuyển profile gần nhất</div></div>
+          <div class="tbl-wrap"><table class="cmd-table" id="history-table"></table></div>
+        </div>
       </div>
     </section>
 
     <!-- TAB: ALL FEATURES -->
     <section id="tab-features" class="tab-content">
-      <p class="feat-intro">Mọi lệnh <span class="cmd-code">/profile</span> đều có ở đây. Điền vào ô rồi bấm chạy, kết quả hiện ở khung bên dưới. Auto-switch, cân bằng tải, che email và đặt URL webhook chỉnh ở tab ⚙️ Cấu hình (URL webhook là bí mật nên không đi qua dòng lệnh). Mật khẩu sao lưu được chuyển qua stdin và không lưu ở đâu cả.</p>
-      <pre class="feat-out" id="cli-output">Kết quả lệnh sẽ hiện ở đây.</pre>
-      <div class="feat-group">
-        <h3>👀 Xem nhanh</h3>
-        <div class="quick-row" id="quick-row"></div>
+      <div class="feat-layout">
+        <div class="feat-main">
+          <div class="feat-group">
+            <h3>👀 Xem nhanh</h3>
+            <div class="quick-row" id="quick-row"></div>
+          </div>
+          <div id="features-container"></div>
+        </div>
+        <div class="feat-side">
+          <div class="card">
+            <div class="card-head">
+              <div class="card-title"><span class="stat-ic c-blue">💻</span>Kết quả lệnh</div>
+            </div>
+            <p class="feat-intro">Mọi lệnh <span class="cmd-code">/profile</span> đều có ở đây. Auto-switch, cân bằng tải, che email và URL webhook chỉnh ở tab ⚙️ Cấu hình (URL webhook là bí mật nên không đi qua dòng lệnh). Mật khẩu sao lưu đi qua stdin, không lưu ở đâu cả.</p>
+            <pre class="feat-out" id="cli-output">Kết quả lệnh sẽ hiện ở đây.</pre>
+          </div>
+        </div>
       </div>
-      <div id="features-container"></div>
     </section>
 
     <!-- TAB 2: SETTINGS -->
-    <section id="tab-settings" class="tab-content">
-      <div class="settings-container">
-        <div class="settings-section">
-          <div class="section-title">🧰 Toàn Bộ Cài Đặt</div>
-          <div class="section-desc">Mọi cài đặt của /profile settings với giá trị hiện tại. Đổi một ô là lưu ngay, không cần bấm Lưu.</div>
-          <div id="all-settings"></div>
-        </div>
-        <div class="settings-section">
-          <div class="section-title">🧩 Cấu Hình Đang Có</div>
-          <div class="section-desc">Alias, tag, liên kết thư mục và nhánh, model, lịch, mượn tạm, ngân sách, webhook. Bấm ✕ để gỡ; thêm mới ở tab Tính năng.</div>
-          <div id="feature-items"></div>
-        </div>
+    <section id="tab-settings" class="tab-content scroll-y">
+      <div class="section-bar">
+        <h2>⚙️ Cấu hình nhanh</h2>
+        <button class="btn btn-sm" onclick="saveAllConfigs()">💾 Lưu cấu hình</button>
+      </div>
+      <div class="settings-layout">
         <!-- Auto switch config -->
-        <div class="settings-section">
-          <div class="section-title">🤖 Tự Động Chuyển Đổi (Auto-Switching)</div>
-          <div class="section-desc">Tự động chuyển tài khoản khi chạm ngưỡng hạn mức token hoặc bị HTTP 429 rate limit.</div>
-          <div class="form-grid">
-            <div class="form-group">
-              <label class="form-label">Trạng Thái Auto-Switch</label>
-              <label class="form-switch">
-                <input type="checkbox" id="cfg-auto-enabled">
-                <span class="switch-slider"></span>
-                <span id="cfg-auto-enabled-label">Bật</span>
-              </label>
-              <span class="form-hint">Kích hoạt kiểm tra quota trước mỗi prompt.</span>
+        <div class="card">
+          <div class="card-head"><div>
+            <div class="card-title"><span class="stat-ic c-violet">🤖</span>Auto-switch</div>
+            <div class="card-desc">Tự chuyển tài khoản khi chạm ngưỡng quota hoặc bị 429.</div>
+          </div></div>
+          <div class="form-stack">
+            <label class="form-switch">
+              <input type="checkbox" id="cfg-auto-enabled">
+              <span class="switch-slider"></span>
+              <span id="cfg-auto-enabled-label">Kiểm tra quota trước mỗi prompt</span> <button type="button" class="info-btn" data-help="auto.enabled" title="Giải thích auto.enabled" aria-label="Giải thích auto.enabled">ℹ</button>
+            </label>
+            <div class="form-row2">
+              <div class="form-group">
+                <label class="form-label">Ngưỡng 5 giờ (%) <button type="button" class="info-btn" data-help="auto.threshold" title="Giải thích auto.threshold" aria-label="Giải thích auto.threshold">ℹ</button></label>
+                <input type="number" id="cfg-auto-threshold" class="form-control" min="50" max="99" value="95">
+              </div>
+              <div class="form-group">
+                <label class="form-label">Bảo vệ 7 ngày (%) <button type="button" class="info-btn" data-help="auto.safeguard" title="Giải thích auto.safeguard" aria-label="Giải thích auto.safeguard">ℹ</button></label>
+                <input type="number" id="cfg-auto-safeguard" class="form-control" min="50" max="95" value="85">
+              </div>
             </div>
-            <div class="form-group">
-              <label class="form-label">Ngưỡng Chuyển (% Token 5 Giờ)</label>
-              <input type="number" id="cfg-auto-threshold" class="form-control" min="50" max="99" value="95">
-              <span class="form-hint">Mặc định: 95%. Hệ thống sẽ tự chuyển profile khi vượt ngưỡng này.</span>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Bảo Vệ Hạn Mức 7 Ngày (%)</label>
-              <input type="number" id="cfg-auto-safeguard" class="form-control" min="50" max="95" value="85">
-              <span class="form-hint">Mặc định: 85%. Không chuyển vào tài khoản có quota 7 ngày chạm ngưỡng này.</span>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Tự Động Quay Về Profile Chính</label>
-              <label class="form-switch">
-                <input type="checkbox" id="cfg-auto-return">
-                <span class="switch-slider"></span>
-                <span>Auto-Return</span>
-              </label>
-              <span class="form-hint">Tự động switch lại profile chính khi token 5h đã hồi phục.</span>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Profile Chính (Primary)</label>
-              <select id="cfg-auto-primary" class="form-control">
-                <option value="">(Tự động)</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Giới Hạn Trong Nhóm (Pool Tag)</label>
-              <input type="text" id="cfg-auto-pool" class="form-control" placeholder="all hoặc tên tag">
+            <label class="form-switch">
+              <input type="checkbox" id="cfg-auto-return">
+              <span class="switch-slider"></span>
+              <span>Tự quay về profile chính khi quota hồi</span> <button type="button" class="info-btn" data-help="auto.return" title="Giải thích auto.return" aria-label="Giải thích auto.return">ℹ</button>
+            </label>
+            <div class="form-row2">
+              <div class="form-group">
+                <label class="form-label">Profile chính <button type="button" class="info-btn" data-help="auto.primary" title="Giải thích auto.primary" aria-label="Giải thích auto.primary">ℹ</button></label>
+                <select id="cfg-auto-primary" class="form-control">
+                  <option value="">(Tự động)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Nhóm (pool tag) <button type="button" class="info-btn" data-help="auto.pool" title="Giải thích auto.pool" aria-label="Giải thích auto.pool">ℹ</button></label>
+                <input type="text" id="cfg-auto-pool" class="form-control" placeholder="all hoặc tên tag">
+              </div>
             </div>
           </div>
         </div>
 
-        <!-- Load balancing -->
-        <div class="settings-section">
-          <div class="section-title">⚖️ Cân Bằng Tải Quota (Smart Load Balancing)</div>
-          <div class="section-desc">Chủ động phân bổ đều lưu lượng sử dụng giữa các tài khoản, tránh để 1 tài khoản cạn sạch trước.</div>
-          <div class="form-grid">
+        <!-- Load balancing + masking -->
+        <div class="card">
+          <div class="card-head"><div>
+            <div class="card-title"><span class="stat-ic c-amber">⚖️</span>Cân bằng tải</div>
+            <div class="card-desc">Chủ động dàn đều mức dùng giữa các tài khoản.</div>
+          </div></div>
+          <div class="form-stack">
+            <label class="form-switch">
+              <input type="checkbox" id="cfg-balance-enabled">
+              <span class="switch-slider"></span>
+              <span>Kích hoạt</span>
+            </label>
             <div class="form-group">
-              <label class="form-label">Trạng Thái Cân Bằng Tải</label>
-              <label class="form-switch">
-                <input type="checkbox" id="cfg-balance-enabled">
-                <span class="switch-slider"></span>
-                <span>Kích hoạt</span>
-              </label>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Thuật Toán Phân Phối</label>
+              <label class="form-label">Thuật toán <button type="button" class="info-btn" data-help="balance" title="Giải thích balance" aria-label="Giải thích balance">ℹ</button></label>
               <select id="cfg-balance-mode" class="form-control">
-                <option value="least-used">Least-Used (Ưu tiên tài khoản còn nhiều token nhất)</option>
-                <option value="round-robin">Round-Robin (Luân phiên xoay vòng từng tài khoản)</option>
+                <option value="least-used">Least-Used (còn nhiều quota nhất)</option>
+                <option value="round-robin">Round-Robin (luân phiên)</option>
               </select>
             </div>
             <div class="form-group">
-              <label class="form-label">Nhóm Áp Dụng (Pool Tag)</label>
+              <label class="form-label">Nhóm (pool tag) <button type="button" class="info-btn" data-help="balance.pool" title="Giải thích balance.pool" aria-label="Giải thích balance.pool">ℹ</button></label>
               <input type="text" id="cfg-balance-pool" class="form-control" placeholder="all hoặc tên tag">
+            </div>
+            <div class="form-group">
+              <label class="form-label">🙈 Bảo mật</label>
+              <label class="form-switch">
+                <input type="checkbox" id="cfg-masking">
+                <span class="switch-slider"></span>
+                <span>Che email dạng us***@domain.com</span> <button type="button" class="info-btn" data-help="mask" title="Giải thích mask" aria-label="Giải thích mask">ℹ</button>
+              </label>
             </div>
           </div>
         </div>
 
         <!-- Webhook -->
-        <div class="settings-section">
-          <div class="section-title">🔔 Webhook Cảnh Báo Từ Xa (Telegram / Discord / Slack)</div>
-          <div class="section-desc">Gửi thông báo tức thì đến điện thoại khi chạm ngưỡng hạn ngạch hoặc đổi tài khoản. URL webhook chứa khóa bí mật nên dashboard không bao giờ hiện lại nó: ô trống nghĩa là giữ nguyên, muốn gỡ thì dùng "Gỡ webhook" ở tab 🧰 Tính năng.</div>
-          <div class="form-grid">
+        <div class="card">
+          <div class="card-head"><div>
+            <div class="card-title"><span class="stat-ic c-pink">🔔</span>Webhook cảnh báo <button type="button" class="info-btn" data-help="webhook" title="Giải thích webhook" aria-label="Giải thích webhook">ℹ</button></div>
+            <div class="card-desc">URL chứa khóa bí mật nên không hiện lại: ô trống là giữ nguyên, gỡ ở tab 🧰 Tính năng.</div>
+          </div></div>
+          <div class="form-stack">
             <div class="form-group">
-              <label class="form-label">Telegram Webhook URL</label>
+              <label class="form-label">Telegram</label>
               <input type="text" id="cfg-webhook-telegram" class="form-control" placeholder="https://api.telegram.org/bot.../sendMessage?chat_id=...">
             </div>
             <div class="form-group">
-              <label class="form-label">Discord Webhook URL</label>
+              <label class="form-label">Discord</label>
               <input type="text" id="cfg-webhook-discord" class="form-control" placeholder="https://discord.com/api/webhooks/...">
             </div>
             <div class="form-group">
-              <label class="form-label">Slack Webhook URL</label>
+              <label class="form-label">Slack</label>
               <input type="text" id="cfg-webhook-slack" class="form-control" placeholder="https://hooks.slack.com/services/...">
             </div>
             <div class="form-group">
-              <label class="form-label">Generic Webhook URL</label>
+              <label class="form-label">Generic</label>
               <input type="text" id="cfg-webhook-generic" class="form-control" placeholder="https://example.com/hook">
             </div>
-          </div>
-          <div style="margin-top: 14px;">
-            <button class="btn btn-secondary btn-sm" onclick="sendTestWebhook()">🧪 Gửi Thử Thông Báo (Test Ping)</button>
+            <div><button class="btn btn-secondary btn-sm" onclick="sendTestWebhook()">🧪 Gửi thử</button></div>
           </div>
         </div>
 
-        <!-- Budget & Masking -->
-        <div class="settings-section">
-          <div class="section-title">💰 Ngân Sách & Bảo Mật (Budget & Masking)</div>
-          <div class="section-desc">Kiểm soát chi phí hàng tháng và bảo vệ thông tin email cá nhân.</div>
-          <div class="form-grid">
-            <div class="form-group">
-              <label class="form-label">Che Mờ Email & Token (Masking)</label>
-              <label class="form-switch">
-                <input type="checkbox" id="cfg-masking">
-                <span class="switch-slider"></span>
-                <span>Ẩn thông tin nhạy cảm</span>
-              </label>
-              <span class="form-hint">Ẩn email dạng us***@domain.com khi hiển thị trên màn hình.</span>
-            </div>
-          </div>
+        <div class="card span-2 tall">
+          <div class="card-head"><div>
+            <div class="card-title"><span class="stat-ic c-blue">🔧</span>Toàn bộ cài đặt</div>
+            <div class="card-desc">Mọi cài đặt của /profile settings. Đổi một ô là lưu ngay.</div>
+          </div></div>
+          <div class="card-body"><div id="all-settings" class="all-settings-grid"></div></div>
         </div>
-
-        <div>
-          <button class="btn" style="padding: 10px 24px; font-size: 1rem;" onclick="saveAllConfigs()">💾 Lưu Toàn Bộ Cấu Hình</button>
+        <div class="card tall">
+          <div class="card-head"><div>
+            <div class="card-title"><span class="stat-ic c-green">🧩</span>Cấu hình đang có</div>
+            <div class="card-desc">Alias, tag, liên kết, lịch, ngân sách, webhook. Bấm ✕ để gỡ.</div>
+          </div></div>
+          <div class="card-body"><div id="feature-items"></div></div>
         </div>
       </div>
     </section>
@@ -686,13 +875,13 @@ export function renderDashboardHtml() {
         </div>
 
         <div class="docs-body">
-          <div id="doc-intro" class="docs-card">
+          <div id="doc-intro" class="docs-card wide">
             <h2>🚀 1. Tổng Quan về claude-swap</h2>
             <p><strong>claude-swap</strong> là plugin cao cấp dành cho Claude Code cho phép chuyển đổi nóng giữa nhiều tài khoản (cá nhân, công ty, dự án khách hàng) mà không cần thoát session hay làm gián đoạn ngữ cảnh công việc.</p>
             <p>Toàn bộ kiến trúc được xây dựng thuần túy trên nền tảng <strong>Node.js built-ins (100% Zero-Dependencies)</strong>, xử lý local tức thì và không tốn bất kỳ token model nào.</p>
           </div>
 
-          <div id="doc-commands" class="docs-card">
+          <div id="doc-commands" class="docs-card wide">
             <h2>📋 2. Bảng Tra Cứu Toàn Bộ Câu Lệnh</h2>
             <table class="cmd-table">
               <thead>
@@ -754,7 +943,7 @@ export function renderDashboardHtml() {
             <p>• <strong>Theo nhánh Git:</strong> <span class="cmd-code">/profile bind-branch "feat/*" work</span> hoặc <span class="cmd-code">/profile bind-branch "client-*" personal</span>.</p>
           </div>
 
-          <div id="doc-security" class="docs-card">
+          <div id="doc-security" class="docs-card wide">
             <h2>🔐 7. Bảo Mật & Cách Ly Session Song Song</h2>
             <p>Mỗi profile được lưu trữ tại <span class="cmd-code">~/.config/claude-cli-profiles/&lt;tên&gt;.json</span> với phân quyền <span class="cmd-code">0600</span> nghiêm ngặt:</p>
             <p>• Khi chạy song song bằng <span class="cmd-code">/profile run &lt;tên&gt;</span>, một thư mục cô lập độc lập được tạo tại <span class="cmd-code">~/.config/claude-cli-profiles/.sessions/&lt;tên&gt;</span>, giúp hai cửa sổ terminal chạy hai tài khoản Claude Code cùng lúc mà không bị lẫn lộn token.</p>
@@ -765,6 +954,7 @@ export function renderDashboardHtml() {
       </div>
     </section>
   </main>
+  </div>
 
   <!-- ADD PROFILE MODAL -->
   <div class="modal-backdrop" id="addModal">
@@ -789,10 +979,8 @@ export function renderDashboardHtml() {
   </div>
 
   <div id="toast"></div>
+  <div id="help-pop" class="help-pop" role="tooltip"></div>
 
-  <footer>
-    claude-swap • Mã nguồn mở theo giấy phép MIT • 100% Node.js Zero-Dependencies
-  </footer>
 
   <script>
     let appData = {};
@@ -834,11 +1022,19 @@ export function renderDashboardHtml() {
       t._hide = setTimeout(() => t.classList.remove('show'), 3000);
     }
 
+    const TAB_META = {
+      dashboard: ['Profiles', 'Tài khoản đã lưu, quota 5 giờ / 7 ngày và chuyển nhanh'],
+      stats: ['Thống kê', 'Mức dùng quota, dự báo và lịch sử chuyển profile'],
+      features: ['Tính năng', 'Chạy mọi lệnh /profile ngay trên web'],
+      settings: ['Cấu hình', 'Auto-switch, cân bằng tải, webhook và toàn bộ cài đặt'],
+      docs: ['Hướng dẫn', 'Tra cứu lệnh và cách các tính năng hoạt động'],
+    };
     function switchTab(name) {
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-      event.target.classList.add('active');
-      document.getElementById('tab-' + name).classList.add('active');
+      // by data-tab, not event.target: a click can land on the button's SVG icon
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === 'tab-' + name));
+      document.getElementById('page-title').textContent = TAB_META[name][0];
+      document.getElementById('page-sub').textContent = TAB_META[name][1];
     }
 
     async function loadData() {
@@ -857,6 +1053,7 @@ export function renderDashboardHtml() {
 
     function renderDashboard() {
       document.getElementById('stat-current').innerText = appData.current || '(chưa chọn)';
+      document.getElementById('side-current').innerText = appData.current || '(chưa chọn)';
       document.getElementById('stat-total').innerText = appData.profiles.length;
       document.getElementById('stat-auto').innerText = appData.auto.enabled ? ('Bật (' + appData.auto.threshold + '%)') : 'Tắt';
       document.getElementById('stat-balance').innerText = appData.balance.enabled ? (appData.balance.mode) : 'Tắt';
@@ -917,65 +1114,37 @@ export function renderDashboardHtml() {
         card.className = 'profile-card' + (p.active ? ' is-active' : '');
         card.dataset.name = p.name;
 
-        let q5Html = '<span style="color:#64748b;">(Chưa có dữ liệu)</span>';
-        if (p.quota5h !== null) {
-          q5Html = \`
-            <div class="quota-meta">
-              <span>Hạn mức 5 giờ</span>
-              <span class="quota-val"></span>
-            </div>
-            <div class="progress-bar-bg">
-              <div class="progress-bar-fill" style="width: 0;"></div>
-            </div>
-          \`;
-        }
-
-        let q7Html = '';
-        if (p.quota7d !== null) {
-          q7Html = \`
-            <div class="quota-item" data-q="7d" style="margin-top: 8px;">
-              <div class="quota-meta">
-                <span>Hạn mức 7 ngày</span>
-                <span class="quota-val"></span>
-              </div>
-              <div class="progress-bar-bg">
-                <div class="progress-bar-fill" style="width: 0;"></div>
-              </div>
-            </div>
-          \`;
-        }
-
+        const bar = (label, q) => \`
+              <div class="quota-meta"><span>\${label}</span><span class="quota-val"></span></div>
+              <div class="progress-bar-bg"><div class="progress-bar-fill" style="width: 0;"></div></div>\`;
+        const quotaHtml = p.quota5h === null && p.quota7d === null
+          ? '<div class="quota-empty">Chưa có dữ liệu quota</div>'
+          : '<div class="quota-item" data-q="5h">' + (p.quota5h !== null ? bar('5 giờ', p.quota5h) : '<span class="quota-empty">5 giờ: -</span>') + '</div>' +
+            (p.quota7d !== null ? '<div class="quota-item" data-q="7d">' + bar('7 ngày', p.quota7d) + '</div>' : '');
         const cooldownHtml = p.cooldownSec > 0 ? '<div class="cooldown-text"></div>' : '';
-
-        const tagsHtml = p.tags.map(t => \`<span class="tag-pill">🏷️ \${esc(t)}</span>\`).join(' ');
-        const aliasHtml = p.aliases.length ? \`<span style="color:#94a3b8; font-size:0.8rem;">(alias: \${esc(p.aliases.join(', '))})</span>\` : '';
+        const tagsHtml = p.tags.length ? '<div class="tags">' + p.tags.map(t => '<span class="tag-pill">🏷️ ' + esc(t) + '</span>').join('') + '</div>' : '';
+        const aliasHtml = p.aliases.length ? ' <span class="alias">@' + esc(p.aliases.join(', @')) + '</span>' : '';
+        const badge = p.active ? '<span class="badge badge-green"><span class="pulse-dot"></span>Đang dùng</span>'
+          : p.disabled ? '<span class="badge badge-muted">Auto tắt</span>' : '';
+        const name = esc(p.name);
+        if (p.disabled) card.classList.add('is-disabled');
 
         card.innerHTML = \`
-          <div class="profile-header">
-            <div class="profile-title">
-              <span style="font-size: 1.3rem;">\${p.active ? '🟢' : '⚪'}</span>
-              <div>
-                <div class="profile-name">\${esc(p.name)} \${aliasHtml}</div>
-                <div class="profile-email">👤 \${esc(p.email || 'Chưa liên kết email')}</div>
-              </div>
+          <div class="pc-head">
+            <div class="avatar" style="background:\${profileColor(p.name)}">\${esc(p.name.slice(0, 1))}</div>
+            <div class="pc-id">
+              <div class="profile-name">\${name}\${aliasHtml}</div>
+              <div class="profile-email" title="\${esc(p.email || '')}">\${esc(p.email || 'Chưa liên kết email')}</div>
             </div>
-            \${p.active ? '<span class="active-badge">Active</span>' : ''}
+            \${badge}
           </div>
-
-          <div style="display: flex; gap: 6px; flex-wrap: wrap;">\${tagsHtml}</div>
-
-          <div class="quota-box">
-            <div class="quota-item" data-q="5h">\${q5Html}</div>
-            \${q7Html}
-            \${cooldownHtml}
-          </div>
-
+          \${tagsHtml}
+          <div class="quota-box">\${quotaHtml}\${cooldownHtml}</div>
           <div class="profile-actions">
-            \${!p.active ? \`<button class="btn btn-sm" onclick="doSwap('\${p.name}')">🔀 Chuyển Ngay</button>\` : '<span style="font-size:0.84rem; color:#34d399; font-weight:600;">✓ Đang sử dụng</span>'}
-            <button class="btn btn-secondary btn-sm" onclick="toggleDisable('\${p.name}', \${p.disabled})">
-              \${p.disabled ? 'Bật Auto' : 'Tắt Auto'}
-            </button>
-            <button class="btn btn-secondary btn-sm btn-danger" style="margin-left: auto;" onclick="doDelete('\${p.name}')">Xóa</button>
+            \${!p.active ? \`<button class="btn btn-sm" onclick="doSwap('\${name}')">🔀 Chuyển</button>\` : '<span class="in-use">✓ Đang sử dụng</span>'}
+            <span class="spacer"></span>
+            <button class="btn btn-secondary btn-sm" title="\${p.disabled ? 'Cho auto-switch dùng lại profile này' : 'Không để auto-switch chọn profile này'}" onclick="toggleDisable('\${name}', \${p.disabled})">\${p.disabled ? '▶ Bật auto' : '🚫 Tắt auto'}</button>
+            <button class="btn btn-sm btn-danger btn-icon" title="Xóa \${name}" onclick="doDelete('\${name}')">🗑</button>
           </div>
         \`;
         return card;
@@ -992,8 +1161,13 @@ export function renderDashboardHtml() {
     function dayKey(t) { const d = new Date(t); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
     // color follows the profile (its position in the full list), never its rank in a chart
     function profileColor(name) { const i = (appData.profiles || []).findIndex(p => p.name === name); return i >= 0 && i < SERIES.length ? SERIES[i] : '#64748b'; }
-    function tile(label, value, sub) {
-      return '<div class="stat-card"><span class="stat-label">' + esc(label) + '</span><div class="stat-value">' + esc(value) + '</div>' + (sub ? '<span class="chart-sub">' + esc(sub) + '</span>' : '') + '</div>';
+    function tile(label, value, sub, icon, color) {
+      return '<div class="stat-card">' + (icon ? '<span class="stat-ic ' + color + '">' + icon + '</span>' : '') + '<div class="stat-body"><span class="stat-label">' + esc(label) + '</span><div class="stat-value">' + esc(value) + '</div>' + (sub ? '<span class="chart-sub">' + esc(sub) + '</span>' : '') + '</div></div>';
+    }
+    // a % cell: the number plus a thin bar in the quota colours (width defaults to the value itself)
+    function miniBar(pct, width) {
+      const v = Math.round(pct);
+      return '<div class="mini"><div class="mini-bar"><i class="' + fillClass(v, false).replace('progress-bar-fill ', '') + '" style="width:' + Math.min(100, width === undefined ? v : width) + '%"></i></div><b>' + v + '%</b></div>';
     }
     function legendHtml(items) { return items.map(it => '<span><i style="background:' + it[1] + '"></i>' + esc(it[0]) + '</span>').join(''); }
 
@@ -1032,52 +1206,84 @@ export function renderDashboardHtml() {
         return;
       }
       legend.innerHTML = series.length > 1 ? legendHtml(series.map(s => [s.name, s.color])) : '';
-      const W = 860, H = 280, L = 40, R = 110, T = 14, B = 30;
+      const W = 860, H = 280, L = 40, R = 135, T = 14, B = 30;
       let t0 = Infinity, t1 = -Infinity;
       series.forEach(s => s.pts.forEach(p => { t0 = Math.min(t0, p.t); t1 = Math.max(t1, p.t); }));
       if (t1 - t0 < 60000) { t0 -= 1800000; t1 += 1800000; }
       const X = t => L + (t - t0) / (t1 - t0) * (W - L - R);
       const Y = v => T + (1 - Math.min(100, Math.max(0, v)) / 100) * (H - T - B);
-      let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Mức dùng quota theo thời gian">';
+      const limit = field === 'util5h' ? (appData.auto.threshold || 95) : (appData.auto.safeguardThreshold || 85);
+      let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Mức dùng quota theo thời gian"><defs>';
+      series.forEach((s, i) => {
+        svg += '<linearGradient id="ug' + i + '" x1="0" x2="0" y1="0" y2="1"><stop offset="0" style="stop-color:' + s.color + ';stop-opacity:' + (series.length > 3 ? 0.12 : 0.24) + '"/><stop offset="1" style="stop-color:' + s.color + ';stop-opacity:0"/></linearGradient>';
+      });
+      svg += '</defs>';
+      // the band above the limit: where auto-switch (5h) or the safeguard (7d) kicks in
+      svg += '<rect x="' + L + '" y="' + Y(100) + '" width="' + (W - L - R) + '" height="' + (Y(limit) - Y(100)) + '" fill="rgba(239,68,68,0.07)"/>';
       [0, 25, 50, 75, 100].forEach(v => {
-        svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(v) + '" y2="' + Y(v) + '" stroke="var(--grid)" stroke-width="1"/>';
+        svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(v) + '" y2="' + Y(v) + '" stroke="var(--grid)" stroke-width="1"' + (v ? ' stroke-dasharray="2 4"' : '') + '/>';
         svg += '<text x="' + (L - 6) + '" y="' + (Y(v) + 4) + '" text-anchor="end">' + v + '%</text>';
       });
       for (let i = 0; i < 4; i++) {
         const t = t0 + (t1 - t0) * i / 3;
         svg += '<text x="' + X(t) + '" y="' + (H - 8) + '" text-anchor="' + (i === 0 ? 'start' : i === 3 ? 'end' : 'middle') + '">' + fmtTime(t) + '</text>';
       }
-      const limit = field === 'util5h' ? (appData.auto.threshold || 95) : (appData.auto.safeguardThreshold || 85);
-      svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(limit) + '" y2="' + Y(limit) + '" stroke="#94a3b8" stroke-width="1" stroke-dasharray="4 4"/>';
-      svg += '<text x="' + (W - R + 6) + '" y="' + (Y(limit) + 4) + '">' + (field === 'util5h' ? 'ngưỡng ' : 'safeguard ') + limit + '%</text>';
-      series.forEach(s => {
-        const d = s.pts.map((p, i) => (i ? 'L' : 'M') + X(p.t).toFixed(1) + ' ' + Y(p.v).toFixed(1)).join(' ');
-        svg += '<path d="' + d + '" fill="none" stroke="' + s.color + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
-        if (s.pts.length < 12) s.pts.forEach(p => { svg += '<circle cx="' + X(p.t) + '" cy="' + Y(p.v) + '" r="4" fill="' + s.color + '" stroke="var(--card-bg)" stroke-width="2"/>'; });
+      svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(limit) + '" y2="' + Y(limit) + '" stroke="#f87171" stroke-opacity="0.6" stroke-width="1" stroke-dasharray="4 4"/>';
+      svg += '<text x="' + (W - R + 6) + '" y="' + (Y(limit) + 4) + '" style="fill:#fca5a5">' + (field === 'util5h' ? 'ngưỡng ' : 'safeguard ') + limit + '%</text>';
+      series.forEach((s, i) => {
+        const xy = s.pts.map(p => [X(p.t), Y(p.v)]);
+        const d = smoothPath(xy);
+        if (xy.length > 1) svg += '<path class="fade-in" d="' + d + ' L' + xy[xy.length - 1][0].toFixed(1) + ' ' + Y(0) + ' L' + xy[0][0].toFixed(1) + ' ' + Y(0) + ' Z" fill="url(#ug' + i + ')"/>';
+        svg += '<path class="draw" pathLength="1" d="' + d + '" fill="none" stroke="' + s.color + '" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>';
+        if (s.pts.length < 12) s.pts.forEach(p => { svg += '<circle class="fade-in" cx="' + X(p.t) + '" cy="' + Y(p.v) + '" r="3.5" fill="' + s.color + '" stroke="var(--card-bg)" stroke-width="2"/>'; });
       });
       if (series.length <= 4) {
         const ends = series.map(s => { const p = s.pts[s.pts.length - 1]; return { s, x: X(p.t), y: Y(p.v), v: p.v }; }).sort((a, b) => a.y - b.y);
         for (let i = 1; i < ends.length; i++) if (ends[i].y - ends[i - 1].y < 14) ends[i].y = ends[i - 1].y + 14;
-        ends.forEach(e => { svg += '<text x="' + (W - R + 6) + '" y="' + (e.y + 4) + '" style="fill:#e5e7eb">' + esc(e.s.name) + ' ' + Math.round(e.v) + '%</text>'; });
+        ends.forEach(e => { svg += '<text x="' + (W - R + 6) + '" y="' + (e.y + 4) + '" style="fill:#e5e7eb;font-weight:600">' + esc(e.s.name) + ' ' + Math.round(e.v) + '%</text>'; });
       }
-      svg += '<line id="usage-cross" x1="0" x2="0" y1="' + T + '" y2="' + (H - B) + '" stroke="#94a3b8" stroke-width="1" visibility="hidden"/>';
+      svg += '<line id="usage-cross" x1="0" x2="0" y1="' + T + '" y2="' + (H - B) + '" stroke="#94a3b8" stroke-opacity="0.5" stroke-width="1" stroke-dasharray="3 3" visibility="hidden"/>';
+      series.forEach((s, i) => { svg += '<circle class="hover-dot" data-i="' + i + '" r="4.5" fill="' + s.color + '" stroke="#fff" stroke-width="1.5" visibility="hidden"/>'; });
       svg += '<rect x="' + L + '" y="' + T + '" width="' + (W - L - R) + '" height="' + (H - T - B) + '" fill="transparent"/>';
       svg += '</svg>';
       wrap.innerHTML = svg;
       const el = wrap.querySelector('svg');
       const cross = wrap.querySelector('#usage-cross');
+      const dots = [...wrap.querySelectorAll('.hover-dot')];
       attachTip(wrap, el, x => {
-        if (x === null || x < L || x > W - R) { cross.setAttribute('visibility', 'hidden'); return ''; }
+        if (x === null || x < L || x > W - R) { cross.setAttribute('visibility', 'hidden'); dots.forEach(c => c.setAttribute('visibility', 'hidden')); return ''; }
         const t = t0 + (x - L) / (W - L - R) * (t1 - t0);
         let best = null;
         series.forEach(s => s.pts.forEach(p => { if (!best || Math.abs(p.t - t) < Math.abs(best.t - t)) best = p; }));
         cross.setAttribute('x1', X(best.t)); cross.setAttribute('x2', X(best.t)); cross.setAttribute('visibility', 'visible');
-        const rows = series.map(s => {
+        const rows = series.map((s, i) => {
           const near = s.pts.reduce((a, p) => Math.abs(p.t - best.t) < Math.abs(a.t - best.t) ? p : a);
-          return Math.abs(near.t - best.t) <= 600000 ? '<div><i style="background:' + s.color + '"></i>' + esc(s.name) + ': <b>' + Math.round(near.v) + '%</b></div>' : '';
+          const hit = Math.abs(near.t - best.t) <= 600000;
+          dots[i].setAttribute('visibility', hit ? 'visible' : 'hidden');
+          if (hit) { dots[i].setAttribute('cx', X(near.t)); dots[i].setAttribute('cy', Y(near.v)); }
+          return hit ? '<div><i style="background:' + s.color + '"></i>' + esc(s.name) + ': <b>' + Math.round(near.v) + '%</b></div>' : '';
         }).join('');
         return '<div style="color:#94a3b8;margin-bottom:4px;">' + fmtTime(best.t) + '</div>' + rows;
       });
+    }
+
+    // monotone cubic (Fritsch-Carlson): smooth, and never bends past a measured value, so 0-100% stays in range
+    function smoothPath(pts) {
+      const f = v => v.toFixed(1);
+      const n = pts.length;
+      if (n < 3) return pts.map((p, i) => (i ? 'L' : 'M') + f(p[0]) + ' ' + f(p[1])).join(' ');
+      const dx = [], m = [], tg = [];
+      for (let i = 0; i < n - 1; i++) { dx[i] = pts[i + 1][0] - pts[i][0]; m[i] = dx[i] ? (pts[i + 1][1] - pts[i][1]) / dx[i] : 0; }
+      tg[0] = m[0]; tg[n - 1] = m[n - 2];
+      for (let i = 1; i < n - 1; i++) {
+        tg[i] = m[i - 1] * m[i] <= 0 ? 0 : 3 * (dx[i - 1] + dx[i]) / ((2 * dx[i] + dx[i - 1]) / m[i - 1] + (dx[i] + 2 * dx[i - 1]) / m[i]);
+      }
+      let d = 'M' + f(pts[0][0]) + ' ' + f(pts[0][1]);
+      for (let i = 0; i < n - 1; i++) {
+        const h = dx[i] / 3;
+        d += ' C' + f(pts[i][0] + h) + ' ' + f(pts[i][1] + h * tg[i]) + ' ' + f(pts[i + 1][0] - h) + ' ' + f(pts[i + 1][1] - h * tg[i + 1]) + ' ' + f(pts[i + 1][0]) + ' ' + f(pts[i + 1][1]);
+      }
+      return d;
     }
 
     function renderDailyChart(hist) {
@@ -1090,14 +1296,15 @@ export function renderDashboardHtml() {
       document.getElementById('daily-legend').innerHTML = legendHtml(TYPE_META.map(m => [m[1], m[2]]));
       const max = Math.max(0, ...days.map(d => d.manual + d.auto + d.project));
       if (!max) { wrap.innerHTML = '<div class="empty-state">Chưa có lần chuyển profile nào trong 14 ngày qua.</div>'; return; }
-      const W = 480, H = 240, L = 30, R = 8, T = 10, B = 26;
+      const W = 400, H = 240, L = 26, R = 6, T = 10, B = 26;
       const step = Math.max(1, Math.ceil(max / 4));
       const top = step * 4;
       const bw = (W - L - R) / days.length;
       const Y = v => T + (1 - v / top) * (H - T - B);
       let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Số lần chuyển profile mỗi ngày">';
+      svg += '<rect id="daily-hl" x="0" y="' + T + '" width="' + bw + '" height="' + (H - T - B) + '" rx="4" fill="rgba(255,255,255,0.05)" visibility="hidden"/>';
       for (let v = 0; v <= top; v += step) {
-        svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(v) + '" y2="' + Y(v) + '" stroke="var(--grid)"/>';
+        svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(v) + '" y2="' + Y(v) + '" stroke="var(--grid)"' + (v ? ' stroke-dasharray="2 4"' : '') + '/>';
         svg += '<text x="' + (L - 6) + '" y="' + (Y(v) + 4) + '" text-anchor="end">' + v + '</text>';
       }
       days.forEach((d, i) => {
@@ -1107,18 +1314,20 @@ export function renderDashboardHtml() {
           const v = d[m[0]];
           if (!v) return;
           const y0 = Y(acc), y1 = Y(acc + v);
-          svg += '<rect x="' + x + '" y="' + y1 + '" width="' + w + '" height="' + Math.max(1, y0 - y1 - (acc ? 2 : 0)) + '" rx="2" fill="' + m[2] + '"/>';
+          svg += '<rect class="grow" style="animation-delay:' + (i * 30) + 'ms" x="' + x + '" y="' + y1 + '" width="' + w + '" height="' + Math.max(1, y0 - y1 - (acc ? 2 : 0)) + '" rx="3" fill="' + m[2] + '"/>';
           acc += v;
         });
         if (i % 2 === 1 || days.length <= 7) svg += '<text x="' + (x + w / 2) + '" y="' + (H - 8) + '" text-anchor="middle">' + d.label + '</text>';
       });
       svg += '<rect x="' + L + '" y="' + T + '" width="' + (W - L - R) + '" height="' + (H - T - B) + '" fill="transparent"/></svg>';
       wrap.innerHTML = svg;
+      const hl = wrap.querySelector('#daily-hl');
       attachTip(wrap, wrap.querySelector('svg'), x => {
-        if (x === null) return '';
-        const i = Math.floor((x - L) / bw);
+        const i = x === null ? -1 : Math.floor((x - L) / bw);
         const d = days[i];
+        hl.setAttribute('visibility', d ? 'visible' : 'hidden');
         if (!d) return '';
+        hl.setAttribute('x', L + i * bw);
         return '<div style="color:#94a3b8;margin-bottom:4px;">' + d.label + '</div>' + TYPE_META.map(m => '<div><i style="background:' + m[2] + '"></i>' + m[1] + ': <b>' + d[m[0]] + '</b></div>').join('');
       });
     }
@@ -1130,11 +1339,12 @@ export function renderDashboardHtml() {
       const wrap = document.getElementById('dest-chart');
       if (!rows.length) { wrap.innerHTML = '<div class="empty-state">Chưa có dữ liệu.</div>'; return; }
       const max = rows[0][1];
-      wrap.innerHTML = rows.map(r =>
-        '<div style="display:grid;grid-template-columns:120px 1fr 40px;gap:10px;align-items:center;margin:8px 0;font-size:0.85rem;" title="' + esc(r[0]) + ': ' + r[1] + ' lần">' +
-        '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e5e7eb;">' + esc(r[0]) + '</span>' +
-        '<div style="background:var(--grid);height:12px;border-radius:4px;"><div style="width:' + (r[1] / max * 100) + '%;height:100%;border-radius:4px;background:' + SERIES[0] + ';"></div></div>' +
-        '<span style="color:#e5e7eb;text-align:right;">' + r[1] + '</span></div>'
+      wrap.innerHTML = rows.map((r, i) =>
+        '<div class="hbar-row" title="' + esc(r[0]) + ': ' + r[1] + ' lần">' +
+        '<span class="hbar-rank">#' + (i + 1) + '</span>' +
+        '<span class="hbar-name"><i style="background:' + profileColor(r[0]) + '"></i>' + esc(r[0]) + '</span>' +
+        '<div class="hbar-track"><i style="width:' + (r[1] / max * 100) + '%;background:' + profileColor(r[0]) + ';animation-delay:' + (i * 60) + 'ms"></i></div>' +
+        '<span class="hbar-val">' + r[1] + '</span></div>'
       ).join('');
     }
 
@@ -1155,11 +1365,11 @@ export function renderDashboardHtml() {
       });
       const top = Object.entries(dest).sort((a, b) => b[1] - a[1])[0];
       document.getElementById('stats-tiles').innerHTML =
-        tile('Tổng lượt chuyển', hist.length, hist.length >= 100 ? '100 lần gần nhất' : '') +
-        tile('7 ngày qua', week) +
-        tile('Thủ công / Tự động / Dự án', counts.manual + ' / ' + counts.auto + ' / ' + counts.project) +
-        tile('Hay dùng nhất', top ? top[0] : '-', top ? top[1] + ' lần' : '') +
-        ((appData.recovered || []).length ? tile('✅ Đã hồi quota', appData.recovered.join(', '), 'dùng lại được') : '');
+        tile('Tổng lượt chuyển', hist.length, hist.length >= 100 ? '100 lần gần nhất' : '', '🔀', 'c-blue') +
+        tile('7 ngày qua', week, '', '📅', 'c-violet') +
+        tile('Tay / Auto / Dự án', counts.manual + ' / ' + counts.auto + ' / ' + counts.project, '', '📊', 'c-amber') +
+        tile('Hay dùng nhất', top ? top[0] : '-', top ? top[1] + ' lần' : '', '⭐', 'c-pink') +
+        ((appData.recovered || []).length ? tile('Đã hồi quota', appData.recovered.join(', '), 'dùng lại được', '✅', 'c-green') : '');
 
       renderUsageChart();
       renderDailyChart(hist);
@@ -1171,33 +1381,35 @@ export function renderDashboardHtml() {
       // 7-day budget: the quota left spread over the hours until the reset, against the pace of the last 3 hours
       const weekCell = n => {
         const w = (appData.weekly || {})[n];
-        if (!w) return '<td style="color:#64748b;">-</td>';
+        if (!w) return '<td class="muted">-</td>';
         const over = w.rate !== null && w.rate > w.budget;
-        return '<td' + (over ? ' style="color:#f97316;"' : '') + '>' + (over ? '⚠ ' : '') + 'còn ' + Math.round(100 - w.pct) + '% → ≈' + perHour(w.budget) +
-          (w.rate !== null ? ' <span style="color:#94a3b8;">(đang ' + perHour(w.rate) + ')</span>' : '') + '</td>';
+        return '<td><span class="pill ' + (over ? 'pill-orange' : 'pill-blue') + '">' + (over ? '⚠ ' : '') + 'còn ' + Math.round(100 - w.pct) + '% → ≈' + perHour(w.budget) + '</span>' +
+          (w.rate !== null ? ' <span class="muted">đang ' + perHour(w.rate) + '</span>' : '') + '</td>';
       };
       document.getElementById('forecast-table').innerHTML = names.length
         ? '<thead><tr><th>Profile</th><th>Đang dùng</th><th>Tốc độ</th><th>Chạm ngưỡng</th><th>Ngân sách 7 ngày</th></tr></thead><tbody>' + names.map(n => {
             const f = fc[n];
-            if (!f.hasData) return '<tr><td>' + esc(n) + '</td><td colspan="3" style="color:#64748b;">' + esc(f.message) + '</td>' + weekCell(n) + '</tr>';
+            const who = '<td><span class="hbar-name"><i style="background:' + profileColor(n) + '"></i>' + esc(n) + '</span></td>';
+            if (!f.hasData) return '<tr>' + who + '<td colspan="3" class="muted">' + esc(f.message) + '</td>' + weekCell(n) + '</tr>';
             const eta = f.trend === 'increasing'
-              ? (f.minutesUntilThreshold <= 30 ? '🔴 ' : f.minutesUntilThreshold <= 60 ? '🟠 ' : '🟡 ') + '~' + f.minutesUntilThreshold + ' phút (' + fmtTime(f.estimatedTimestamp) + ')'
-              : '🟢 Ổn định';
-            return '<tr><td>' + esc(n) + '</td><td>' + Math.round(f.currentUtil) + '%</td><td>' + (f.burnRatePerHour > 0 ? '+' + f.burnRatePerHour + '%/giờ' : '0') + '</td><td>' + eta + '</td>' + weekCell(n) + '</tr>';
+              ? '<span class="pill ' + (f.minutesUntilThreshold <= 30 ? 'pill-red' : f.minutesUntilThreshold <= 60 ? 'pill-orange' : 'pill-yellow') + '">⏳ ~' + f.minutesUntilThreshold + ' phút</span> <span class="muted">' + fmtTime(f.estimatedTimestamp) + '</span>'
+              : '<span class="pill pill-green">✓ Ổn định</span>';
+            return '<tr>' + who + '<td>' + miniBar(f.currentUtil) + '</td><td>' + (f.burnRatePerHour > 0 ? '+' + f.burnRatePerHour + '%/giờ' : '<span class="muted">0</span>') + '</td><td>' + eta + '</td>' + weekCell(n) + '</tr>';
           }).join('') + '</tbody>'
         : '<tbody><tr><td class="empty-state">Chưa có profile nào.</td></tr></tbody>';
 
       const proj = appData.projectUsage || [];
+      const projMax = Math.max(1, ...proj.map(p => p.pct));
       document.getElementById('project-table').innerHTML = proj.length
         ? '<thead><tr><th>Dự án</th><th>% 5h đã dùng</th><th>Thư mục</th></tr></thead><tbody>' + proj.slice(0, 15).map(p =>
-            '<tr><td>' + esc(p.dir.split(/[\\\\/]/).pop()) + '</td><td>' + Math.round(p.pct) + '%</td><td style="color:#94a3b8;">' + esc(p.dir) + '</td></tr>'
+            '<tr><td>📁 ' + esc(p.dir.split(/[\\\\/]/).pop()) + '</td><td>' + miniBar(p.pct, p.pct / projMax * 100) + '</td><td class="muted">' + esc(p.dir) + '</td></tr>'
           ).join('') + '</tbody>'
         : '<tbody><tr><td class="empty-state">Chưa có dữ liệu. Số liệu dồn dần mỗi lần plugin đo quota khi bạn làm việc.</td></tr></tbody>';
 
-      const typeLabel = { auto: '🤖 Tự động', project: '📁 Dự án' };
+      const typeLabel = { auto: '<span class="pill pill-violet">🤖 Tự động</span>', project: '<span class="pill pill-green">📁 Dự án</span>' };
       document.getElementById('history-table').innerHTML = hist.length
         ? '<thead><tr><th>Thời gian</th><th>Kiểu</th><th>Từ</th><th>Sang</th><th>Lý do</th></tr></thead><tbody>' + hist.slice(0, 20).map(h =>
-            '<tr><td>' + fmtTime(h.timestamp) + '</td><td>' + (typeLabel[h.type] || '👤 Thủ công') + '</td><td>' + esc(h.from) + '</td><td>' + esc(h.to) + '</td><td style="color:#94a3b8;">' + esc(h.reason) + '</td></tr>'
+            '<tr><td class="muted">' + fmtTime(h.timestamp) + '</td><td>' + (typeLabel[h.type] || '<span class="pill pill-blue">👤 Thủ công</span>') + '</td><td>' + esc(h.from) + '</td><td><span class="hbar-name"><i style="background:' + profileColor(h.to) + '"></i>' + esc(h.to) + '</span></td><td class="muted">' + esc(h.reason) + '</td></tr>'
           ).join('') + '</tbody>'
         : '<tbody><tr><td class="empty-state">Chưa có lịch sử chuyển profile.</td></tr></tbody>';
     }
@@ -1218,7 +1430,7 @@ export function renderDashboardHtml() {
         ['Gỡ tag', ['untag'], [['profile', 'Profile'], ['text', 'Tag']]],
         ['Cho nghỉ auto-switch', ['disable'], [['profile', 'Profile']]],
         ['Cho đi làm lại', ['enable'], [['profile', 'Profile']]],
-        ['Nhập profile từ thư mục khác', ['import'], [['text', 'Đường dẫn thư mục'], ['flag', 'Ghi đè profile trùng tên', '--force']]],
+        ['Nhập profile từ thư mục khác', ['import'], [['dir', 'Đường dẫn thư mục'], ['flag', 'Ghi đè profile trùng tên', '--force']]],
       ]],
       ['🤖 Tự động & quota', [
         ['Thứ tự ưu tiên auto-switch', ['auto', 'order'], [['text', 'Danh sách, vd: work,personal']]],
@@ -1236,10 +1448,10 @@ export function renderDashboardHtml() {
         ['Đổi một cài đặt', ['settings', 'set'], [['text', 'Key (vd: auto.threshold)'], ['text', 'Giá trị']]],
       ]],
       ['📁 Dự án, nhánh Git & model', [
-        ['Gắn profile cho thư mục', ['bind'], [['profile', 'Profile'], ['text', 'Đường dẫn thư mục dự án']]],
-        ['Gỡ gắn thư mục', ['unbind'], [['text', 'Đường dẫn thư mục dự án']]],
-        ['Thư mục đang gắn profile nào?', ['bind', 'get'], [['text', 'Đường dẫn thư mục dự án']]],
-        ['Gắn profile theo nhánh Git', ['bind-branch'], [['text', 'Mẫu nhánh (vd: feat/*)'], ['profile', 'Profile'], ['text', 'Đường dẫn repo']]],
+        ['Gắn profile cho thư mục', ['bind'], [['profile', 'Profile'], ['dir', 'Đường dẫn thư mục dự án']]],
+        ['Gỡ gắn thư mục', ['unbind'], [['dir', 'Đường dẫn thư mục dự án']]],
+        ['Thư mục đang gắn profile nào?', ['bind', 'get'], [['dir', 'Đường dẫn thư mục dự án']]],
+        ['Gắn profile theo nhánh Git', ['bind-branch'], [['text', 'Mẫu nhánh (vd: feat/*)'], ['profile', 'Profile'], ['dir', 'Đường dẫn repo']]],
         ['Gỡ gắn nhánh Git', ['unbind-branch'], [['text', 'Mẫu nhánh (bỏ trống = tất cả)', '', true]]],
         ['Gán profile cho model', ['affinity'], [['choice', 'Model', ['opus', 'sonnet', 'haiku']], ['profile', 'Profile']]],
         ['Chuyển theo model', ['affinity', 'apply'], [['choice', 'Model', ['opus', 'sonnet', 'haiku']]]],
@@ -1253,13 +1465,13 @@ export function renderDashboardHtml() {
         ['Xóa ngân sách', ['budget', 'unset'], [['profile', 'Profile']]],
       ]],
       ['🔐 Sao lưu & đồng bộ', [
-        ['Xuất bản sao lưu mã hóa', ['export'], [['text', 'Đường dẫn đầy đủ, vd: /home/ban/backup.enc'], ['password', 'Mật khẩu']]],
-        ['Khôi phục từ file mã hóa', ['import-enc'], [['text', 'Đường dẫn đầy đủ tới file .enc'], ['password', 'Mật khẩu'], ['flag', 'Ghi đè profile trùng tên', '--force']]],
-        ['Chọn nơi đồng bộ', ['sync', 'setup'], [['text', 'Đường dẫn đầy đủ, vd: /mnt/drive/claude-sync.enc']]],
+        ['Xuất bản sao lưu mã hóa', ['export'], [['dir', 'Thư mục lưu bản sao lưu'], ['password', 'Mật khẩu']]],
+        ['Khôi phục từ file mã hóa', ['import-enc'], [['file', 'Đường dẫn đầy đủ tới file .enc'], ['password', 'Mật khẩu'], ['flag', 'Ghi đè profile trùng tên', '--force']]],
+        ['Chọn nơi đồng bộ', ['sync', 'setup'], [['dir', 'Thư mục đồng bộ, vd: thư mục Drive/MEGA']]],
         ['Trạng thái đồng bộ', ['sync'], []],
         ['Đẩy bản đồng bộ', ['sync', 'push'], [['password', 'Mật khẩu']]],
         ['Kéo bản đồng bộ', ['sync', 'pull'], [['password', 'Mật khẩu'], ['flag', 'Ghi đè profile trùng tên', '--force']]],
-        ['Xuất cấu hình không chứa token', ['share'], [['text', 'Đường dẫn đầy đủ (bỏ trống = in ra)', '', true]]],
+        ['Xuất cấu hình không chứa token', ['share'], [['save', 'Đường dẫn đầy đủ (bỏ trống = in ra)', '', true]]],
       ]],
       ['💻 Shell & công cụ', [
         ['Snippet cho shell prompt', ['prompt'], [['choice', 'Shell', ['starship', 'zsh', 'bash', 'tmux', 'powershell']]]],
@@ -1339,7 +1551,27 @@ export function renderDashboardHtml() {
       if (kind === 'profile') return '<select id="' + id + '" class="form-control feat-profile" aria-label="' + label + '"></select>';
       if (kind === 'choice') return '<select id="' + id + '" class="form-control" aria-label="' + label + '">' + f[2].map(o => '<option>' + esc(o) + '</option>').join('') + '</select>';
       const type = kind === 'password' ? 'password' : kind === 'number' ? 'number' : 'text';
+      if (PICK_LABEL[kind]) {
+        return '<div class="path-row"><input id="' + id + '" type="text" class="form-control" placeholder="' + label + '" aria-label="' + label + '" value="' + esc(f[2] || '') + '">' +
+          '<button type="button" class="btn btn-secondary btn-sm" title="' + PICK_LABEL[kind] + '" onclick="pickInto(' + "'" + id + "', '" + kind + "'" + ')">📁 Chọn</button></div>';
+      }
       return '<input id="' + id + '" type="' + type + '" class="form-control" placeholder="' + label + '" aria-label="' + label + '" value="' + esc(f[2] || '') + '"' + (type === 'password' ? ' autocomplete="off"' : '') + '>';
+    }
+
+    const PICK_LABEL = { dir: 'Chọn thư mục', file: 'Chọn file', save: 'Chọn nơi lưu file' };
+    async function pickInto(id, mode) {
+      try {
+        showToast('Đang mở hộp thoại chọn trên máy chạy dashboard...');
+        const res = await api('/api/action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'pick_path', mode })
+        });
+        const data = await res.json();
+        if (data.path) document.getElementById(id).value = data.path;
+      } catch (err) {
+        showToast('Lỗi: ' + err.message);
+      }
     }
 
     function renderFeatures() {
@@ -1408,6 +1640,53 @@ export function renderDashboardHtml() {
       c[2].forEach((f, fi) => { if (f[0] === 'password') document.getElementById('f' + gi + '-' + ci + '-' + fi).value = ''; });
     }
 
+    // what each setting does, shown by the ⓘ button; the short line next to it comes from swap.js SETTINGS
+    const HELP = {
+      'auto.enabled': 'Trước mỗi prompt, plugin kiểm tra quota của profile đang dùng. Khi chạm ngưỡng (auto.threshold) hoặc bị giới hạn 429, nó tự chuyển sang profile còn nhiều quota nhất. Tắt thì chỉ cảnh báo và gợi ý profile kế tiếp.',
+      'auto.threshold': '% quota 5 giờ của profile hiện tại mà khi đạt tới thì tự chuyển. Ví dụ 95: dùng tới 95% rồi đổi. Thấp hơn thì đổi sớm và chừa dư cho profile đó; cao hơn thì tận dụng gần hết.',
+      'auto.safeguard': 'Không chuyển sang profile có quota 7 ngày từ mức này trở lên, để khỏi đốt cạn hạn mức tuần của nó. 0 = không xét 7 ngày.',
+      'auto.step': 'Luân phiên theo lượt: mỗi profile được dùng thêm N% quota 5 giờ (tính từ lúc bắt đầu lượt), rồi nhường cho profile kế tiếp theo auto.order hoặc theo tên. Giúp dàn đều mức dùng. Khi bật, auto-return tạm ngưng. 0 = tắt.',
+      'auto.forecast': 'Dựa vào tốc độ tiêu thụ gần đây: nếu dự báo sẽ chạm ngưỡng trong N phút tới thì chuyển luôn, không đợi chạm. Số liệu cũ hơn 20 phút bị bỏ qua. 0 = tắt.',
+      'auto.confirm': 'Mỗi lần auto-switch định đổi profile, Claude Code hỏi Có/Không trước. Chọn Không thì lần đổi đó được hoãn 15 phút.',
+      'swap.guard': 'Đổi tài khoản áp dụng cho mọi session Claude trên máy. Khi bật: nếu session khác vừa dùng profile hiện tại trong 15 phút qua, lệnh đổi tay bị chặn (cần --force) và có cảnh báo. Tắt: đổi luôn. Auto-switch thì luôn đợi.',
+      'auto.return': 'Đang ở profile khác mà profile chính (auto.primary) đã hồi quota 5 giờ thì tự quay về profile chính.',
+      'auto.primary': 'Profile "nhà" mà auto.return quay về. Để trống = tự động.',
+      'auto.pool': 'Khi tự chuyển, chỉ chọn trong các profile mang tag này (gắn tag ở tab Tính năng). Trống hoặc "all" = mọi profile.',
+      'auto.order': 'Tên các profile cách nhau dấu phẩy, vd: work,personal,backup. Auto-switch thử theo thứ tự này thay vì chọn profile ít dùng nhất. Bị bỏ qua khi bật cân bằng tải.',
+      'balance': 'off: tắt. least-used: luôn chọn profile có % 5 giờ thấp nhất. round-robin: lần lượt sang profile kế tiếp theo tên. Khi bật, auto.order bị bỏ qua.',
+      'balance.pool': 'Chỉ cân bằng giữa các profile mang tag này. Trống hoặc "all" = mọi profile.',
+      'statusline': 'band: dải màu phía trên ô nhập của Claude Code (profile, % 5 giờ/7 ngày, giờ reset, nút đổi nhanh). line: một dòng chữ thường. off: ẩn.',
+      'notify': 'Hiện thông báo desktop của hệ điều hành mỗi khi profile được đổi, bằng tay hay tự động.',
+      'mask': 'Che email thành us***@domain.com trong /profile list, status line và dashboard. Hữu ích khi chia sẻ màn hình.',
+      'repair.auto': '6 giờ một lần, ở nền, chạy một lệnh claude rất nhỏ (model haiku) cho profile có token hết hạn để làm mới, khỏi phải /login lại.',
+      'update.auto': '6 giờ một lần, khi mở Claude Code, tự kiểm tra và cập nhật plugin claude-swap lên bản mới nhất.',
+      'lang': 'Ngôn ngữ thông báo của plugin: vi (Tiếng Việt) hoặc en (English).',
+      'webhook': 'Gửi cảnh báo ra ngoài: gần hết quota, khi tự đổi profile, khi một profile mất đăng nhập. Telegram: https://api.telegram.org/bot<TOKEN>/sendMessage?chat_id=<ID>. Discord/Slack: URL incoming webhook của kênh. Generic: URL bất kỳ nhận POST JSON.',
+    };
+    function infoBtn(key) {
+      return '<button type="button" class="info-btn" data-help="' + esc(key) + '" title="Giải thích ' + esc(key) + '" aria-label="Giải thích ' + esc(key) + '">ℹ</button>';
+    }
+    document.addEventListener('click', e => {
+      const pop = document.getElementById('help-pop');
+      const btn = e.target.closest && e.target.closest('.info-btn');
+      document.querySelectorAll('.info-btn[aria-expanded="true"]').forEach(b => b.setAttribute('aria-expanded', 'false'));
+      if (!btn) { if (!pop.contains(e.target)) pop.classList.remove('show'); return; }
+      e.preventDefault(); // a button inside a switch label must not flip the switch
+      if (pop.classList.contains('show') && pop.dataset.key === btn.dataset.help) { pop.classList.remove('show'); return; }
+      const key = btn.dataset.help;
+      pop.dataset.key = key;
+      pop.innerHTML = '<b>' + esc(key) + '</b>' + esc(HELP[key] || 'Chưa có giải thích.');
+      pop.classList.add('show');
+      btn.setAttribute('aria-expanded', 'true');
+      const r = btn.getBoundingClientRect();
+      const left = Math.max(8, Math.min(r.left - 12, window.innerWidth - pop.offsetWidth - 8));
+      const below = r.bottom + 8 + pop.offsetHeight < window.innerHeight;
+      pop.style.left = left + 'px';
+      pop.style.top = (below ? r.bottom + 8 : r.top - pop.offsetHeight - 8) + 'px';
+    });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') document.getElementById('help-pop').classList.remove('show'); });
+    document.addEventListener('scroll', () => document.getElementById('help-pop').classList.remove('show'), true);
+
     let settingsKey = '';
     function renderSettings() {
       // the 5s poll must not wipe what the user is typing: redraw only when the stored settings change
@@ -1459,7 +1738,7 @@ export function renderDashboardHtml() {
         } else {
           ctl = '<input class="form-control" type="' + (r.type === 'number' ? 'number' : 'text') + '" value="' + esc(r.value) + '" placeholder="—"' + attrs + '>';
         }
-        return '<div class="setting-row"><div><div class="ft">' + esc(r.key) + '</div><div class="fd">' + esc(r.desc) + '</div></div><div>' + ctl + '</div></div>';
+        return '<div class="setting-row"><div><div class="ft">' + esc(r.key) + ' ' + infoBtn(r.key) + '</div><div class="fd">' + esc(r.desc) + '</div></div><div>' + ctl + '</div></div>';
       }).join('');
     }
 
@@ -1494,12 +1773,12 @@ export function renderDashboardHtml() {
       cliToast(JSON.parse(el.dataset.args));
     }
 
-    async function doSwap(name) {
+    async function doSwap(name, force) {
       try {
         const res = await api('/api/action', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'swap', profile: name })
+          body: JSON.stringify({ action: 'swap', profile: name, force: !!force })
         });
         const data = await res.json();
         if (data.ok) {
@@ -1509,6 +1788,11 @@ export function renderDashboardHtml() {
           showToast('Lỗi: ' + data.error);
         }
       } catch (err) {
+        // matches the live-session refusal of swap.js runCliInner 'swap'
+        if (!force && /phiên khác đang dùng/.test(err.message)) {
+          if (confirm(err.message + ' Vẫn chuyển sang ' + name + '?')) doSwap(name, true);
+          return;
+        }
         showToast('Lỗi: ' + err.message);
       }
     }
@@ -1722,6 +2006,7 @@ export function renderDashboardHtml() {
       '🔖': '<path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/>',
       'ℹ': '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
       '▶': '<polygon points="6 3 20 12 6 21 6 3"/>',
+      '🗑': '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>',
       '📅': '<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/>',
     };
     const ICON_KEYS = Object.keys(ICONS).sort((a, b) => b.length - a.length);
@@ -1869,7 +2154,9 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
             // quota window, a login no profile holds (saved first), the only profile holding an account
             case 'swap':
             case 'delete': {
-              const ran = await runSwapCli(home, [action, String(body.profile ?? '')])
+              const args = [action, String(body.profile ?? '')]
+              if (action === 'swap' && body.force === true) args.push('--force')
+              const ran = await runSwapCli(home, args)
               res.writeHead(ran.code === 0 ? 200 : 400, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify(ran.code === 0 ? { ok: true, output: ran.output } : { error: ran.output.replace(/^❌ Lỗi:\s*/, '').trim() }))
               return
@@ -1935,6 +2222,12 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
               if (body.language) setLanguage(home, body.language)
               res.writeHead(200, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ ok: true }))
+              return
+            }
+            case 'pick_path': {
+              const picked = await pickPath(String(body.mode))
+              res.writeHead(200, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ ok: true, path: picked }))
               return
             }
             case 'cli': {

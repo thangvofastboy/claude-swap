@@ -170,7 +170,7 @@ import {
   verifyProfiles,
   importConfig,
 } from '../swap.js'
-import { startWebDashboard, getDashboardData, stopWebDashboard, runSwapCli } from '../web.js'
+import { startWebDashboard, getDashboardData, stopWebDashboard, runSwapCli, pickPath } from '../web.js'
 import net from 'node:net'
 import child_process from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -2830,6 +2830,9 @@ else if (a[0] === '-i') { const m = fs.readFileSync(0, 'utf-8').match(/-s "([^"]
     assert.match(raw, /^HTTP\/1\.1 400/)
     assert.equal((await fetch(`${dash.url}/api/data`, { headers: auth })).status, 200)
     assert.match((await runSwapCli(tmpHome, ['webhook', 'set', 'telegram', 'https://x'])).output, /không được phép/)
+    await assert.rejects(pickPath('nope'), /không hợp lệ/)
+    const badPick = await fetch(`${dash.url}/api/action`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...auth }, body: JSON.stringify({ action: 'pick_path', mode: 'nope' }) })
+    assert.notEqual(badPick.status, 200)
 
     // Verify GET /api/data
     const dataRes = await fetch(`${dash.url}/api/data`, { headers: auth })
@@ -2848,6 +2851,19 @@ else if (a[0] === '-i') { const m = fs.readFileSync(0, 'utf-8').match(/-s "([^"]
     })
     assert.equal(actRes.status, 200)
     assert.equal(currentProfile(tmpHome), 'web_b')
+    // a live session on the current profile refuses the swap; the confirm resends it with force
+    recordPresence(tmpHome, 'web_b', 'other-session')
+    const webSwap = (profile, force) => fetch(`${dash.url}/api/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...auth },
+      body: JSON.stringify({ action: 'swap', profile, force }),
+    })
+    assert.match((await (await webSwap('web_a', false)).json()).error, /phiên khác đang dùng/)
+    assert.equal((await webSwap('web_a', true)).status, 200)
+    assert.equal(currentProfile(tmpHome), 'web_a')
+    assert.equal((await webSwap('web_b', false)).status, 200) // no session is live on web_a
+    assert.equal(currentProfile(tmpHome), 'web_b')
+    fs.rmSync(path.join(tmpHome, '.config', 'claude-cli-profiles', '.presence.json'))
     assert.match(dash.url, /^http:\/\/127\.0\.0\.1:/)
 
     // stats tab data: the swap above is in the history, a usage snapshot shows up per profile
