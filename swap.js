@@ -6441,7 +6441,7 @@ async function runCliInner(argv, home) {
       case 'web':
       case 'dashboard': {
         const sub = filteredArgv[1]
-        const { startWebDashboard, stopWebDashboard, runningDashboard, openBrowser, dashboardUrl } = await import('./web.js')
+        const { startWebDashboard, stopWebDashboard, runningDashboard, dashboardUrl } = await import('./web.js')
         if (sub === 'stop') {
           const stopped = stopWebDashboard(home)
           console.log(stopped
@@ -6461,11 +6461,20 @@ async function runCliInner(argv, home) {
             ? `🌐 Web Dashboard running in background at: ${dashboardUrl(state)}`
             : `🌐 Web Dashboard đang chạy ngầm tại: ${dashboardUrl(state)}`)
 
-        const running = runningDashboard(home)
-        if (running && !filteredArgv.includes('--server')) {
-          announce({ port, ...running })
-          if (!noOpen) openBrowser(dashboardUrl({ port, ...running }))
-          return 0
+        // every `/profile web` restarts the server, so it always runs this install's code (an upgrade leaves the old
+        // one serving otherwise). Its token changes: tabs opened before need the new link.
+        const old = filteredArgv.includes('--server') ? null : runningDashboard(home)
+        if (old) {
+          stopWebDashboard(home)
+          // wait for it to free the port, or the new one moves to the next port
+          for (let i = 0; i < 30; i++) {
+            try {
+              process.kill(old.pid, 0)
+            } catch {
+              break
+            }
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100)
+          }
         }
 
         if (isDaemon) {
