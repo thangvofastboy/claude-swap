@@ -7,6 +7,8 @@ import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import {
   listProfiles,
+  profileExists,
+  SwapError,
   currentProfile,
   profileEmail,
   profileNote,
@@ -123,7 +125,7 @@ export function pickPath(mode, platform = process.platform) {
       execFile(tries[i][0], tries[i][1], { timeout: 10 * 60000, windowsHide: false }, (err, stdout, stderr) => {
         if (err?.code === 'ENOENT') return next(i + 1)
         // cancel exits non-zero and silent; a dialog that could not open (no display) says why on stderr
-        const why = String(stderr).trim().split('\n').filter(l => !/Gtk-WARNING|^\s*$/.test(l))[0]
+        const why = String(stderr).trim().split('\n').filter(l => !/Gtk-(WARNING|Message)|\(-128\)|^\s*$/.test(l))[0]
         if (err && why && !err.killed) return reject(new Error(`Không mở được hộp thoại chọn: ${why}`))
         resolve(err ? '' : String(stdout).trim())
       })
@@ -766,7 +768,7 @@ export function renderDashboardHtml() {
               </div>
               <div class="form-group">
                 <label class="form-label">Bảo vệ 7 ngày (%) <button type="button" class="info-btn" data-help="auto.safeguard" title="Giải thích auto.safeguard" aria-label="Giải thích auto.safeguard">ℹ</button></label>
-                <input type="number" id="cfg-auto-safeguard" class="form-control" min="50" max="95" value="85">
+                <input type="number" id="cfg-auto-safeguard" class="form-control" min="0" max="99" value="0">
               </div>
             </div>
             <label class="form-switch">
@@ -1078,7 +1080,7 @@ export function renderDashboardHtml() {
       const old = new Map([...container.children].map(c => [c.dataset.name, c]));
       const now = Date.now();
       appData.profiles.forEach((p, i) => {
-        const key = JSON.stringify([p.name, p.active, p.email, p.tags, p.aliases, p.disabled, p.quota5h === null, p.quota7d === null, p.cooldownSec > 0]);
+        const key = JSON.stringify([p.name, p.active, p.email, p.note, p.tags, p.aliases, p.disabled, p.quota5h === null, p.quota7d === null, p.cooldownSec > 0]);
         let card = old.get(p.name);
         old.delete(p.name);
         if (!card || card.dataset.key !== key) {
@@ -1227,14 +1229,15 @@ export function renderDashboardHtml() {
       if (t1 - t0 < 60000) { t0 -= 1800000; t1 += 1800000; }
       const X = t => L + (t - t0) / (t1 - t0) * (W - L - R);
       const Y = v => T + (1 - Math.min(100, Math.max(0, v)) / 100) * (H - T - B);
-      const limit = field === 'util5h' ? (appData.auto.threshold || 95) : (appData.auto.safeguardThreshold || 85);
+      const limit = field === 'util5h' ? (appData.auto.threshold || 95) : (appData.auto.safeguardThreshold || 0);
       let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="Mức dùng quota theo thời gian"><defs>';
       series.forEach((s, i) => {
         svg += '<linearGradient id="ug' + i + '" x1="0" x2="0" y1="0" y2="1"><stop offset="0" style="stop-color:' + s.color + ';stop-opacity:' + (series.length > 3 ? 0.12 : 0.24) + '"/><stop offset="1" style="stop-color:' + s.color + ';stop-opacity:0"/></linearGradient>';
       });
       svg += '</defs>';
       // the band above the limit: where auto-switch (5h) or the safeguard (7d) kicks in
-      svg += '<rect x="' + L + '" y="' + Y(100) + '" width="' + (W - L - R) + '" height="' + (Y(limit) - Y(100)) + '" fill="rgba(239,68,68,0.07)"/>';
+      // limit 0: the safeguard is off, so no band or line
+      if (limit) svg += '<rect x="' + L + '" y="' + Y(100) + '" width="' + (W - L - R) + '" height="' + (Y(limit) - Y(100)) + '" fill="rgba(239,68,68,0.07)"/>';
       [0, 25, 50, 75, 100].forEach(v => {
         svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(v) + '" y2="' + Y(v) + '" stroke="var(--grid)" stroke-width="1"' + (v ? ' stroke-dasharray="2 4"' : '') + '/>';
         svg += '<text x="' + (L - 6) + '" y="' + (Y(v) + 4) + '" text-anchor="end">' + v + '%</text>';
@@ -1243,8 +1246,8 @@ export function renderDashboardHtml() {
         const t = t0 + (t1 - t0) * i / 3;
         svg += '<text x="' + X(t) + '" y="' + (H - 8) + '" text-anchor="' + (i === 0 ? 'start' : i === 3 ? 'end' : 'middle') + '">' + fmtTime(t) + '</text>';
       }
-      svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(limit) + '" y2="' + Y(limit) + '" stroke="#f87171" stroke-opacity="0.6" stroke-width="1" stroke-dasharray="4 4"/>';
-      svg += '<text x="' + (W - R + 6) + '" y="' + (Y(limit) + 4) + '" style="fill:#fca5a5">' + (field === 'util5h' ? 'ngưỡng ' : 'safeguard ') + limit + '%</text>';
+      if (limit) svg += '<line x1="' + L + '" x2="' + (W - R) + '" y1="' + Y(limit) + '" y2="' + Y(limit) + '" stroke="#f87171" stroke-opacity="0.6" stroke-width="1" stroke-dasharray="4 4"/>';
+      if (limit) svg += '<text x="' + (W - R + 6) + '" y="' + (Y(limit) + 4) + '" style="fill:#fca5a5">' + (field === 'util5h' ? 'ngưỡng ' : 'safeguard ') + limit + '%</text>';
       series.forEach((s, i) => {
         const xy = s.pts.map(p => [X(p.t), Y(p.v)]);
         const d = smoothPath(xy);
@@ -1471,7 +1474,7 @@ export function renderDashboardHtml() {
         ['Gỡ gắn thư mục', ['unbind'], [['dir', 'Đường dẫn thư mục dự án']]],
         ['Thư mục đang gắn profile nào?', ['bind', 'get'], [['dir', 'Đường dẫn thư mục dự án']]],
         ['Gắn profile theo nhánh Git', ['bind-branch'], [['text', 'Mẫu nhánh (vd: feat/*)'], ['profile', 'Profile'], ['dir', 'Đường dẫn repo']]],
-        ['Gỡ gắn nhánh Git', ['unbind-branch'], [['text', 'Mẫu nhánh (bỏ trống = tất cả)', '', true]]],
+        ['Gỡ gắn nhánh Git', ['unbind-branch'], [['text', 'Mẫu nhánh (vd: feat/*)'], ['dir', 'Đường dẫn repo']]],
         ['Gán profile cho model', ['affinity'], [['choice', 'Model', ['opus', 'sonnet', 'haiku']], ['profile', 'Profile']]],
         ['Chuyển theo model', ['affinity', 'apply'], [['choice', 'Model', ['opus', 'sonnet', 'haiku']]]],
         ['Gỡ gán model', ['unaffinity'], [['choice', 'Model', ['opus', 'sonnet', 'haiku']]]],
@@ -1751,7 +1754,7 @@ export function renderDashboardHtml() {
       settingsKey = key;
       document.getElementById('cfg-auto-enabled').checked = Boolean(appData.auto.enabled);
       document.getElementById('cfg-auto-threshold').value = appData.auto.threshold || 95;
-      document.getElementById('cfg-auto-safeguard').value = appData.auto.safeguardThreshold || 85;
+      document.getElementById('cfg-auto-safeguard').value = appData.auto.safeguardThreshold ?? 0;
       document.getElementById('cfg-auto-return').checked = Boolean(appData.auto.autoReturn);
       document.getElementById('cfg-auto-pool').value = appData.auto.pool || 'all';
 
@@ -1868,17 +1871,22 @@ export function renderDashboardHtml() {
       }
     }
 
-    async function doDelete(name) {
-      if (!confirm('Bạn có chắc chắn muốn xóa profile ' + name + '?')) return;
+    async function doDelete(name, force) {
+      if (!force && !confirm('Bạn có chắc chắn muốn xóa profile ' + name + '?')) return;
       try {
         await api('/api/action', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'delete', profile: name })
+          body: JSON.stringify({ action: 'delete', profile: name, force: !!force })
         });
         showToast('Đã xóa profile: ' + name);
         loadData();
       } catch (err) {
+        // matches the only-profile-of-an-account refusal of swap.js runCliInner 'delete'
+        if (!force && /profile duy nhất giữ/.test(err.message)) {
+          if (confirm(err.message.replace(/ Thêm --force[^(]*/, ' ') + ' Vẫn xóa ' + name + '?')) doDelete(name, true);
+          return;
+        }
         showToast('Lỗi: ' + err.message);
       }
     }
@@ -1986,7 +1994,7 @@ export function renderDashboardHtml() {
       }).then(() => {
         showToast('Đã đổi ngôn ngữ sang: ' + next.toUpperCase());
         loadData();
-      });
+      }).catch(err => showToast('Lỗi: ' + err.message));
     }
 
     function filterDocs() {
@@ -2211,7 +2219,7 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
             case 'swap':
             case 'delete': {
               const args = [action, String(body.profile ?? '')]
-              if (action === 'swap' && body.force === true) args.push('--force')
+              if (body.force === true) args.push('--force')
               const ran = await runSwapCli(home, args)
               res.writeHead(ran.code === 0 ? 200 : 400, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify(ran.code === 0 ? { ok: true, output: ran.output } : { error: ran.output.replace(/^❌ Lỗi:\s*/, '').trim() }))
@@ -2258,6 +2266,10 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
               // switches, which cannot fail, come last.
               const a = body.auto
               const b = body.balance
+              // the primary is the one field another tab can invalidate (profile deleted): check it before any write
+              if (a && typeof a.primary === 'string' && a.primary && !profileExists(home, a.primary)) {
+                throw new SwapError(`Profile '${a.primary}' không tồn tại.`)
+              }
               if (a) {
                 setSetting(home, 'auto.threshold', String(a.threshold))
                 setSetting(home, 'auto.safeguard', String(a.safeguard || 0))

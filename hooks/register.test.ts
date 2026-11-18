@@ -708,6 +708,8 @@ test('/profile settings opens an editor; Save writes only the changed rows throu
   const closed: string[] = []
   on('ui.open', (_$, e) => (opened.push(e.id), { value: { isPlaced: true } }))
   on('ui.close', (_$, e) => (closed.push(e.id), { value: undefined }))
+  let panes: { id: string }[] = [{ id: 'settings' }]
+  on('ui.panes', () => ({ value: panes }))
   on('ui.invalidate', () => ({ value: undefined }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
@@ -726,6 +728,13 @@ test('/profile settings opens an editor; Save writes only the changed rows throu
   const sets = calls.filter(c => c[0] === 'settings' && c[1] === 'set').map(c => c.slice(2, 4))
   expect(sets).toEqual([['auto.enabled', 'on'], ['statusline', 'line'], ['auto.threshold', '90']])
   expect(closed).not.toContain('settings') // the pane stays: its other tabs are still in use
+
+  // Esc closed the pane (no event reaches the plugin): a later command no longer reloads its data
+  panes = []
+  calls.length = 0
+  await $.command.run({ command: 'profile', args: 'tag work x' })
+  await $.command.run({ command: 'profile', args: 'tag work y' })
+  expect(calls.filter(c => c[0] === 'panel')).toEqual([])
 })
 
 test('/profile settings pane: profiles tab swaps and disables, features tab removes an item, commands tab lists the help', async ($, on) => {
@@ -802,5 +811,6 @@ test('secrets typed into /profile go on stdin, never argv', () => {
   expect(secretToStdin(['webhook', 'set', 'telegram', 'https://api.telegram.org/botX/y'])).toEqual([['webhook', 'set', 'telegram', '--url-stdin'], 'https://api.telegram.org/botX/y'])
   expect(secretToStdin(['sync', 'push', '--password', 'pw', '--force'])).toEqual([['sync', 'push', '--password-stdin', '--force'], 'pw'])
   expect(secretToStdin(['add-token', 'sk-ant-x', 'me'])).toEqual([['add-token', '--token-stdin', 'me'], 'sk-ant-x'])
+  expect(secretToStdin(['add-token', '--force', '--email', 'a@b', 'sk-ant-x', 'me'])).toEqual([['add-token', '--token-stdin', '--force', '--email', 'a@b', 'me'], 'sk-ant-x'])
   expect(secretToStdin(['list'])).toEqual([['list'], undefined])
 })

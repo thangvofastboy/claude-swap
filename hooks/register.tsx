@@ -142,7 +142,11 @@ const SLOW = new Set(['repair', 'upgrade', 'autoupdate', 'sync', 'run'])
 
 // a secret typed into `/profile …` goes to swap.js on stdin: argv shows in `ps`
 export function secretToStdin(argv: string[]): [string[], string | undefined] {
-  if (argv[0] === 'add-token' && argv[1] && !argv[1].startsWith('--')) return [['add-token', '--token-stdin', ...argv.slice(2)], argv[1]]
+  if (argv[0] === 'add-token') {
+    // the token is the first positional word, wherever the flags (--force, --email x) sit
+    const t = argv.findIndex((a, i) => i > 0 && !a.startsWith('--') && argv[i - 1] !== '--email')
+    if (t !== -1) return [['add-token', '--token-stdin', ...argv.slice(1, t), ...argv.slice(t + 1)], argv[t]]
+  }
   if (argv[0] === 'webhook' && argv[1] === 'set' && argv[3] && /^https?:\/\//.test(argv[3])) {
     return [[...argv.slice(0, 3), '--url-stdin', ...argv.slice(4)], argv[3]]
   }
@@ -368,6 +372,12 @@ async function panelAction($: EngineInterface, argv: string[], stdin?: string): 
 // fresh pane data once the profile or a setting may have changed (an auto-swap, a /profile command); edits in progress stay
 async function reloadPanel($: EngineInterface) {
   if (!panel) return
+  // Esc closes the pane without telling the plugin: stop reloading once it is gone
+  const open = await $.ui.panes().then(ps => ps.some(p => p.id === 'settings'), () => true)
+  if (!open) {
+    panel = null
+    return
+  }
   await loadSettings($, true).catch(() => undefined)
   $.ui.invalidate('ui.render')
 }

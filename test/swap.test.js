@@ -418,7 +418,9 @@ describe('swap.js core functionality', () => {
     assert.equal(await runCli(['auto', 'threshold', 'invalid'], tmpHome), 1)
 
     // Set order
-    assert.equal(await runCli(['auto', 'order', 'p1,p2,p3'], tmpHome), 0)
+    assert.equal(await runCli(['auto', 'order', 'p1,p2,p3'], tmpHome), 1) // unknown names are refused, as in settings
+    assert.equal(await runCli(['auto', 'order', 'p1'], tmpHome), 0)
+    assert.deepEqual(loadAutoSwitchConfig(tmpHome).order, ['p1'])
 
     // Reset order
     assert.equal(await runCli(['auto', 'order', 'default'], tmpHome), 0)
@@ -789,6 +791,95 @@ describe('swap.js core functionality', () => {
     assert.equal(loadTempProfile(tmpHome), null) // but the loan is closed
     const auto = await autoCheckAndSwap(tmpHome, { config: { enabled: true, threshold: 95 }, cache: {} })
     assert.notEqual(auto.isTempRevert, true) // and auto check does not report a revert that never happened
+  })
+
+  const auditSetup = () => {
+    login(tmpHome, 'a', 'tok-a')
+    saveProfile(tmpHome, 'a')
+    login(tmpHome, 'b', 'tok-b')
+    saveProfile(tmpHome, 'b')
+  }
+
+  test('audit: temp keeps an unsaved login and reports no revert to a deleted profile', async () => {
+    auditSetup()
+    login(tmpHome, 'c', 'tok-c')
+    tempSwap(tmpHome, 'a', '10ms')
+    const saved = listProfiles(tmpHome).find(n => !['a', 'b'].includes(n))
+    assert.ok(saved, 'the unsaved login c was kept')
+    assert.equal(loadTempProfile(tmpHome).originalProfile, saved)
+    deleteProfile(tmpHome, saved, { purge: true })
+    await new Promise(r => setTimeout(r, 20))
+    assert.equal(checkTempExpiry(tmpHome).revertedTo, null)
+  })
+
+  test('audit: auto-return skips a primary without a token, but not one whose access token merely expired', async () => {
+    auditSetup()
+    login(tmpHome, 'dead', '')
+    saveProfile(tmpHome, 'dead')
+    const config = { enabled: true, threshold: 90, autoReturn: true }
+    swapProfile(tmpHome, 'b')
+    const res = await autoCheckAndSwap(tmpHome, { cache: {}, config: { ...config, primaryProfile: 'dead' } })
+    assert.notEqual(res.to, 'dead')
+    assert.equal(currentProfile(tmpHome), 'b')
+    // an idle primary's access token has expired: Claude Code renews it, so the return still happens
+    const f = path.join(tmpHome, '.config', 'claude-cli-profiles', 'a.json')
+    const p = JSON.parse(fs.readFileSync(f, 'utf-8'))
+    p.credentials = JSON.stringify({ claudeAiOauth: { accessToken: 'tok-a', refreshToken: 'r', expiresAt: Date.now() - 3600000 } })
+    fs.writeFileSync(f, JSON.stringify(p))
+    const back = await autoCheckAndSwap(tmpHome, { config: { ...config, primaryProfile: 'a' } })
+    assert.equal(back.to, 'a')
+  })
+
+  test('audit: import-enc keeps the numeric auto settings whose default is null', async () => {
+    auditSetup()
+    saveAutoSwitchConfig(tmpHome, { ...loadAutoSwitchConfig(tmpHome), step: 20, forecast: 30 })
+    const file = path.join(tmpHome, 'b.enc')
+    exportEncryptedProfiles(tmpHome, file, 'pw')
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'swap-imp-'))
+    try {
+      assert.equal(await runCli(['import-enc', file, '--password', 'pw'], other), 0)
+      assert.equal(loadAutoSwitchConfig(other).step, 20)
+      assert.equal(loadAutoSwitchConfig(other).forecast, 30)
+    } finally {
+      fs.rmSync(other, { recursive: true, force: true })
+    }
+  })
+
+  test('audit: undo keeps a login no profile holds', async () => {
+    auditSetup()
+    swapProfile(tmpHome, 'a')
+    login(tmpHome, 'u', 'tok-u')
+    assert.equal(await runCli(['undo'], tmpHome), 0)
+    const dir = path.join(tmpHome, '.config', 'claude-cli-profiles')
+    assert.ok(listProfiles(tmpHome).some(n => fs.readFileSync(path.join(dir, n + '.json'), 'utf-8').includes('tok-u')))
+  })
+
+  test('audit: add-token never takes a token as the name; --force trashes the old file and keeps its tags', async () => {
+    assert.equal(await runCli(['add-token', '--force', 'sk-ant-oat01-x', 'w'], tmpHome), 0)
+    assert.ok(listProfiles(tmpHome).includes('w'))
+    assert.ok(!listProfiles(tmpHome).some(n => n.startsWith('sk-')))
+    assert.equal(await runCli(['tag', 'w', 'corp'], tmpHome), 0)
+    assert.equal(await runCli(['add-token', 'sk-ant-oat01-y', 'w', '--force'], tmpHome), 0)
+    assert.deepEqual(getProfileTags(tmpHome, 'w'), ['corp'])
+    const trash = path.join(tmpHome, '.config', 'claude-cli-profiles', '.trash')
+    assert.equal(fs.readdirSync(trash).filter(f => f.startsWith('w.')).length, 1)
+  })
+
+  test('audit: a swap takes the cross-process lock, releases it, and breaks a stale one', () => {
+    auditSetup()
+    const lock = path.join(tmpHome, '.config', 'claude-cli-profiles', '.swap.lock')
+    fs.writeFileSync(lock, '')
+    const old = new Date(Date.now() - 60000)
+    fs.utimesSync(lock, old, old) // left by a process that died mid-swap
+    swapProfile(tmpHome, 'a')
+    assert.equal(currentProfile(tmpHome), 'a')
+    assert.ok(!fs.existsSync(lock))
+    assert.ok(!listProfiles(tmpHome).includes('.swap'))
+  })
+
+  test('audit: a webhook test that reaches nothing is an error, not a success', async () => {
+    saveWebhookConfig(tmpHome, { generic: 'http://127.0.0.1:9/hook' })
+    await assert.rejects(testWebhook(tmpHome), /Webhook lỗi: generic/)
   })
 
   test('help command and empty args display full command usage guide', async () => {
@@ -2996,6 +3087,16 @@ else if (a[0] === '-i') { const m = fs.readFileSync(0, 'utf-8').match(/-s "([^"]
     const after = JSON.parse(fs.readFileSync(cfgFile, 'utf-8'))
     assert.equal(after.threshold, 90)
     assert.ok(!('evil' in after))
+    // deleting the only profile of an account is refused; the confirm resends it with force
+    const webDelete = (force) => fetch(`${dash.url}/api/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...auth },
+      body: JSON.stringify({ action: 'delete', profile: 'web_a', force }),
+    })
+    assert.match((await (await webDelete(false)).json()).error, /profile duy nhất giữ/)
+    assert.ok(listProfiles(tmpHome).includes('web_a'))
+    assert.equal((await webDelete(true)).status, 200)
+    assert.ok(!listProfiles(tmpHome).includes('web_a'))
     } finally {
       dash.close() // a failed assertion must not leave the server holding the test process open
     }

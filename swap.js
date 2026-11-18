@@ -448,8 +448,50 @@ export function saveProfile(home, name, force = false) {
   return target
 }
 
+// One swap at a time across processes (several sessions' hooks, the dashboard, a shell). Between the credentials write
+// and the .claude.json write the two name different accounts; a second swap re-saving the live holder in that gap
+// would store one account's tokens under the other's profile.
+const SWAP_LOCK_WAIT_MS = 5000
+const SWAP_LOCK_STALE_MS = 30000
+let swapLockHeld = false
+
+function withSwapLock(home, fn) {
+  if (swapLockHeld) return fn() // re-entry from this process
+  const dir = profilesDir(home)
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const lock = path.join(dir, '.swap.lock')
+  const deadline = Date.now() + SWAP_LOCK_WAIT_MS
+  let fd
+  for (;;) {
+    try {
+      fd = fs.openSync(lock, 'wx', 0o600)
+      break
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err
+      try {
+        // a process that died holding it leaves the file behind
+        if (Date.now() - fs.statSync(lock).mtimeMs > SWAP_LOCK_STALE_MS) fs.rmSync(lock, { force: true })
+      } catch {}
+      if (Date.now() > deadline) throw new SwapError('Đang có lệnh chuyển tài khoản khác chạy, thử lại sau giây lát.')
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50)
+    }
+  }
+  swapLockHeld = true
+  try {
+    return fn()
+  } finally {
+    swapLockHeld = false
+    fs.closeSync(fd)
+    fs.rmSync(lock, { force: true })
+  }
+}
+
 export function swapProfile(home, name, options = {}) {
   if (autoHold) throw new HeldSwap(name, options.reason)
+  return withSwapLock(home, () => swapProfileLocked(home, name, options))
+}
+
+function swapProfileLocked(home, name, options) {
   const session = isolatedSession(home)
   if (session) {
     throw new SwapError(
@@ -1326,6 +1368,7 @@ export function importProfiles(home, folderPath, overwrite = false) {
     if (fs.existsSync(target) && !overwrite) {
       result.exists.push(name)
     } else {
+      if (fs.existsSync(target)) moveToTrash(home, name, target) // --force: the overwritten tokens stay recoverable
       atomicWrite(target, JSON.stringify(raw, null, 2))
       result.added.push(name)
     }
@@ -1367,6 +1410,7 @@ export function importProfiles(home, folderPath, overwrite = false) {
       result.exists.push(stem)
       continue
     }
+    if (fs.existsSync(target)) moveToTrash(home, stem, target)
     atomicWrite(target, JSON.stringify(data, null, 2))
     result.added.push(stem)
   }
@@ -2440,6 +2484,9 @@ export function tempSwap(home, nameOrAlias, durationStr) {
     throw new SwapError(`Profile '${name}' không tồn tại.`)
   }
   const durationMs = parseDuration(durationStr)
+  // a login no profile holds is saved first (it sets .current), so it is not lost and is what the borrow returns to
+  const unsaved = isolatedSession(home) ? '' : unsavedLogin(home)
+  if (unsaved) saveProfile(home, autoProfileName(home, unsaved))
   // a temp on top of a temp still returns to the profile before the first one
   // only while that temp is still in use: a manual swap since then makes the current profile the one to return to
   const cur = currentProfile(home) || ''
@@ -2507,9 +2554,22 @@ export function checkTempExpiry(home) {
     try {
       fs.unlinkSync(tempProfileFile(home))
     } catch {}
-    return { expired: true, revertedTo: stillBorrowed ? orig : null }
+    return { expired: true, revertedTo: stillBorrowed && orig && profileExists(home, orig) ? orig : null }
   }
   return { expired: false, remainingMs: state.expiresAt - Date.now(), state }
+}
+
+// no token, or the usage endpoint rejected it (401): the cache then reads 0% used, which must not count as room to swap
+// to. An expired access token (note "token đã hết hạn") is fine: Claude Code renews it after the swap.
+function loginRejected(home, name, hit) {
+  try {
+    const profile = JSON.parse(fs.readFileSync(profilePath(home, name), 'utf-8'))
+    if (profile.claude_json?.primaryApiKey) return false
+    const oauth = JSON.parse(profile.credentials || '{}').claudeAiOauth || {}
+    return !oauth.accessToken || /401/.test(hit.note || '')
+  } catch {
+    return true
+  }
 }
 
 export function findNextProfile(home, options = {}) {
@@ -2780,12 +2840,8 @@ async function autoCheckAndSwapNow(home, options = {}) {
   const branchBound = getBoundBranchProfile(home, process.cwd())
   if (branchBound && branchBound.profile !== cur) await refresh([branchBound.profile])
   const boundHit = branchBound ? cacheHit(home, cache, branchBound.profile) : {}
-  if (
-    branchBound &&
-    branchBound.profile !== cur &&
-    !isRateLimited(boundHit) &&
-    !isExhausted(boundHit, config)
-  ) {
+  const boundUsable = branchBound && !isRateLimited(boundHit) && !isExhausted(boundHit, config) && !loginRejected(home, branchBound.profile, boundHit)
+  if (boundUsable && branchBound.profile !== cur) {
     swapProfile(home, branchBound.profile, {
       type: 'project',
       reason: `Branch binding (${branchBound.branch})`,
@@ -2803,7 +2859,6 @@ async function autoCheckAndSwapNow(home, options = {}) {
 
   // Check auto-return to primary profile. Held off while a temp borrow runs (it would end the borrow at once) and while
   // a usable branch binding applies (the two would swap back and forth every prompt).
-  const boundUsable = branchBound && !isRateLimited(boundHit) && !isExhausted(boundHit, config)
   if (
     config.autoReturn &&
     !config.step && // the per-stint rotation would be undone by it on the next prompt
@@ -2817,7 +2872,12 @@ async function autoCheckAndSwapNow(home, options = {}) {
     const priHit = cacheHit(home, cache, config.primaryProfile)
     const priUtil = limitPct(priHit, LABEL_5H)
 
-    if (!isRateLimited(priHit) && !isExhausted(priHit, config)) {
+    if (
+      !isRateLimited(priHit) &&
+      !isExhausted(priHit, config) &&
+      !loadDisabledProfiles(home).includes(config.primaryProfile) &&
+      !loginRejected(home, config.primaryProfile, priHit)
+    ) {
       swapProfile(home, config.primaryProfile, {
         type: 'auto',
         reason: 'Quay về profile chính',
@@ -3150,8 +3210,8 @@ export function importEncryptedProfiles(home, sourcePath, password, overwrite = 
     const clean = Object.fromEntries(
       Object.entries(defaults).map(([k, v]) => {
         const got = auto[k]
-        // a null default (pool, primaryProfile) stands for an unset string
-        const ok = Array.isArray(v) ? Array.isArray(got) && got.every(n => typeof n === 'string') : v === null ? got === null || typeof got === 'string' : typeof got === typeof v || (k === 'safeguardThreshold' && got === null)
+        // a null default stands for unset: a string (pool, primaryProfile) or a number (step, forecast)
+        const ok = Array.isArray(v) ? Array.isArray(got) && got.every(n => typeof n === 'string') : v === null ? got === null || typeof got === (k === 'step' || k === 'forecast' ? 'number' : 'string') : typeof got === typeof v || (k === 'safeguardThreshold' && got === null)
         return [k, ok ? got : v]
       })
     )
@@ -3603,7 +3663,7 @@ export function undoSwap(home) {
   const last = loadSwapHistory(home).find(h => h.from && h.from !== '(none)' && profileExists(home, h.from))
   if (!last) throw new SwapError('Không có lần chuyển nào để hoàn tác.')
   if (last.from === cur) throw new SwapError(`Đang ở '${cur}' rồi, không có gì để hoàn tác.`)
-  swapProfile(home, last.from, { type: 'manual', reason: 'undo' })
+  swapProfile(home, last.from, { type: 'manual', reason: 'undo', saveUnsaved: true })
   return { from: cur, to: last.from }
 }
 
@@ -3619,11 +3679,11 @@ export async function interactivePickProfile(home, options = {}) {
   if (!process.stdin.isTTY || options.nonInteractive) {
     const nextIdx = profiles.indexOf(cur) + 1
     const target = profiles[nextIdx % profiles.length]
-    swapProfile(home, target, { type: 'manual', reason: 'Interactive pick (non-interactive)' })
+    swapProfile(home, target, { type: 'manual', reason: 'Interactive pick (non-interactive)', saveUnsaved: true })
     return { selected: target, nonInteractive: true }
   }
 
-  return new Promise(resolve => {
+  return new Promise((resolve, reject) => {
     let index = Math.max(0, profiles.indexOf(cur))
     const stdin = process.stdin
     const stdout = process.stdout
@@ -3667,7 +3727,12 @@ export async function interactivePickProfile(home, options = {}) {
         stdin.setRawMode(wasRaw)
         stdin.pause()
         const target = profiles[index]
-        swapProfile(home, target, { type: 'manual', reason: 'Interactive pick' })
+        try {
+          swapProfile(home, target, { type: 'manual', reason: 'Interactive pick', saveUnsaved: true })
+        } catch (err) {
+          reject(err) // a throw inside the 'data' listener would crash the process with a stack
+          return
+        }
         stdout.write(`\n✨ Đã chuyển sang: ${target}\n`)
         resolve({ selected: target })
         return
@@ -3925,7 +3990,7 @@ export function cleanupProfiles(home, options = {}) {
   const cleaned = []
   for (const c of analysis.corruptFiles) {
     try {
-      fs.unlinkSync(profilePath(home, c))
+      deleteProfile(home, c) // to the trash, and .current cleared, like any delete
       cleaned.push(c)
     } catch {}
   }
@@ -4049,15 +4114,24 @@ export function addTokenProfile(home = os.homedir(), token, name = null, options
     credentials = JSON.stringify({
       claudeAiOauth: {
         accessToken: trimmedToken,
-        expiresAt: Date.now() + 30 * 24 * 3600 * 1000,
+        expiresAt: Date.now() + 365 * 24 * 3600 * 1000, // `claude setup-token` issues a 1-year token
       },
     })
   }
 
+  // --force: the old file goes to the trash (its refresh token stays recoverable), its tags and note carry over
+  let old = {}
+  if (fs.existsSync(target)) {
+    try {
+      old = JSON.parse(fs.readFileSync(target, 'utf-8'))
+    } catch {}
+    moveToTrash(home, profileName, target)
+  }
   const profile = {
     claude_json: auth,
     credentials,
-    tags: options.tag ? [options.tag] : [],
+    tags: Array.isArray(old.tags) ? old.tags : [],
+    ...(old.note ? { note: old.note } : {}),
   }
 
   atomicWrite(target, JSON.stringify(profile, null, 2))
@@ -4105,7 +4179,7 @@ export function prepareSession(home = os.homedir(), name) {
   fs.mkdirSync(sDir, { recursive: true, mode: 0o700 })
   atomicWrite(currentFileFor(home, sDir), resolved)
 
-  const pData = JSON.parse(fs.readFileSync(profilePath(home, resolved), 'utf-8'))
+  const pData = readProfileFile(profilePath(home, resolved), resolved)
   const cj = path.join(sDir, '.claude.json')
   const baseClaudeJson = fs.existsSync(claudeJson(home)) ? loadClaudeJson(home) : {}
   const sessionData = { ...baseClaudeJson }
@@ -4434,20 +4508,26 @@ export function maskUrl(url) {
   }
 }
 
-export async function sendWebhookNotification(home = os.homedir(), payload) {
-  if (payload?.event !== 'test' && silenced()) return // an explicit `webhook test` still sends
+// returns the types whose post failed (network error or HTTP >= 400). The reason is a code, never the error message:
+// a bad URL's message quotes the URL, which holds the secret
+export async function sendWebhookNotification(home = os.homedir(), payload, only = null) {
+  if (payload?.event !== 'test' && silenced()) return [] // an explicit `webhook test` still sends
   const cfg = loadWebhookConfig(home)
   const text = payload.text || `[claude-swap] ${payload.event || 'Swap Alert'}: ${payload.profile || 'Profile'} (${payload.reason || 'No reason'})`
   const discord = {
     embeds: [{ title: '🔀 claude-swap Notification', description: text, color: 0x3b82f6, timestamp: new Date().toISOString() }],
   }
   const targets = [
-    [cfg.telegram, { text }],
-    [cfg.discord, discord],
-    [cfg.slack, { text }],
-    [cfg.generic, payload],
-  ].filter(([url]) => url)
-  await Promise.allSettled(targets.map(([url, body]) => postHttpJson(url, body)))
+    ['telegram', cfg.telegram, { text }],
+    ['discord', cfg.discord, discord],
+    ['slack', cfg.slack, { text }],
+    ['generic', cfg.generic, payload],
+  ].filter(([type, url]) => url && (!only || only.includes(type)))
+  const results = await Promise.allSettled(targets.map(([, url, body]) => postHttpJson(url, body)))
+  return results.flatMap((r, i) => {
+    if (r.status === 'fulfilled' && r.value.status < 400) return []
+    return [`${targets[i][0]} (${r.status === 'fulfilled' ? `HTTP ${r.value.status}` : r.reason?.cause?.code || r.reason?.cause?.errors?.[0]?.code || r.reason?.name || 'error'})`]
+  })
 }
 
 // the text of the Monday webhook summary: each profile's quota now, the hungriest projects, last week's swaps
@@ -4539,13 +4619,15 @@ export async function testWebhook(home = os.homedir(), type = null) {
     throw new SwapError(lang === 'en' ? 'No webhooks configured yet.' : 'Chưa có webhook nào được cấu hình.')
   }
 
-  await sendWebhookNotification(home, {
+  const sent = targets.filter(k => cfg[k])
+  const failed = await sendWebhookNotification(home, {
     event: 'test',
     text: testMsg,
     profile: currentProfile(home) || 'default',
     reason: 'manual-test',
-  })
-  return targets.filter(k => cfg[k])
+  }, sent)
+  if (failed.length) throw new SwapError((lang === 'en' ? 'Webhook failed: ' : 'Webhook lỗi: ') + failed.join(', '))
+  return sent
 }
 
 // ---------------------------------------------------------------- budget tracker
@@ -5455,12 +5537,12 @@ async function runCliInner(argv, home) {
       case 'add-token': {
         // --token-stdin: the hook sends the token on stdin, so it never shows in `ps`
         const fromStdin = filteredArgv.includes('--token-stdin')
-        const words = filteredArgv.filter(a => a !== '--token-stdin')
-        const token = fromStdin ? fs.readFileSync(0, 'utf-8').trim() : words[1]
-        const nameArg = words[fromStdin ? 1 : 2]
-        const pName = nameArg && !nameArg.startsWith('--') ? nameArg : null
         const emailIdx = filteredArgv.indexOf('--email')
         const email = emailIdx !== -1 ? filteredArgv[emailIdx + 1] : null
+        // positionals only: a flag before the token must not turn the token into the profile name
+        const words = filteredArgv.slice(1).filter((a, i) => !a.startsWith('--') && i !== emailIdx)
+        const token = fromStdin ? fs.readFileSync(0, 'utf-8').trim() : words[0]
+        const pName = words[fromStdin ? 0 : 1] || null
         const force = filteredArgv.includes('--force')
         const res = addTokenProfile(home, token, pName, { email, force })
         console.log(
@@ -5836,9 +5918,8 @@ async function runCliInner(argv, home) {
             console.log('📋 Đã chuyển về quy tắc chọn profile tự động (nhiều token hơn, reset sớm hơn).')
             return 0
           }
-          const names = val.split(',').map(s => s.trim()).filter(Boolean)
-          cfg.order = names
-          saveAutoSwitchConfig(home, cfg)
+          // through the setting: aliases resolve, an unknown name is refused
+          const names = setSetting(home, 'auto.order', val).split(',')
           console.log(`📋 Đã đặt thứ tự chuyển profile: ${names.join(' ➔ ')}.`)
           return 0
         }
@@ -5936,12 +6017,8 @@ async function runCliInner(argv, home) {
             console.log(`⭐ Profile chính hiện tại: ${cfg.primaryProfile || '(chưa đặt)'}`)
             return 0
           }
-          if (!profileExists(home, name)) {
-            throw new SwapError(`Profile '${name}' không tồn tại.`)
-          }
-          cfg.primaryProfile = name
-          saveAutoSwitchConfig(home, cfg)
-          console.log(`⭐ Đã đặt profile chính cho auto-return: '${name}'.`)
+          const set = setSetting(home, 'auto.primary', name)
+          console.log(set ? `⭐ Đã đặt profile chính cho auto-return: '${set}'.` : '⭐ Đã bỏ profile chính.')
           return 0
         }
 
@@ -5963,12 +6040,7 @@ async function runCliInner(argv, home) {
             console.log('⚪ Đã TẮT bảo vệ hạn mức 7 ngày.')
             return 0
           }
-          const num = parseInt(val, 10)
-          if (isNaN(num) || num < 1 || num > 100) {
-            throw new SwapError('Ngưỡng bảo vệ 7 ngày không hợp lệ. Vui lòng nhập số từ 1 đến 100.')
-          }
-          cfg.safeguardThreshold = num
-          saveAutoSwitchConfig(home, cfg)
+          const num = setSetting(home, 'auto.safeguard', val) // "90abc" is refused, as for threshold
           console.log(`🚨 Đã đặt ngưỡng bảo vệ hạn mức 7 ngày: ${num}%.`)
           return 0
         }
@@ -6281,7 +6353,7 @@ async function runCliInner(argv, home) {
           return 0
         }
         if (sub === 'setup') {
-          const target = filteredArgv[2]
+          const target = filteredArgv.slice(2).find((a, i, arr) => !a.startsWith('--') && arr[i - 1] !== '--password')
           if (!target) throw new SwapError('Cú pháp: /profile sync setup <đường_dẫn_file>')
           const cfg = loadSyncConfig(home)
           cfg.targetPath = path.resolve(target)
@@ -6322,7 +6394,7 @@ async function runCliInner(argv, home) {
             console.log(`ℹ️ Không có profile nào được gán cho model '${model}'.`)
             return 0
           }
-          swapProfile(home, target, { type: 'manual', reason: `Affinity for ${model}` })
+          swapProfile(home, target, { type: 'manual', reason: `Affinity for ${model}`, saveUnsaved: true })
           console.log(`🧠 Đã chuyển sang profile '${target}' theo affinity model '${model}'.`)
           return 0
         }
