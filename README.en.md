@@ -364,6 +364,14 @@ Skills, agents, plugins, settings and memory live in `~/.claude/` and **belong t
 
 ---
 
+## 🆕 What's new in 0.10
+
+| Version | Highlights |
+| --- | --- |
+| **0.10.0** | `/profile login` gets a 1-year token via `claude setup-token`; the web dashboard covers every command (Codex/Antigravity/OpenCode, notes, restore, dedupe, language) with an accent-blind command search; secrets typed into `/profile` go on stdin; `/profile pick` no longer swaps past every check; the Git branch is read from `.git/HEAD`. |
+
+---
+
 ## 🆕 What's new in 0.5
 
 | Release | Highlights |

@@ -364,6 +364,14 @@ Skill, agent, plugin, settings và memory nằm trong `~/.claude/` nên **không
 
 ---
 
+## 🆕 Có gì mới ở dòng 0.10
+
+| Bản | Điểm chính |
+| --- | --- |
+| **0.10.0** | `/profile login` lấy token 1 năm qua `claude setup-token`; web dashboard có đủ lệnh (Codex/Antigravity/OpenCode, ghi chú, khôi phục, gộp trùng, ngôn ngữ) và ô tìm lệnh không dấu; secret gõ trong `/profile` đi qua stdin; `/profile pick` không còn đổi profile bỏ qua kiểm tra; đọc nhánh Git từ `.git/HEAD`. |
+
+---
+
 ## 🆕 Có gì mới ở dòng 0.5
 
 | Bản | Điểm chính |
