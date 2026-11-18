@@ -57,6 +57,7 @@ const SUBCOMMANDS = new Set([
   'enable',
   'disabled',
   'add-token',
+  'login',
   'run',
   'version',
   'upgrade',
@@ -139,6 +140,17 @@ let launcher = -1
 // commands that run `claude` themselves (repair, upgrade) or talk to a remote: past the 30 s default
 const SLOW = new Set(['repair', 'upgrade', 'autoupdate', 'sync', 'run'])
 
+// a secret typed into `/profile …` goes to swap.js on stdin: argv shows in `ps`
+export function secretToStdin(argv: string[]): [string[], string | undefined] {
+  if (argv[0] === 'add-token' && argv[1] && !argv[1].startsWith('--')) return [['add-token', '--token-stdin', ...argv.slice(2)], argv[1]]
+  if (argv[0] === 'webhook' && argv[1] === 'set' && argv[3] && /^https?:\/\//.test(argv[3])) {
+    return [[...argv.slice(0, 3), '--url-stdin', ...argv.slice(4)], argv[3]]
+  }
+  const i = argv.indexOf('--password')
+  if (i !== -1 && argv[i + 1] !== undefined) return [[...argv.slice(0, i), '--password-stdin', ...argv.slice(i + 2)], argv[i + 1]]
+  return [argv, undefined]
+}
+
 async function runSwap($: EngineInterface, argv: string[], stdin?: string) {
   // a swap must say which session asks, or swap.js counts this very session as "another one" on the profile
   if (argv[0] === 'swap' && !argv.includes('--session')) {
@@ -152,6 +164,9 @@ async function runSwap($: EngineInterface, argv: string[], stdin?: string) {
   // under another launcher would repeat its work. A quick one means this launcher could not start.
   const start = Date.now()
   const timedOut = () => Date.now() - start >= init.timeoutMs - 1000
+  // read once: parallel first calls (session.start runs several) must not see a launcher another call just found
+  // and give up on the candidates they still have to try
+  const known = launcher
   if (launcher <= 0) {
     try {
       const ran = await $.process.run(['node', script, ...argv], init)
@@ -159,7 +174,7 @@ async function runSwap($: EngineInterface, argv: string[], stdin?: string) {
       return ran
     } catch (error) {
       // a launcher that has worked once stays: rerunning a swap or add-token elsewhere would repeat its work
-      if (launcher >= 0 || timedOut()) throw error
+      if (known >= 0 || timedOut()) throw error
     }
   }
   const all = await nodeCandidates($, script, argv)
@@ -171,7 +186,7 @@ async function runSwap($: EngineInterface, argv: string[], stdin?: string) {
       launcher = i
       return ran
     } catch (error) {
-      if (launcher >= 0 || timedOut()) throw error
+      if (known >= 0 || timedOut()) throw error
       failure = error
     }
   }
@@ -230,7 +245,7 @@ function showStatus($: EngineInterface, raw: string) {
   lastRaw = raw
   status = parseStatus(raw)
   const suggest = status?.suggest || ''
-  if (suggest && status?.next !== lastSuggest) $.ui.toast(`⚠ ${status!.profile} sắp hết quota ${suggest}: /profile ${status!.next}`)
+  if (suggest && status?.next && status.next !== lastSuggest) $.ui.toast(`⚠ ${status!.profile} sắp hết quota ${suggest}: /profile ${status!.next}`)
   lastSuggest = suggest ? status!.next || '' : ''
   const recovered = status?.recovered || []
   for (const name of recovered) if (!lastRecovered.includes(name)) $.ui.toast(`✅ ${name} đã hồi quota: /profile ${name}`)
@@ -242,7 +257,9 @@ function showStatus($: EngineInterface, raw: string) {
 }
 
 async function refreshStatus($: EngineInterface) {
-  const { stdout } = await runSwap($, ['statusline', 'json'])
+  const { stdout, exitCode } = await runSwap($, ['statusline', 'json'])
+  // a failed run prints nothing: keep the band it would have wiped until the next good one
+  if (exitCode !== 0) return
   const raw = stdout.trim()
   if (raw !== lastRaw) showStatus($, raw)
 }
@@ -947,6 +964,14 @@ export const register: Register = on => {
     const argv = toArgv(e.args)
     if (!argv) return { text: USAGE }
     // an interactive `claude` has no terminal here: the hook only collects output
+    if (argv[0] === 'login') {
+      return {
+        text: `🔑 Token 1 năm (claude setup-token) cần terminal thật. Chạy:\n  node "${$.plugin.root}/swap.js" login ${argv[1] || '[tên]'}\nhoặc: claude setup-token → mở link, đăng nhập, rồi /profile add-token <token> [tên]`,
+      }
+    }
+    // `pick` without a TTY swapped straight to the next name, past every swap check: `swap` (no name) picks the
+    // next profile with all of them
+    if (argv[0] === 'pick') return { text: `Chọn bằng phím mũi tên trong terminal: node "${$.plugin.root}/swap.js" pick, hoặc /profile swap để sang profile kế tiếp` }
     if (argv[0] === 'run' && !argv.includes('--')) return { text: `Chạy trong terminal: node "${$.plugin.root}/swap.js" run ${argv[1] || '<tên>'}` }
 
     // bare `/profile settings` opens the editor; with arguments (`settings set k v`) it runs as any command
@@ -960,9 +985,10 @@ export const register: Register = on => {
 
     // bare `/profile`: the overview's data, for the render hook to draw in colour above the help
     // the token goes on stdin, not argv, where `ps` would show it
-    const token = argv[0] === 'add-token' && argv[1] && !argv[1].startsWith('--') ? argv[1] : undefined
+    // so do a webhook URL and a --password value
+    const [args, secret] = secretToStdin(argv)
     const [ran, ov] = await Promise.all([
-      token ? runSwap($, ['add-token', '--token-stdin', ...argv.slice(2)], token) : runSwap($, argv),
+      runSwap($, args, secret),
       argv.length === 1 && argv[0] === 'help' ? runSwap($, ['overview', '--json']).catch(() => null) : null,
     ])
     if (ov) {
@@ -972,7 +998,7 @@ export const register: Register = on => {
     }
     if (!READ_ONLY.has(argv[0]) || ran.exitCode !== 0) {
       await refreshStatus($).catch(() => undefined)
-      if (argv[0] !== 'settings') await reloadPanel($)
+      if (!(argv[0] === 'settings' && argv.length === 1)) await reloadPanel($)
     }
     const out = `${ran.stdout}${ran.stderr}`.trim()
     // the new version is only on disk: have the host re-read plugins once this command has returned

@@ -193,6 +193,7 @@ Phần này nghiêm túc hơn một chút, vì gõ sai lệnh thì không vui.
 | Lệnh | Mô tả |
 | --- | --- |
 | `/profile run <tên> [-- cmd]` | Mở thêm một Claude Code chạy tài khoản khác, song song mà không giẫm chân nhau. Dùng chung skill, agent, plugin, settings, memory |
+| `/profile login [tên]` | Mở link `claude setup-token` (cần terminal: `node swap.js login [tên]`), dán token 1 năm vừa nhận để lưu thành profile |
 | `/profile add-token <tok> [tên]` | Tạo profile thẳng từ setup-token hoặc API key, không cần trình duyệt |
 | `echo $TOK \| node swap.js add-token - [tên]` | Đưa token qua `stdin` để nó không nằm lại trong lịch sử shell |
 | `/profile upgrade` | Kéo bản mới nhất về và tự nạp lại, khỏi khởi động lại Claude Code |

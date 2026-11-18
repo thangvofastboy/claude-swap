@@ -1,3 +1,4 @@
+import { secretToStdin } from './register.tsx'
 import { expect, test } from 'claude-code/testing'
 
 const ok = (stdout: string) => ({
@@ -233,7 +234,7 @@ test('/profile dispatches advanced subcommands: bind, tag, notify, history, stat
     ['statusline', 'json'],
     ['history', '5'],
     ['stats'],
-    ['export', 'backup.enc', '--password', '123'],
+    ['export', 'backup.enc', '--password-stdin'], // the password goes on stdin
   ])
 })
 
@@ -287,8 +288,7 @@ test('/profile dispatches Batch 3 subcommands: alias, bind-branch, forecast, pic
     ['bind-branch', 'feat/*', 'work'],
     ['statusline', 'json'],
     ['forecast'],
-    ['pick'],
-    ['statusline', 'json'],
+    // pick: no TTY in the hook, answered with the terminal command, nothing spawned
     ['sync', 'push'],
     ['statusline', 'json'],
     ['affinity', 'opus', 'work'],
@@ -335,6 +335,8 @@ test('/profile dispatches new Batch 4 subcommands: disable, enable, disabled, ad
   await $.command.run({ command: 'profile', args: 'disabled' })
   await $.command.run({ command: 'profile', args: 'add-token sk-ant-api03-test my-api' })
   await $.command.run({ command: 'profile', args: 'run work -- claude -p hi' })
+  const login = await $.command.run({ command: 'profile', args: 'login work' })
+  expect(String(login.text)).toContain('swap.js" login work') // no TTY in the hook: no process spawned
 
   expect(calls).toEqual([
     ['disable', 'work'],
@@ -794,4 +796,11 @@ test('/profile settings features tab: the alias form adds what was typed; the we
   expect(hook?.argv.slice(0, 3)).toEqual(['webhook', 'set', 'telegram'])
   expect(hook?.argv.join(' ')).not.toContain('SECRET')
   expect(hook?.stdin).toBe('https://hooks.slack.com/services/SECRET')
+})
+
+test('secrets typed into /profile go on stdin, never argv', () => {
+  expect(secretToStdin(['webhook', 'set', 'telegram', 'https://api.telegram.org/botX/y'])).toEqual([['webhook', 'set', 'telegram', '--url-stdin'], 'https://api.telegram.org/botX/y'])
+  expect(secretToStdin(['sync', 'push', '--password', 'pw', '--force'])).toEqual([['sync', 'push', '--password-stdin', '--force'], 'pw'])
+  expect(secretToStdin(['add-token', 'sk-ant-x', 'me'])).toEqual([['add-token', '--token-stdin', 'me'], 'sk-ant-x'])
+  expect(secretToStdin(['list'])).toEqual([['list'], undefined])
 })

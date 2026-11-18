@@ -169,6 +169,9 @@ import {
   formatToolList,
   verifyProfiles,
   importConfig,
+  loginSetupToken,
+  hotWindow,
+  getCurrentGitBranch,
 } from '../swap.js'
 import { startWebDashboard, getDashboardData, stopWebDashboard, runSwapCli, pickPath } from '../web.js'
 import net from 'node:net'
@@ -1054,6 +1057,39 @@ describe('swap.js core functionality', () => {
     assert.equal(isProfileDisabled(tmpHome, 'p2'), false)
   })
 
+  test('loginSetupToken: runs claude setup-token, then saves the pasted token', async () => {
+    const calls = []
+    const spawn = (bin, args, opts) => (calls.push([bin, args, opts.stdio]), { status: 0 })
+    const res = await loginSetupToken(tmpHome, 'year-tok', { spawn, ask: async () => ' sk-ant-oat01-year \n' })
+    assert.deepEqual(calls, [['claude', ['setup-token'], 'inherit']])
+    assert.equal(res.type, 'oauth_token')
+    assert.match(JSON.parse(fs.readFileSync(res.path, 'utf-8')).credentials, /sk-ant-oat01-year/)
+    await assert.rejects(loginSetupToken(tmpHome, 'x', { spawn: () => ({ status: 1 }), ask: async () => 'tok' }))
+    await assert.rejects(loginSetupToken(tmpHome, 'x', { spawn, ask: async () => '  ' }))
+    assert.ok(!listProfiles(tmpHome).includes('x'))
+    await assert.rejects(loginSetupToken(tmpHome, 'x', { spawn: () => ({ status: null, signal: 'SIGTERM' }), ask: async () => 'sk-ant-oat01-z' }))
+    await assert.rejects(loginSetupToken(tmpHome, 'x', { spawn, ask: async () => '-' })) // never reads stdin
+    calls.length = 0 // a taken name is refused before the browser login
+    await assert.rejects(loginSetupToken(tmpHome, 'year-tok', { spawn, ask: async () => 'sk-ant-oat01-y' }), /đã tồn tại/)
+    assert.deepEqual(calls, [])
+  })
+
+  test('hotWindow compares the raw %, not the rounded one; git branch comes from .git/HEAD, worktrees too', () => {
+    assert.equal(hotWindow([{ name: '5h', pct: 80, raw: 79.6 }]), undefined)
+    assert.equal(hotWindow([{ name: '5h', pct: 80, raw: 80 }]).name, '5h')
+    const repo = path.join(tmpHome, 'repo')
+    fs.mkdirSync(path.join(repo, '.git'), { recursive: true })
+    fs.writeFileSync(path.join(repo, '.git', 'HEAD'), 'ref: refs/heads/feat/x\n')
+    fs.mkdirSync(path.join(repo, 'sub'))
+    assert.equal(getCurrentGitBranch(path.join(repo, 'sub')), 'feat/x')
+    const wt = path.join(tmpHome, 'wt')
+    fs.mkdirSync(path.join(repo, '.git', 'worktrees', 'wt'), { recursive: true })
+    fs.writeFileSync(path.join(repo, '.git', 'worktrees', 'wt', 'HEAD'), 'ref: refs/heads/hotfix\n')
+    fs.mkdirSync(wt)
+    fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${path.join(repo, '.git', 'worktrees', 'wt')}\n`)
+    assert.equal(getCurrentGitBranch(wt), 'hotfix')
+  })
+
   test('addTokenProfile: register from API key and OAuth token directly', async () => {
     // API key registration
     const apiRes = addTokenProfile(tmpHome, 'sk-ant-api03-secret-key-123', 'my-api-profile')
@@ -1454,6 +1490,10 @@ describe('swap.js core functionality', () => {
     assert.equal(await runCli(['save', 'nt', '--force'], tmpHome), 0)
     assert.equal(profileNote(tmpHome, 'nt'), 'cho project Y')
     assert.match(profileListReport(tmpHome, false), /📝 cho project Y/)
+    assert.equal(await runCli(['note', 'nt'], tmpHome), 0) // no text: shows, never wipes
+    assert.equal(profileNote(tmpHome, 'nt'), 'cho project Y')
+    assert.equal(await runCli(['note', '--clear', 'nt'], tmpHome), 0)
+    assert.equal(profileNote(tmpHome, 'nt'), '')
   })
 
   test('delete keeps a trash copy that restore brings back; the only copy of a login needs --force', async () => {
@@ -2880,6 +2920,10 @@ else if (a[0] === '-i') { const m = fs.readFileSync(0, 'utf-8').match(/-s "([^"]
     assert.equal(tagged.ok, true, tagged.output)
     assert.deepEqual(getProfileTags(tmpHome, 'web_a'), ['corp'])
     assert.equal((await cli(['run', 'web_a'])).ok, false) // interactive: CLI only
+    assert.equal((await cli(['login', 'web_a'])).ok, false) // needs a TTY: CLI only
+    assert.equal((await cli(['codex', 'list'])).ok, true)
+    assert.equal((await cli(['note', 'web_a', 'việc công ty'])).ok, true)
+    assert.match((await cli(['export-config'])).output, /việc công ty/)
     assert.equal((await cli(['export', 'x.enc', '--password', 'pw'])).ok, false) // never on argv
     const enc = path.join(tmpHome, 'web.enc')
     const exported = await cli(['export', enc], 'pw-web')

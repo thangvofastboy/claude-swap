@@ -193,6 +193,7 @@ This part is a bit more serious, because typos in commands aren't fun.
 | Command | Description |
 | --- | --- |
 | `/profile run <name> [-- cmd]` | Start another Claude Code on a different account, side by side, no toe-stepping. Shares skills, agents, plugins, settings, memory |
+| `/profile login [name]` | Run `claude setup-token` (needs a terminal: `node swap.js login [name]`), paste the 1-year token it prints, saved as a profile |
 | `/profile add-token <tok> [name]` | Create a profile straight from a setup-token or API key, no browser needed |
 | `echo $TOK \| node swap.js add-token - [name]` | Feed the token via `stdin` so it stays out of your shell history |
 | `/profile upgrade` | Pull the latest version and reload it, no restart needed |

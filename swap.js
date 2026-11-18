@@ -1573,7 +1573,8 @@ export async function profileUsage(
         : err.status
         ? `lỗi HTTP ${err.status}`
         : `lỗi mạng: ${err.message}`
-    cache[key] = { ...hit, at: now, note }
+    // `at` stays the time of the numbers kept: a failed look only moves `checked` (the TTL reads the newer)
+    cache[key] = { ...hit, checked: now, note }
     return { ...row, note }
   }
 }
@@ -2271,7 +2272,7 @@ function modelNote(home, cache, hit, cur) {
 
 // the fullest window at or past WARN_PCT, or undefined
 export function hotWindow(windows) {
-  return windows.filter(w => w.pct >= WARN_PCT).sort((a, b) => b.pct - a.pct)[0]
+  return windows.filter(w => (w.raw ?? w.pct) >= WARN_PCT).sort((a, b) => b.pct - a.pct)[0]
 }
 
 // With auto-switch off nothing moves you off a profile that is running out: name the one auto-switch would pick.
@@ -2291,7 +2292,10 @@ function quotaWindows(hit) {
   if (isRateLimited(hit)) return []
   return [[LABEL_5H, '5h'], [LABEL_7D, '7d']].flatMap(([label, name]) => {
     const lim = findLimit(hit, label)
-    return lim ? [{ name, pct: Math.round(Math.max(0, Math.min(Number(lim[1]) || 0, 100))), left: resetIn(hit, lim) }] : []
+    // `raw` decides hot vs not, as swapRisk does: the rounded 79.5 → 80 must not warn
+    if (!lim) return []
+    const raw = Math.max(0, Math.min(Number(lim[1]) || 0, 100))
+    return [{ name, pct: Math.round(raw), raw, left: resetIn(hit, lim) }]
   })
 }
 
@@ -2304,7 +2308,7 @@ export function statusLineData(home) {
   const hit = cacheHit(home, cache, cur)
   const windows = quotaWindows(hit)
   const suggestion = suggestNext(home, cache, windows)
-  const hot7d = windows.find(w => w.name === '7d' && w.pct >= WARN_PCT)
+  const hot7d = windows.find(w => w.name === '7d' && (w.raw ?? w.pct) >= WARN_PCT)
   const data = {
     profile: cur,
     rateLimited: isRateLimited(hit),
@@ -3253,7 +3257,32 @@ export function saveBranchBindings(home, bindings) {
   atomicWrite(f, JSON.stringify(bindings, null, 2))
 }
 
+// read .git/HEAD (a worktree's `.git` file points at its gitdir): this runs on every prompt inside a bound repo,
+// and a `git` spawn costs a fork. `git` only answers what the file read cannot (detached HEAD, odd layouts).
+function headBranch(dir) {
+  for (let d = path.resolve(dir); ; d = path.dirname(d)) {
+    const dotGit = path.join(d, '.git')
+    let st
+    try { st = fs.statSync(dotGit) } catch { st = null }
+    if (st) {
+      let gitDir = dotGit
+      if (st.isFile()) {
+        const m = /^gitdir:\s*(.+)$/m.exec(fs.readFileSync(dotGit, 'utf-8'))
+        if (!m) return null
+        gitDir = path.resolve(d, m[1].trim())
+      }
+      const m = /^ref: refs\/heads\/(.+)$/m.exec(fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf-8'))
+      return m ? m[1].trim() : null
+    }
+    if (path.dirname(d) === d) return null
+  }
+}
+
 export function getCurrentGitBranch(dir = process.cwd()) {
+  try {
+    const b = headBranch(dir)
+    if (b) return b
+  } catch {}
   try {
     return child_process
       .execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
@@ -3953,6 +3982,30 @@ export function isProfileDisabled(home = os.homedir(), name) {
 
 // ---------------------------------------------------------------- direct token / api key registration
 
+// `claude setup-token` opens the OAuth link and prints a 1-year token; it needs a real terminal (Ink), so this
+// runs it with inherited stdio, then asks for the printed token and saves it like `add-token`.
+export async function loginSetupToken(home = os.homedir(), name = null, options = {}) {
+  const spawn = options.spawn || spawnClaudeSync
+  const ask = options.ask || (async q => {
+    const rl = (await import('node:readline/promises')).createInterface({ input: process.stdin, output: process.stdout })
+    try { return await rl.question(q) } finally { rl.close() }
+  })
+  // refuse a bad or taken name before the browser login, not after: the token would be lost
+  if (name) {
+    checkName(name)
+    if (!options.force && fs.existsSync(profilePath(home, name))) {
+      throw new SwapError(`Profile '${name}' đã tồn tại. Thêm --force để ghi đè.`)
+    }
+  }
+  const res = spawn('claude', ['setup-token'], { stdio: 'inherit' })
+  if (res.error) throw new SwapError(`Không chạy được 'claude setup-token': ${res.error.message}`)
+  if (res.status !== 0) throw new SwapError(`'claude setup-token' dừng (${res.signal || `mã ${res.status}`})`)
+  const token = (await ask('🔑 Dán token vừa hiện (sk-ant-oat01-…): ')).trim()
+  // '-' would make addTokenProfile read stdin, which is the terminal here
+  if (!token.startsWith('sk-ant-')) throw new SwapError('Token không hợp lệ: cần bắt đầu bằng sk-ant-.')
+  return addTokenProfile(home, token, name, { force: options.force })
+}
+
 export function addTokenProfile(home = os.homedir(), token, name = null, options = {}) {
   let trimmedToken = (token || '').trim()
   if (trimmedToken === '-') {
@@ -4637,7 +4690,7 @@ export function exportSafeShare(home = os.homedir(), outputPath = null) {
 
 export function generateCompletion(shell = 'bash') {
   const subcommands = [
-    'list', 'swap', 'new', 'save', 'delete', 'usage', 'auto', 'run', 'add-token',
+    'list', 'swap', 'new', 'save', 'delete', 'usage', 'auto', 'run', 'add-token', 'login',
     'rename', 'disable', 'enable', 'disabled', 'upgrade', 'autoupdate', 'web', 'dashboard', 'balance',
     'webhook', 'budget', 'cost', 'mask', 'share', 'completion', 'alias', 'unalias', 'dedupe', 'note', 'restore', 'export-config', 'import-config', 'verify',
     'aliases', 'bind', 'unbind', 'bind-branch', 'unbind-branch', 'branch-bindings',
@@ -4791,6 +4844,7 @@ function helpText(color, lang) {
       `  ${cmd('/profile folder')}            Open profile config directory`,
       `  ${cmd('/profile lang [vi|en]')}      View or switch language (Vietnamese / English)`,
       `  ${cmd('/profile run <name> [-- cmd]')} Run isolated Claude Code session in parallel`,
+      `  ${cmd('/profile login [n]')}          Get a 1-year token via claude setup-token (terminal)`,
       `  ${cmd('/profile add-token <tok> [n]')} Register profile from setup-token or API key`,
       `  ${cmd('/profile upgrade')}            Update plugin to the latest release (auto-reloads; else /reload-plugins)`,
       `  ${cmd('/profile disable <name>')}     Exclude profile from auto-switch rotation`,
@@ -4892,6 +4946,7 @@ function helpText(color, lang) {
     `  ${cmd('/profile folder')}            Mở thư mục chứa file cấu hình profile`,
     `  ${cmd('/profile lang [vi|en]')}      Xem hoặc đổi ngôn ngữ (Tiếng Việt / English)`,
     `  ${cmd('/profile run <tên> [-- cmd]')} Chạy session Claude Code độc lập song song`,
+    `  ${cmd('/profile login [tên]')}        Lấy token 1 năm qua claude setup-token (terminal)`,
     `  ${cmd('/profile add-token <tok> [tên]')} Tạo profile từ setup-token hoặc API key`,
     `  ${cmd('/profile upgrade')}            Cập nhật plugin lên bản mới nhất (tự nạp lại; không thì /reload-plugins)`,
     `  ${cmd('/profile disable <tên>')}     Tạm dừng auto-switch đối với profile`,
@@ -5380,6 +5435,23 @@ async function runCliInner(argv, home) {
         }
         return 0
       }
+      case 'login': {
+        if (!process.stdin.isTTY) {
+          throw new SwapError(
+            lang === 'en'
+              ? 'login needs a terminal: run `node swap.js login [name]`, or `claude setup-token` then /profile add-token <tok> [name]'
+              : 'login cần terminal: chạy `node swap.js login [tên]`, hoặc `claude setup-token` rồi /profile add-token <tok> [tên]'
+          )
+        }
+        const nameArg = filteredArgv.slice(1).find(a => !a.startsWith('--')) || null
+        const res = await loginSetupToken(home, nameArg, { force: filteredArgv.includes('--force') })
+        console.log(
+          lang === 'en'
+            ? `🔑 Saved 1-year token as profile '${res.name}'.`
+            : `🔑 Đã lưu token 1 năm thành profile '${res.name}'.`
+        )
+        return 0
+      }
       case 'add-token': {
         // --token-stdin: the hook sends the token on stdin, so it never shows in `ps`
         const fromStdin = filteredArgv.includes('--token-stdin')
@@ -5588,12 +5660,18 @@ async function runCliInner(argv, home) {
         return 0
       }
       case 'note': {
-        const name = filteredArgv[1]
+        const clear = filteredArgv.includes('--clear')
+        const [, name, ...rest] = filteredArgv.filter(a => a !== '--clear')
         if (!name) throw new SwapError('Cú pháp: /profile note <tên> <nội dung> | --clear')
-        const text = filteredArgv.slice(2).join(' ')
+        const text = rest.join(' ')
         const target = resolveProfileOrAlias(home, name)
-        setProfileNote(home, target, filteredArgv.includes('--clear') ? '' : text)
-        console.log(text && !filteredArgv.includes('--clear') ? `📝 ${target}: ${text}` : `📝 Đã xoá ghi chú của '${target}'.`)
+        // no text and no --clear only shows the note: an empty run must not wipe it
+        if (!text && !clear) {
+          console.log(`📝 ${target}: ${profileNote(home, target) || '—'}`)
+          return 0
+        }
+        setProfileNote(home, target, clear ? '' : text)
+        console.log(clear ? `📝 Đã xoá ghi chú của '${target}'.` : `📝 ${target}: ${text}`)
         return 0
       }
       case 'delete': {

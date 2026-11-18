@@ -9,6 +9,7 @@ import {
   listProfiles,
   currentProfile,
   profileEmail,
+  profileNote,
   getProfileTags,
   loadDisabledProfiles,
   disableProfile,
@@ -51,7 +52,7 @@ const LOCAL_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '[::1]'])
 const MAX_BODY = 1024 * 1024
 const WEBHOOK_TYPES = ['telegram', 'discord', 'slack', 'generic']
 const SWAP_JS = fileURLToPath(new URL('./swap.js', import.meta.url))
-// subcommands the "All features" tab may run; interactive ones (run, pick, web) stay CLI-only
+// subcommands the "All features" tab may run; interactive ones (run, pick, web, login) stay CLI-only
 const WEB_CLI = new Set([
   'list', 'current', 'usage', 'swap', 'new', 'save', 'rename', 'delete', 'import', 'folder', 'version', 'upgrade',
   'dedupe', 'note', 'restore', 'export-config', 'verify',
@@ -60,6 +61,7 @@ const WEB_CLI = new Set([
   'bind', 'unbind', 'bind-branch', 'unbind-branch', 'branch-bindings',
   'affinity', 'unaffinity', 'affinities', 'notify', 'budget', 'webhook', 'mask', 'share',
   'export', 'import-enc', 'sync', 'history', 'undo', 'stats', 'statusline', 'prompt', 'completion', 'lang', 'repair', 'schedule', 'unschedule', 'settings',
+  'codex', 'agy', 'opencode',
 ])
 
 // Runs `node swap.js <args>` like the /profile hook does; a password goes on stdin, never argv
@@ -210,6 +212,7 @@ export function getDashboardData(home = os.homedir()) {
       active: name === cur,
       email: email || null,
       tags,
+      note: profileNote(home, name) || null,
       aliases: aliasList,
       disabled: disabled.includes(name),
       quota5h: quota.util5h,
@@ -350,6 +353,11 @@ export function renderDashboardHtml() {
     .c-green { background: rgba(16, 185, 129, 0.15); color: #6ee7b7; }
     .c-amber { background: rgba(245, 158, 11, 0.15); color: #fcd34d; }
     .c-pink { background: rgba(213, 81, 129, 0.15); color: #f49ac0; }
+    .pulse-dot.idle { background: var(--muted, #64748b); box-shadow: none; animation: none; }
+    .pc-note { font-size: 12px; opacity: .8; margin: 2px 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    [hidden] { display: none !important; }
+    .feat-search { width: 100%; margin-bottom: 14px; }
+    .feat-empty { opacity: .7; font-size: 13px; padding: 12px 0; }
     .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.18), 0 0 10px var(--success); animation: pulse 2s infinite; flex: none; }
     @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.45; } 100% { opacity: 1; } }
 
@@ -712,7 +720,9 @@ export function renderDashboardHtml() {
     <section id="tab-features" class="tab-content">
       <div class="feat-layout">
         <div class="feat-main">
-          <div class="feat-group">
+          <input type="search" id="feat-search" class="form-control feat-search" placeholder="🔎 Tìm lệnh: swap, token, webhook, codex… (phím /)" oninput="filterFeatures(this.value)" autocomplete="off">
+          <div class="feat-empty" id="feat-empty" hidden>Không có lệnh nào khớp.</div>
+          <div class="feat-group" id="quick-group">
             <h3>👀 Xem nhanh</h3>
             <div class="quick-row" id="quick-row"></div>
           </div>
@@ -901,6 +911,7 @@ export function renderDashboardHtml() {
                 <tr><td><span class="cmd-code">/profile statusline</span></td><td>Status line chi tiết (on/off, band = dải màu trên khung nhập, line = dòng chữ thường): thanh 5h/7d, giờ reset, cảnh báo sắp cạn</td></tr>
                 <tr><td><span class="cmd-code">/profile upgrade</span></td><td>Cập nhật plugin lên bản mới nhất và tự nạp lại</td></tr>
                 <tr><td><span class="cmd-code">/profile run &lt;tên&gt;</span></td><td>Chạy session Claude Code song song độc lập</td></tr>
+                <tr><td><span class="cmd-code">/profile login [tên]</span></td><td>Lấy token 1 năm qua <span class="cmd-code">claude setup-token</span> (chạy trong terminal)</td></tr>
                 <tr><td><span class="cmd-code">/profile add-token &lt;tok&gt;</span></td><td>Đăng ký profile trực tiếp từ setup-token hoặc API key</td></tr>
                 <tr><td><span class="cmd-code">/profile balance</span></td><td>Bật/tắt chế độ cân bằng tải Quota thông minh</td></tr>
                 <tr><td><span class="cmd-code">/profile webhook</span></td><td>Cấu hình thông báo Telegram, Discord, Slack</td></tr>
@@ -970,6 +981,7 @@ export function renderDashboardHtml() {
       <div class="form-group">
         <label class="form-label">Setup-Token hoặc API Key (Tùy chọn)</label>
         <textarea id="new-profile-token" class="form-control" rows="3" placeholder="Dán token bắt đầu bằng sessionKey... hoặc sk-ant-... (nếu để trống sẽ lưu tài khoản hiện tại)"></textarea>
+        <div style="font-size: 12px; opacity: .75; margin-top: 6px;">🔑 Token 1 năm: chạy <span class="cmd-code">claude setup-token</span> trong terminal, mở link, đăng nhập, rồi dán token <span class="cmd-code">sk-ant-oat01-…</span> vào đây. Hoặc <span class="cmd-code">node swap.js login [tên]</span> làm trọn gói.</div>
       </div>
       <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px;">
         <button class="btn btn-secondary" onclick="closeAddModal()">Hủy</button>
@@ -1054,6 +1066,8 @@ export function renderDashboardHtml() {
     function renderDashboard() {
       document.getElementById('stat-current').innerText = appData.current || '(chưa chọn)';
       document.getElementById('side-current').innerText = appData.current || '(chưa chọn)';
+      // green only while a profile is in use
+      document.querySelectorAll('.pulse-dot').forEach(d => d.classList.toggle('idle', !appData.current));
       document.getElementById('stat-total').innerText = appData.profiles.length;
       document.getElementById('stat-auto').innerText = appData.auto.enabled ? ('Bật (' + appData.auto.threshold + '%)') : 'Tắt';
       document.getElementById('stat-balance').innerText = appData.balance.enabled ? (appData.balance.mode) : 'Tắt';
@@ -1139,6 +1153,7 @@ export function renderDashboardHtml() {
             \${badge}
           </div>
           \${tagsHtml}
+          \${p.note ? '<div class="pc-note" title="Ghi chú (/profile note)">📝 ' + esc(p.note) + '</div>' : ''}
           <div class="quota-box">\${quotaHtml}\${cooldownHtml}</div>
           <div class="profile-actions">
             \${!p.active ? \`<button class="btn btn-sm" onclick="doSwap('\${name}')">🔀 Chuyển</button>\` : '<span class="in-use">✓ Đang sử dụng</span>'}
@@ -1431,6 +1446,10 @@ export function renderDashboardHtml() {
         ['Cho nghỉ auto-switch', ['disable'], [['profile', 'Profile']]],
         ['Cho đi làm lại', ['enable'], [['profile', 'Profile']]],
         ['Nhập profile từ thư mục khác', ['import'], [['dir', 'Đường dẫn thư mục'], ['flag', 'Ghi đè profile trùng tên', '--force']]],
+        ['Ghi chú cho profile', ['note'], [['profile', 'Profile'], ['text', 'Nội dung']]],
+        ['Xóa ghi chú', ['note', '--clear'], [['profile', 'Profile']], true],
+        ['Khôi phục profile đã xóa', ['restore'], [['text', 'Tên profile (trong thùng rác 7 ngày)']]],
+        ['Gộp profile trùng tài khoản', ['dedupe', '--apply'], [], true],
       ]],
       ['🤖 Tự động & quota', [
         ['Thứ tự ưu tiên auto-switch', ['auto', 'order'], [['text', 'Danh sách, vd: work,personal']]],
@@ -1480,6 +1499,14 @@ export function renderDashboardHtml() {
         ['Status line chi tiết', ['statusline'], [['choice', 'Trạng thái', ['on', 'off', 'toggle', 'line', 'band']]]],
         ['Cập nhật plugin', ['upgrade'], []],
         ['Mở thư mục profile', ['folder'], []],
+        ['Đổi ngôn ngữ', ['lang'], [['choice', 'Ngôn ngữ', ['vi', 'en']]]],
+      ]],
+      ['🧰 AI CLI khác (Codex, Antigravity, OpenCode)', [
+        ...[['codex', 'Codex'], ['agy', 'Antigravity'], ['opencode', 'OpenCode']].flatMap(t => [
+          ['Lưu tài khoản ' + t[1] + ' đang đăng nhập', [t[0], 'save'], [['text', 'Tên profile'], ['flag', 'Ghi đè', '--force']]],
+          ['Chuyển tài khoản ' + t[1], [t[0], 'use'], [['text', 'Tên profile'], ['flag', 'Bỏ qua login chưa lưu (cất vào thùng rác)', '--force']]],
+          ['Xóa profile ' + t[1], [t[0], 'delete'], [['text', 'Tên profile']], true],
+        ]),
       ]],
     ];
     // one plain-language (and slightly cheeky) line per card, keyed by its title
@@ -1536,12 +1563,19 @@ export function renderDashboardHtml() {
       'Status line chi tiết': 'Bật/tắt dòng trạng thái trong Claude Code: thanh 5h/7d, giờ reset, cảnh báo sắp cạn.',
       'Cập nhật plugin': 'Kéo bản mới nhất về. Plugin tự nạp lại sau khi cập nhật, khỏi khởi động lại Claude Code.',
       'Mở thư mục profile': 'Mở thư mục chứa profile. Ngó thì được, đừng sửa tay.',
+      'Ghi chú cho profile': 'Dán một dòng nhắc nhở lên profile, vd: "tài khoản công ty, đừng dùng cuối tuần".',
+      'Khôi phục profile đã xóa': 'Lôi profile ra khỏi thùng rác (giữ 7 ngày). Alias thì không theo về.',
+      'Gộp profile trùng tài khoản': 'Nhiều profile cùng một tài khoản? Giữ cái token mới nhất, gộp phần còn lại vào.',
+      'Xóa ghi chú': 'Bóc tờ giấy nhắc ra khỏi profile.',
+      'Đổi ngôn ngữ': 'Tiếng Việt hay English cho các thông báo của CLI.',
     };
     const QUICK = [['📋 Danh sách', ['list'], 'Điểm danh cả đội, kèm thanh quota.'], ['🟢 Đang dùng', ['current'], 'Mình đang là ai?'], ['📊 Usage', ['usage'], 'Quota 5h, 7d và từng model (lấy từ cache).'], ['🔄 Usage (làm mới)', ['usage', '--refresh'], 'Hỏi lại server số mới nhất. Đừng spam, server cũng biết mệt.'],
       ['📈 Dự báo', ['forecast'], 'Bói xem bao giờ cạn quota, dựa trên tốc độ tiêu thụ thật.'], ['⏱️ Cooldown', ['cooldown'], 'Đếm ngược tới lúc quota 5h hồi sức.'], ['🩺 Doctor', ['doctor'], 'Khám tổng quát: token, file cấu hình, kết nối.'], ['🧹 Cleanup (chỉ quét)', ['cleanup'], 'Tìm profile trùng hoặc hỏng. Chỉ nhìn, không xóa.'], ['🔧 Sửa token', ['repair'], 'Làm mới token hết hạn của các profile khác, không cần chuyển sang. Mất vài giây mỗi profile.'], ['⚙️ Cài đặt', ['settings'], 'Mọi cài đặt và giá trị hiện tại trong một bảng.'], ['🗓️ Lịch', ['schedule'], 'Các khung giờ tự đổi profile.'],
       ['📊 Thống kê', ['stats'], 'Đổi tay bao nhiêu lần, tự động bao nhiêu lần.'], ['🔤 Aliases', ['aliases'], 'Danh bạ biệt danh.'], ['🏷️ Tags', ['tags'], 'Ai thuộc nhóm nào.'], ['🚫 Đang nghỉ', ['disabled'], 'Danh sách profile đang nghỉ phép.'],
       ['🌿 Nhánh Git', ['branch-bindings'], 'Nhánh nào đi với tài khoản nào.'], ['🧠 Model', ['affinities'], 'Model nào đi với tài khoản nào.'], ['💰 Ngân sách', ['budget'], 'Trần chi tiêu hiện tại.'], ['🔔 Webhook', ['webhook'], 'Kênh báo nào đang bật.'],
-      ['⚖️ Cân bằng tải', ['balance'], 'Đang chia việc theo kiểu nào.'], ['🤖 Auto', ['auto'], 'Auto-switch đang cấu hình ra sao.'], ['🛡️ Che email', ['mask'], 'Email đang được che hay đang lộ mặt.'], ['💻 Statusline', ['statusline'], 'Chuỗi trạng thái gọn để nhét vào prompt.'], ['ℹ️ Phiên bản', ['version'], 'Đang chạy bản nào.']];
+      ['⚖️ Cân bằng tải', ['balance'], 'Đang chia việc theo kiểu nào.'], ['🤖 Auto', ['auto'], 'Auto-switch đang cấu hình ra sao.'], ['🛡️ Che email', ['mask'], 'Email đang được che hay đang lộ mặt.'], ['💻 Statusline', ['statusline'], 'Chuỗi trạng thái gọn để nhét vào prompt.'], ['ℹ️ Phiên bản', ['version'], 'Đang chạy bản nào.'],
+      ['✅ Kiểm tra đăng nhập', ['verify'], 'Hỏi server xem từng profile còn đăng nhập được không.'], ['🔍 Trùng tài khoản', ['dedupe'], 'Xem profile nào trùng tài khoản. Chỉ nhìn, chưa gộp.'], ['📤 Cấu hình (JSON)', ['export-config'], 'Alias, tag, ghi chú, auto-switch dạng JSON. Không có token.'], ['🌐 Ngôn ngữ', ['lang'], 'Đang nói tiếng gì.'],
+      ['🤖 Codex', ['codex'], 'Các tài khoản Codex đã lưu.'], ['🛰️ Antigravity', ['agy'], 'Các tài khoản Antigravity đã lưu.'], ['🧩 OpenCode', ['opencode'], 'Các tài khoản OpenCode đã lưu.']];
     let featuresBuilt = false;
     let featureProfiles = '';
 
@@ -1574,10 +1608,32 @@ export function renderDashboardHtml() {
       }
     }
 
+    // hides cards and quick buttons whose title, quip or command does not hold every typed word
+    function filterFeatures(q) {
+      // accent-blind: "token het han" finds "Làm mới token hết hạn"
+      const fold = t => t.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/đ/g, 'd');
+      const words = fold(q).split(' ').filter(Boolean);
+      const hit = text => { const t = fold(text); return words.every(w => t.includes(w)); };
+      let shown = 0;
+      document.querySelectorAll('#quick-row button').forEach(b => { const ok = hit(b.textContent + ' ' + b.title + ' ' + b.dataset.cmd); b.hidden = !ok; if (ok) shown++; });
+      document.getElementById('quick-group').hidden = !document.querySelector('#quick-row button:not([hidden])');
+      document.querySelectorAll('#features-container .feat-group').forEach(g => {
+        let any = false;
+        g.querySelectorAll('.feat-card').forEach(c => { const ok = hit(c.textContent); c.hidden = !ok; if (ok) { any = true; shown++; } });
+        g.hidden = !any;
+      });
+      document.getElementById('feat-empty').hidden = shown > 0;
+    }
+    document.addEventListener('keydown', e => {
+      const box = document.getElementById('feat-search');
+      if (e.key === '/' && box && box.offsetParent && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)) { e.preventDefault(); box.focus(); }
+      if (e.key === 'Escape' && document.activeElement === box) { box.value = ''; filterFeatures(''); box.blur(); }
+    });
+
     function renderFeatures() {
       if (!featuresBuilt) {
         featuresBuilt = true;
-        document.getElementById('quick-row').innerHTML = QUICK.map((q, i) => '<button class="btn btn-secondary btn-sm" title="' + esc(q[2]) + '" onclick="runQuick(' + i + ')">' + esc(q[0]) + '</button>').join('');
+        document.getElementById('quick-row').innerHTML = QUICK.map((q, i) => '<button class="btn btn-secondary btn-sm" title="' + esc(q[2]) + '" data-cmd="' + esc(q[1].join(' ')) + '" onclick="runQuick(' + i + ')">' + esc(q[0]) + '</button>').join('');
         document.getElementById('features-container').innerHTML = FEATURES.map((g, gi) =>
           '<div class="feat-group"><h3>' + esc(g[0]) + '</h3><div class="feat-grid">' + g[1].map((c, ci) => {
             const id = 'f' + gi + '-' + ci;
@@ -2175,6 +2231,12 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
             }
             case 'add_profile': {
               if (body.token) {
+                // '-' would make addTokenProfile read the server's stdin, which blocks it on a terminal
+                if (typeof body.token !== 'string' || body.token.trim() === '-') {
+                  res.writeHead(400, { 'Content-Type': 'application/json' })
+                  res.end(JSON.stringify({ error: 'Token không hợp lệ.' }))
+                  return
+                }
                 addTokenProfile(home, body.token, body.name)
               } else {
                 // through the CLI: an existing name is refused instead of silently overwritten
@@ -2192,19 +2254,22 @@ export async function startWebDashboard(home = os.homedir(), options = {}) {
             case 'save_config': {
               // each field goes through the setting it edits, with that setting's validation: no other key can be
               // written, and an empty number field is refused instead of stored as null (which turned auto-switch off).
-              // Numbers first, so a bad one fails before anything is saved.
-              if (body.auto) {
-                const a = body.auto
+              // Every field that can be refused goes first, so a bad one fails before anything is saved; the on/off
+              // switches, which cannot fail, come last.
+              const a = body.auto
+              const b = body.balance
+              if (a) {
                 setSetting(home, 'auto.threshold', String(a.threshold))
                 setSetting(home, 'auto.safeguard', String(a.safeguard || 0))
-                setSetting(home, 'auto.enabled', a.enabled === true ? 'on' : 'off')
-                setSetting(home, 'auto.return', a.autoReturn === true ? 'on' : 'off')
                 setSetting(home, 'auto.primary', typeof a.primary === 'string' ? a.primary : '')
                 setSetting(home, 'auto.pool', typeof a.pool === 'string' ? a.pool : '')
               }
-              if (body.balance) {
-                const b = body.balance
-                setSetting(home, 'balance', b.enabled === true ? String(b.mode) : 'off')
+              if (b) setSetting(home, 'balance', b.enabled === true ? String(b.mode || 'least-used') : 'off')
+              if (a) {
+                setSetting(home, 'auto.enabled', a.enabled === true ? 'on' : 'off')
+                setSetting(home, 'auto.return', a.autoReturn === true ? 'on' : 'off')
+              }
+              if (b) {
                 const pool = typeof b.pool === 'string' && b.pool.trim() ? b.pool.trim() : 'all'
                 saveBalanceConfig(home, { ...loadBalanceConfig(home), pool })
               }
